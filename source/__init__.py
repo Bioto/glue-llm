@@ -5,6 +5,13 @@ from source.api import (
     complete,
     structured_complete,
     ToolExecutionResult,
+    # Exceptions
+    LLMError,
+    TokenLimitError,
+    RateLimitError,
+    APIConnectionError,
+    InvalidRequestError,
+    AuthenticationError,
 )
 
 from source.models.config import RequestConfig
@@ -18,6 +25,14 @@ __all__ = [
     "structured_complete",
     "ToolExecutionResult",
     
+    # Exceptions
+    "LLMError",
+    "TokenLimitError",
+    "RateLimitError",
+    "APIConnectionError",
+    "InvalidRequestError",
+    "AuthenticationError",
+    
     # Models
     "RequestConfig",
     "Conversation",
@@ -28,4 +43,3 @@ __all__ = [
 ]
 
 __version__ = "0.1.0"
-
