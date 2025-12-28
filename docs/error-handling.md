@@ -52,15 +52,15 @@ try:
         model="openai:gpt-4o",
     )
     print(result.final_response)
-    
+
 except TokenLimitError as e:
     print(f"Input too long: {e}")
     # Reduce input size and retry
-    
+
 except RateLimitError as e:
     print(f"Rate limit exceeded after retries: {e}")
     # Wait longer or reduce request frequency
-    
+
 except AuthenticationError as e:
     print(f"Invalid API key: {e}")
     # Check your API credentials
@@ -80,7 +80,7 @@ client = GlueLLM(
 try:
     result = client.complete("Process this request")
     print(f"Success! Made {result.tool_calls_made} tool calls")
-    
+
 except LLMError as e:
     print(f"LLM error occurred: {e}")
     # Handle any LLM-related error
@@ -213,4 +213,3 @@ uv run pytest tests/ -v
 - All errors preserve the original exception in the chain (use `raise ... from e`)
 - Retry delays use exponential backoff to avoid overwhelming APIs
 - Connection errors include 502, 503, 504 HTTP status codes
-

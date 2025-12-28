@@ -63,7 +63,7 @@ from source.api import complete
 
 def get_weather(location: str, unit: str = "celsius") -> str:
     """Get the current weather for a location.
-    
+
     Args:
         location: City and country, e.g. "Tokyo, Japan"
         unit: Temperature unit ("celsius" or "fahrenheit")
@@ -405,11 +405,11 @@ for exec_info in result.tool_execution_history:
 ```python
 def good_tool(city: str, unit: str = "celsius") -> str:
     """Get weather for a city.
-    
+
     Args:
         city: The city name (e.g., "Tokyo")
         unit: Temperature unit ("celsius" or "fahrenheit")
-    
+
     Returns:
         Weather description string
     """
@@ -434,7 +434,7 @@ def good_tool(city: str, unit: str = "celsius") -> str:
 
 ```python
 system_prompt = """
-You are a weather assistant. 
+You are a weather assistant.
 Use the get_weather tool for current conditions.
 Use the get_forecast tool for future predictions.
 Always include temperature and conditions in your responses.
@@ -490,7 +490,7 @@ client = GlueLLM(tools=[tool1, tool2])
 
 for i, user_input in enumerate(user_inputs):
     result = client.complete(user_input)
-    
+
     # Reset every 10 turns to manage context
     if i % 10 == 0:
         client.reset_conversation()
@@ -552,4 +552,3 @@ See the main [README.md](../README.md) for contribution guidelines.
 ## License
 
 See [LICENSE](../LICENSE) for details.
-

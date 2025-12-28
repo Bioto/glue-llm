@@ -13,6 +13,7 @@ A high-level Python SDK for Large Language Models with automatic tool execution 
 - ⚡ **Automatic Retry with Exponential Backoff** - Smart retry logic for rate limits and connection issues
 - 🛡️ **Comprehensive Error Handling** - Catch and classify errors from any LLM provider
 - 📝 **Enhanced Logging** - Track retry attempts and tool execution errors
+- ⚙️ **Flexible Configuration** - Environment-based settings with pydantic-settings
 
 ## Quick Start
 
@@ -46,7 +47,7 @@ from source.api import complete
 
 def get_weather(location: str, unit: str = "celsius") -> str:
     """Get the current weather for a location.
-    
+
     Args:
         location: City and country, e.g. "Tokyo, Japan"
         unit: Temperature unit ("celsius" or "fahrenheit")
@@ -104,6 +105,8 @@ print(result2.final_response)  # Will reference blue
 
 ## Documentation
 
+- **[Getting Started](docs/GETTING_STARTED.md)** - Installation and basic setup
+- **[Configuration Guide](docs/CONFIGURATION.md)** - Environment-based configuration with pydantic-settings
 - **[Error Handling & Retry Logic](docs/error-handling.md)** - Comprehensive error handling guide
 - **[API Documentation](docs/API.md)** - Complete API reference and examples
 - **[Examples](examples/)** - More usage examples
@@ -223,4 +226,3 @@ docs/
 ## Credits
 
 Built on top of [any-llm-sdk](https://github.com/yourusername/any-llm-sdk) for multi-provider LLM support.
-
