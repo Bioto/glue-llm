@@ -1,4 +1,4 @@
-from typing import Annotated, Type, Callable
+from typing import Annotated, Type, Callable, Optional
 from pydantic import BaseModel, Field, PrivateAttr
 
 from source.models.prompt import Prompt
@@ -8,7 +8,7 @@ from source.models.conversation import Conversation, Role
 class RequestConfig(BaseModel):
     model: Annotated[str, Field(description="The model to use for the request provider:model_name")]
     system_prompt: Annotated[SystemPrompt, Field(description="The system prompt to use for the request")]
-    response_format: Annotated[Type[BaseModel], Field(description="The response format to use for the request")]
+    response_format: Annotated[Optional[Type[BaseModel]], Field(default=None, description="The response format to use for the request")]
     tools: Annotated[list[Callable], Field(description="The tools to use for the request")]
 
     _conversation: Conversation = PrivateAttr(default_factory=Conversation)

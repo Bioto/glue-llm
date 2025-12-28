@@ -10,6 +10,9 @@ A high-level Python SDK for Large Language Models with automatic tool execution 
 - 🛠️ **Multiple Tools** - Easy integration of multiple tools
 - 🎯 **Simple API** - Clean, intuitive interface for common LLM tasks
 - 🔌 **Provider Agnostic** - Built on `any-llm-sdk` for multi-provider support
+- ⚡ **Automatic Retry with Exponential Backoff** - Smart retry logic for rate limits and connection issues
+- 🛡️ **Comprehensive Error Handling** - Catch and classify errors from any LLM provider
+- 📝 **Enhanced Logging** - Track retry attempts and tool execution errors
 
 ## Quick Start
 
@@ -101,6 +104,7 @@ print(result2.final_response)  # Will reference blue
 
 ## Documentation
 
+- **[Error Handling & Retry Logic](docs/error-handling.md)** - Comprehensive error handling guide
 - **[API Documentation](docs/API.md)** - Complete API reference and examples
 - **[Examples](examples/)** - More usage examples
 - **[Tests](tests/)** - Test suite with usage patterns
