@@ -49,7 +49,7 @@ result = complete(
 ```python
 def my_tool(param: str) -> str:
     """Tool description.
-    
+
     Args:
         param: Parameter description
     """
@@ -229,7 +229,7 @@ client = GlueLLM()
 
 for i, message in enumerate(messages):
     result = client.complete(message)
-    
+
     # Reset every 10 messages to manage context
     if i % 10 == 0:
         client.reset_conversation()
@@ -329,7 +329,7 @@ while True:
     user_input = input("You: ")
     if user_input.lower() in ['quit', 'exit']:
         break
-    
+
     result = client.complete(user_input)
     print(f"Bot: {result.final_response}")
 ```
@@ -420,11 +420,11 @@ def tool(x):
 # ✅ Good
 def tool(location: str, unit: str = "celsius") -> str:
     """Get weather for a location.
-    
+
     Args:
         location: City and country, e.g. "Tokyo, Japan"
         unit: Temperature unit, "celsius" or "fahrenheit"
-    
+
     Returns:
         Weather description string
     """
@@ -529,7 +529,7 @@ if result.final_response:
     print(result.final_response)
 else:
     print("No response received")
-    
+
 # Check raw response
 print(result.raw_response.choices[0].message)
 ```
@@ -540,4 +540,3 @@ print(result.raw_response.choices[0].message)
 - [Getting Started Guide](GETTING_STARTED.md)
 - [Examples](../examples/)
 - [Tests](../tests/)
-

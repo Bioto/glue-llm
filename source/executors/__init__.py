@@ -1,46 +1,143 @@
-from typing import Callable
+"""Executor implementations for query processing.
+
+This module provides concrete implementations of the Executor interface,
+including simple and agent-based execution strategies.
+"""
+
+from collections.abc import Callable
+from typing import Optional
 
 from source.api import GlueLLM
+from source.config import settings
 from source.models.agent import Agent
 
 from ._base import Executor
 
+
 class SimpleExecutor(Executor):
-    def __init__(self,
-        model: str = "openai:gpt-4o-mini",
-        system_prompt: str = None,
-        tools: list[Callable] = None,
-        max_tool_iterations: int = 10,
+    """Simple executor for direct LLM query processing.
+
+    This executor provides a straightforward way to execute queries
+    using the GlueLLM client with customizable configuration.
+
+    Attributes:
+        model: LLM model identifier (provider:model_name format)
+        system_prompt: Optional system prompt for the LLM
+        tools: Optional list of callable tools
+        max_tool_iterations: Maximum tool execution iterations
+
+    Example:
+        >>> from source.executors import SimpleExecutor
+        >>> import asyncio
+        >>>
+        >>> async def main():
+        ...     executor = SimpleExecutor(
+        ...         system_prompt="You are a helpful assistant.",
+        ...         tools=[]
+        ...     )
+        ...     response = await executor.execute("What is 2+2?")
+        ...     print(response)
+        >>>
+        >>> asyncio.run(main())
+    """
+
+    def __init__(
+        self,
+        model: str | None = None,
+        system_prompt: str | None = None,
+        tools: list[Callable] | None = None,
+        max_tool_iterations: int | None = None,
     ):
-        self.model = model
+        """Initialize a SimpleExecutor.
+
+        Args:
+            model: LLM model to use (defaults to settings.default_model)
+            system_prompt: System prompt for the LLM (optional)
+            tools: List of callable tools (defaults to empty list)
+            max_tool_iterations: Maximum tool execution iterations (optional)
+        """
+        self.model = model or settings.default_model
         self.system_prompt = system_prompt
         self.tools = tools
         self.max_tool_iterations = max_tool_iterations
-        
-    def execute(self, query: str) -> str:   
+
+    async def execute(self, query: str) -> str:
+        """Execute a query using the configured LLM.
+
+        Args:
+            query: The query string to process
+
+        Returns:
+            str: The LLM's final response
+        """
         client = GlueLLM(
             model=self.model,
             system_prompt=self.system_prompt,
             tools=self.tools,
             max_tool_iterations=self.max_tool_iterations,
         )
-        result = client.complete(query)
+        result = await client.complete(query)
         return result.final_response
 
 
 class AgentExecutor(Executor):
+    """Executor that uses a configured Agent for query processing.
+
+    This executor wraps an Agent instance and uses its configuration
+    to execute queries. This is useful when you have pre-configured
+    agents with specific capabilities.
+
+    Attributes:
+        agent: The Agent instance to use for execution
+
+    Example:
+        >>> from source.executors import AgentExecutor
+        >>> from source.models.agent import Agent
+        >>> from source.models.prompt import SystemPrompt
+        >>> import asyncio
+        >>>
+        >>> agent = Agent(
+        ...     name="Assistant",
+        ...     description="A helpful agent",
+        ...     system_prompt=SystemPrompt(content="You are helpful."),
+        ...     tools=[],
+        ...     max_tool_iterations=5
+        ... )
+        >>>
+        >>> async def main():
+        ...     executor = AgentExecutor(agent=agent)
+        ...     response = await executor.execute("Hello!")
+        ...     print(response)
+        >>>
+        >>> asyncio.run(main())
+    """
+
     def __init__(self, agent: Agent):
+        """Initialize an AgentExecutor.
+
+        Args:
+            agent: The Agent instance to use for query execution
+        """
         self.agent = agent
 
-    def execute(self, query: str) -> str:
+    async def execute(self, query: str) -> str:
+        """Execute a query using the agent's configuration.
+
+        Args:
+            query: The query string to process
+
+        Returns:
+            str: The LLM's final response
+        """
         client = GlueLLM(
             model=self.agent.model,
             system_prompt=self.agent.system_prompt.content if self.agent.system_prompt else None,
             tools=self.agent.tools,
-            max_tool_iterations=getattr(self.agent, 'max_tool_iterations', 10),
+            max_tool_iterations=getattr(self.agent, "max_tool_iterations", None),
         )
-        result = client.complete(query)
+        result = await client.complete(query)
         return result.final_response
+
 
 __all__ = [
     "Executor",
@@ -49,9 +146,14 @@ __all__ = [
 ]
 
 if __name__ == "__main__":
-    executor = SimpleExecutor(
-        model="openai:gpt-4o-mini",
-        system_prompt="You are a simple executor that can execute a query",
-        tools=[],
-    )
-    print(executor.execute("What is the weather in Tokyo?"))
+    import asyncio
+
+    async def main():
+        """Demo script for SimpleExecutor."""
+        executor = SimpleExecutor(
+            system_prompt="You are a simple executor that can execute a query",
+            tools=[],
+        )
+        print(await executor.execute("What is the weather in Tokyo?"))
+
+    asyncio.run(main())

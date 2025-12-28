@@ -66,7 +66,7 @@ from source.api import complete
 # Define a tool (function the LLM can call)
 def get_weather(location: str, unit: str = "celsius") -> str:
     """Get the current weather for a location.
-    
+
     Args:
         location: The city and country, e.g. "Tokyo, Japan"
         unit: Temperature unit, either "celsius" or "fahrenheit"
@@ -261,7 +261,7 @@ while True:
     user_input = input("You: ")
     if user_input.lower() in ['quit', 'exit']:
         break
-    
+
     result = chat.complete(user_input)
     print(f"Bot: {result.final_response}")
 ```
@@ -314,4 +314,3 @@ Once you're comfortable with the basics, you can:
 5. **Optimize costs** - Use appropriate models and manage conversation length
 
 Happy building! 🚀
-

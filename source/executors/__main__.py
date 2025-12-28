@@ -1,10 +1,26 @@
+"""Main entry point for executor module.
+
+This module provides a simple command-line interface for testing
+the SimpleExecutor functionality.
+"""
+
+import asyncio
+
 from source.executors import SimpleExecutor
 
-if __name__ == "__main__":
+
+async def main():
+    """Run a simple executor demo.
+
+    Creates a SimpleExecutor instance and processes a sample query
+    to demonstrate basic functionality.
+    """
     executor = SimpleExecutor(
-        model="openai:gpt-4o-mini",
         system_prompt="You are a simple executor that can execute a query",
         tools=[],
     )
-    print(executor.execute("What is the weather in Tokyo?"))
+    print(await executor.execute("What is the weather in Tokyo?"))
 
+
+if __name__ == "__main__":
+    asyncio.run(main())
