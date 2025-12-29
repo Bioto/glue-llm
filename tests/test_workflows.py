@@ -4,11 +4,40 @@ import pytest
 from pydantic import ValidationError
 
 from gluellm.executors._base import Executor
-from gluellm.models.workflow import CriticConfig, IterativeConfig
+from gluellm.models.workflow import (
+    ChainOfDensityConfig,
+    ConsensusConfig,
+    ConstitutionalConfig,
+    CriticConfig,
+    ExpertConfig,
+    HierarchicalConfig,
+    IterativeConfig,
+    MapReduceConfig,
+    MoEConfig,
+    Principle,
+    RAGConfig,
+    ReActConfig,
+    ReflectionConfig,
+    RoundRobinConfig,
+    SocraticConfig,
+    TreeOfThoughtsConfig,
+)
 from gluellm.workflows._base import WorkflowResult
+from gluellm.workflows.chain_of_density import ChainOfDensityWorkflow
+from gluellm.workflows.consensus import ConsensusWorkflow
+from gluellm.workflows.constitutional import ConstitutionalWorkflow
 from gluellm.workflows.debate import DebateConfig, DebateWorkflow
+from gluellm.workflows.hierarchical import HierarchicalWorkflow
 from gluellm.workflows.iterative import IterativeRefinementWorkflow
+from gluellm.workflows.map_reduce import MapReduceWorkflow
+from gluellm.workflows.mixture_of_experts import MixtureOfExpertsWorkflow
 from gluellm.workflows.pipeline import PipelineWorkflow
+from gluellm.workflows.rag import RAGWorkflow
+from gluellm.workflows.react import ReActWorkflow
+from gluellm.workflows.reflection import ReflectionWorkflow
+from gluellm.workflows.round_robin import RoundRobinWorkflow
+from gluellm.workflows.socratic import SocraticWorkflow
+from gluellm.workflows.tree_of_thoughts import TreeOfThoughtsWorkflow
 
 
 class MockExecutor(Executor):
@@ -815,3 +844,516 @@ async def test_pipeline_workflow_data_flow():
     assert result.agent_interactions[0]["output"] == "start -> stage1"
     assert result.agent_interactions[1]["input"] == "start -> stage1"
     assert result.agent_interactions[1]["output"] == "start -> stage1 -> stage2"
+
+
+# ============================================================================
+# Tests for new workflows
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_reflection_workflow_basic():
+    """Test reflection workflow with basic execution."""
+    generator = MockExecutor(["Initial output", "Improved output", "Final output"])
+    reflector = MockExecutor(["Add more detail", "Looks good"])
+
+    workflow = ReflectionWorkflow(
+        generator=generator,
+        reflector=reflector,
+        config=ReflectionConfig(max_reflections=2),
+    )
+
+    result = await workflow.execute("Write an article")
+
+    assert result.iterations == 2
+    assert len(result.agent_interactions) >= 2
+    assert generator.call_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_reflection_workflow_same_agent():
+    """Test reflection workflow with same agent for generator and reflector."""
+    agent = MockExecutor(["Output 1", "Reflection 1", "Output 2"])
+
+    workflow = ReflectionWorkflow(
+        generator=agent,
+        reflector=None,  # Should default to generator
+        config=ReflectionConfig(max_reflections=1),
+    )
+
+    result = await workflow.execute("Write something")
+
+    assert result.iterations == 1
+    assert agent.call_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_reflection_workflow_validate_config():
+    """Test reflection workflow configuration validation."""
+    generator = MockExecutor()
+    workflow = ReflectionWorkflow(generator=generator, config=ReflectionConfig(max_reflections=3))
+    assert workflow.validate_config() is True
+
+    workflow.config.max_reflections = 0
+    assert workflow.validate_config() is False
+
+
+@pytest.mark.asyncio
+async def test_chain_of_density_workflow_basic():
+    """Test chain of density workflow."""
+    generator = MockExecutor(["Sparse summary", "More detailed", "Very detailed", "Extremely detailed"])
+
+    workflow = ChainOfDensityWorkflow(
+        generator=generator,
+        config=ChainOfDensityConfig(num_iterations=3),
+    )
+
+    result = await workflow.execute("Summarize this")
+
+    assert result.iterations == 3
+    assert len(result.agent_interactions) == 3
+    assert generator.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_chain_of_density_workflow_density_types():
+    """Test chain of density with different increment types."""
+    generator = MockExecutor(["Output"] * 5)
+
+    for increment_type in ["entities", "details", "examples"]:
+        workflow = ChainOfDensityWorkflow(
+            generator=generator,
+            config=ChainOfDensityConfig(num_iterations=2, density_increment=increment_type),
+        )
+        result = await workflow.execute("Test")
+        assert result.iterations == 2
+        assert result.metadata["density_increment"] == increment_type
+
+
+@pytest.mark.asyncio
+async def test_socratic_workflow_basic():
+    """Test Socratic workflow with basic execution."""
+    questioner = MockExecutor(["What is AI?", "How does it work?", "What are applications?"])
+    responder = MockExecutor(["AI is...", "It works by...", "Applications include..."])
+
+    workflow = SocraticWorkflow(
+        questioner=questioner,
+        responder=responder,
+        config=SocraticConfig(max_exchanges=2),
+    )
+
+    result = await workflow.execute("Tell me about AI")
+
+    assert result.iterations == 2
+    assert questioner.call_count == 2
+    assert responder.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_socratic_workflow_modes():
+    """Test Socratic workflow with different modes."""
+    questioner = MockExecutor(["Question"])
+    responder = MockExecutor(["Answer"])
+
+    for mode in ["teacher_student", "peer"]:
+        workflow = SocraticWorkflow(
+            questioner=questioner,
+            responder=responder,
+            config=SocraticConfig(max_exchanges=1, mode=mode),
+        )
+        result = await workflow.execute("Topic")
+        assert result.metadata["mode"] == mode
+
+
+@pytest.mark.asyncio
+async def test_socratic_workflow_synthesis():
+    """Test Socratic workflow with synthesis."""
+    questioner = MockExecutor(["Q1"])
+    responder = MockExecutor(["A1", "Synthesis"])
+
+    workflow = SocraticWorkflow(
+        questioner=questioner,
+        responder=responder,
+        config=SocraticConfig(max_exchanges=1, synthesis_at_end=True),
+    )
+
+    result = await workflow.execute("Topic")
+    assert result.metadata["synthesized"] is True
+
+
+@pytest.mark.asyncio
+async def test_rag_workflow_basic():
+    """Test RAG workflow with basic retrieval."""
+
+    def mock_retriever(query: str) -> list[dict]:
+        return [
+            {"content": "Context about Python", "source": "doc1"},
+            {"content": "More Python info", "source": "doc2"},
+        ]
+
+    generator = MockExecutor(["Answer using context"])
+
+    workflow = RAGWorkflow(
+        retriever=mock_retriever,
+        generator=generator,
+        config=RAGConfig(max_retrieved_chunks=2),
+    )
+
+    result = await workflow.execute("What is Python?")
+
+    assert result.iterations == 1
+    assert generator.call_count == 1
+    assert result.metadata["retrieved_chunks"] == 2
+
+
+@pytest.mark.asyncio
+async def test_rag_workflow_no_context_fallback():
+    """Test RAG workflow fallback when no context retrieved."""
+
+    def empty_retriever(query: str) -> list[dict]:
+        return []
+
+    generator = MockExecutor(["Fallback answer"])
+
+    workflow = RAGWorkflow(
+        retriever=empty_retriever,
+        generator=generator,
+        config=RAGConfig(fallback_on_no_context=True),
+    )
+
+    result = await workflow.execute("Query")
+    assert len(result.final_output) > 0
+
+
+@pytest.mark.asyncio
+async def test_rag_workflow_verification():
+    """Test RAG workflow with fact verification."""
+
+    def mock_retriever(query: str) -> list[dict]:
+        return [{"content": "Context", "source": "doc1"}]
+
+    generator = MockExecutor(["Generated answer"])
+    verifier = MockExecutor(["Verification: looks good"])
+
+    workflow = RAGWorkflow(
+        retriever=mock_retriever,
+        generator=generator,
+        verifier=verifier,
+        config=RAGConfig(verify_facts=True),
+    )
+
+    result = await workflow.execute("Query")
+    assert result.metadata["verified"] is True
+    assert verifier.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_round_robin_workflow_basic():
+    """Test round-robin workflow."""
+    agent1 = MockExecutor(["Contribution 1", "Contribution 4"])
+    agent2 = MockExecutor(["Contribution 2", "Contribution 5"])
+    agent3 = MockExecutor(["Contribution 3", "Contribution 6"])
+
+    workflow = RoundRobinWorkflow(
+        agents=[("Agent1", agent1), ("Agent2", agent2), ("Agent3", agent3)],
+        config=RoundRobinConfig(max_rounds=2),
+    )
+
+    result = await workflow.execute("Task")
+
+    assert result.iterations == 2
+    assert len(result.agent_interactions) >= 6  # 2 rounds * 3 agents
+
+
+@pytest.mark.asyncio
+async def test_round_robin_workflow_contribution_styles():
+    """Test round-robin with different contribution styles."""
+    agent = MockExecutor(["Contribution"])
+
+    for style in ["extend", "refine", "challenge"]:
+        workflow = RoundRobinWorkflow(
+            agents=[("Agent", agent)],
+            config=RoundRobinConfig(max_rounds=1, contribution_style=style),
+        )
+        result = await workflow.execute("Task")
+        assert result.metadata["contribution_style"] == style
+
+
+@pytest.mark.asyncio
+async def test_consensus_workflow_basic():
+    """Test consensus workflow."""
+    agent1 = MockExecutor(["Proposal 1", "Vote: 0"])
+    agent2 = MockExecutor(["Proposal 2", "Vote: 1"])
+    agent3 = MockExecutor(["Proposal 3", "Vote: 0"])
+
+    workflow = ConsensusWorkflow(
+        proposers=[("Agent1", agent1), ("Agent2", agent2), ("Agent3", agent3)],
+        config=ConsensusConfig(max_rounds=1, min_agreement_ratio=0.5),
+    )
+
+    result = await workflow.execute("Problem")
+
+    assert result.iterations == 1
+    assert len(result.agent_interactions) > 0
+
+
+@pytest.mark.asyncio
+async def test_consensus_workflow_validate_config():
+    """Test consensus workflow configuration validation."""
+    agent1 = MockExecutor()
+    agent2 = MockExecutor()
+
+    workflow = ConsensusWorkflow(
+        proposers=[("Agent1", agent1), ("Agent2", agent2)],
+        config=ConsensusConfig(max_rounds=3),
+    )
+    assert workflow.validate_config() is True
+
+    workflow.proposers = [("Agent1", agent1)]
+    assert workflow.validate_config() is False
+
+
+@pytest.mark.asyncio
+async def test_hierarchical_workflow_basic():
+    """Test hierarchical workflow."""
+    manager = MockExecutor(["1. Task A\n2. Task B\n3. Task C", "Synthesized result"])
+    worker1 = MockExecutor(["Result A"])
+    worker2 = MockExecutor(["Result B"])
+
+    workflow = HierarchicalWorkflow(
+        manager=manager,
+        workers=[("Worker1", worker1), ("Worker2", worker2)],
+        config=HierarchicalConfig(max_subtasks=3, parallel_workers=True),
+    )
+
+    result = await workflow.execute("Complex task")
+
+    assert manager.call_count >= 2  # Decomposition + synthesis
+    assert result.metadata["subtasks_created"] > 0
+
+
+@pytest.mark.asyncio
+async def test_hierarchical_workflow_sequential():
+    """Test hierarchical workflow with sequential execution."""
+    manager = MockExecutor(["1. Task A\n2. Task B", "Synthesis"])
+    worker = MockExecutor(["Result"])
+
+    workflow = HierarchicalWorkflow(
+        manager=manager,
+        workers=[("Worker", worker)],
+        config=HierarchicalConfig(parallel_workers=False),
+    )
+
+    result = await workflow.execute("Task")
+    assert result.metadata["parallel_execution"] is False
+
+
+@pytest.mark.asyncio
+async def test_map_reduce_workflow_basic():
+    """Test MapReduce workflow."""
+    mapper = MockExecutor(["Mapped chunk 1", "Mapped chunk 2"])
+    reducer = MockExecutor(["Reduced result"])
+
+    workflow = MapReduceWorkflow(
+        mapper=mapper,
+        reducer=reducer,
+        config=MapReduceConfig(chunk_size=100, reduce_strategy="summarize"),
+    )
+
+    long_input = "x" * 250  # Will be split into chunks
+    result = await workflow.execute(long_input)
+
+    assert mapper.call_count > 0
+    assert reducer.call_count == 1
+    assert result.metadata["chunks_processed"] > 0
+
+
+@pytest.mark.asyncio
+async def test_map_reduce_workflow_no_chunking():
+    """Test MapReduce workflow without chunking."""
+    mapper = MockExecutor(["Mapped"])
+    reducer = MockExecutor(["Reduced"])
+
+    workflow = MapReduceWorkflow(
+        mapper=mapper,
+        reducer=reducer,
+        config=MapReduceConfig(chunk_size=None),  # No chunking
+    )
+
+    result = await workflow.execute("Short input")
+    assert result.metadata["chunks_processed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_react_workflow_basic():
+    """Test ReAct workflow."""
+    reasoner = MockExecutor(
+        ["Thought: I need to find information\nAction: search\nObservation: Found info\nFinal Answer: The answer is X"]
+    )
+
+    workflow = ReActWorkflow(
+        reasoner=reasoner,
+        config=ReActConfig(max_steps=3, stop_on_final_answer=True),
+    )
+
+    result = await workflow.execute("Question")
+
+    assert result.iterations <= 3
+    assert len(result.agent_interactions) > 0
+
+
+@pytest.mark.asyncio
+async def test_react_workflow_no_final_answer():
+    """Test ReAct workflow without final answer detection."""
+    reasoner = MockExecutor(["Thought: thinking\nAction: act"])
+
+    workflow = ReActWorkflow(
+        reasoner=reasoner,
+        config=ReActConfig(max_steps=2, stop_on_final_answer=False),
+    )
+
+    result = await workflow.execute("Question")
+    assert result.iterations == 2
+
+
+@pytest.mark.asyncio
+async def test_mixture_of_experts_workflow_basic():
+    """Test Mixture of Experts workflow."""
+    expert1 = MockExecutor(["Expert 1 response"])
+    expert2 = MockExecutor(["Expert 2 response"])
+    combiner = MockExecutor(["Combined response"])
+
+    workflow = MixtureOfExpertsWorkflow(
+        experts=[
+            ExpertConfig(
+                executor=expert1,
+                specialty="math",
+                description="Math expert",
+                activation_keywords=["calculate", "math"],
+            ),
+            ExpertConfig(
+                executor=expert2,
+                specialty="code",
+                description="Code expert",
+                activation_keywords=["code", "program"],
+            ),
+        ],
+        combiner=combiner,
+        config=MoEConfig(routing_strategy="all", combine_strategy="synthesize"),
+    )
+
+    result = await workflow.execute("Calculate something")
+
+    assert result.iterations >= 1
+    assert result.metadata["experts_used"] > 0
+
+
+@pytest.mark.asyncio
+async def test_mixture_of_experts_workflow_keyword_routing():
+    """Test MoE workflow with keyword routing."""
+    expert1 = MockExecutor(["Math response"])
+    expert2 = MockExecutor(["Code response"])
+
+    workflow = MixtureOfExpertsWorkflow(
+        experts=[
+            ExpertConfig(
+                executor=expert1,
+                specialty="math",
+                description="Math",
+                activation_keywords=["calculate"],
+            ),
+            ExpertConfig(
+                executor=expert2,
+                specialty="code",
+                description="Code",
+                activation_keywords=["code"],
+            ),
+        ],
+        config=MoEConfig(routing_strategy="keyword"),
+    )
+
+    result = await workflow.execute("Calculate the sum")
+    assert expert1.call_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_constitutional_workflow_basic():
+    """Test Constitutional AI workflow."""
+    generator = MockExecutor(["Generated content", "Revised content"])
+    critic = MockExecutor(["PASS: harmless\nPASS: helpful"])
+
+    workflow = ConstitutionalWorkflow(
+        generator=generator,
+        critic=critic,
+        config=ConstitutionalConfig(
+            principles=[
+                Principle(name="harmless", description="Should not harm", severity="critical"),
+                Principle(name="helpful", description="Should be helpful", severity="error"),
+            ],
+            max_revisions=2,
+        ),
+    )
+
+    result = await workflow.execute("Generate content")
+
+    assert result.iterations >= 1
+    assert len(result.agent_interactions) > 0
+
+
+@pytest.mark.asyncio
+async def test_constitutional_workflow_requires_config():
+    """Test that Constitutional workflow requires config."""
+    generator = MockExecutor()
+
+    with pytest.raises(ValueError):
+        ConstitutionalWorkflow(generator=generator, config=None)
+
+
+@pytest.mark.asyncio
+async def test_tree_of_thoughts_workflow_basic():
+    """Test Tree of Thoughts workflow."""
+    thinker = MockExecutor(["Thought 1\nThought 2\nThought 3"])
+    evaluator = MockExecutor(["0.8", "0.6", "0.9"])
+
+    workflow = TreeOfThoughtsWorkflow(
+        thinker=thinker,
+        evaluator=evaluator,
+        config=TreeOfThoughtsConfig(branching_factor=3, max_depth=2, evaluation_strategy="score"),
+    )
+
+    result = await workflow.execute("Problem")
+
+    assert result.iterations == 2
+    assert result.metadata["max_depth"] == 2
+    assert result.metadata["branching_factor"] == 3
+
+
+@pytest.mark.asyncio
+async def test_tree_of_thoughts_workflow_evaluation_strategies():
+    """Test ToT workflow with different evaluation strategies."""
+    thinker = MockExecutor(["Thought"])
+    evaluator = MockExecutor(["0.7"])
+
+    for strategy in ["vote", "score", "best_first"]:
+        workflow = TreeOfThoughtsWorkflow(
+            thinker=thinker,
+            evaluator=evaluator,
+            config=TreeOfThoughtsConfig(evaluation_strategy=strategy),
+        )
+        result = await workflow.execute("Problem")
+        assert result.metadata["evaluation_strategy"] == strategy
+
+
+@pytest.mark.asyncio
+async def test_tree_of_thoughts_workflow_validate_config():
+    """Test ToT workflow configuration validation."""
+    thinker = MockExecutor()
+
+    workflow = TreeOfThoughtsWorkflow(
+        thinker=thinker,
+        config=TreeOfThoughtsConfig(branching_factor=2, max_depth=2),
+    )
+    assert workflow.validate_config() is True
+
+    workflow.config.branching_factor = 0
+    assert workflow.validate_config() is False
