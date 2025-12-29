@@ -17,6 +17,7 @@ A high-level Python SDK for Large Language Models with automatic tool execution,
 - 🤖 **Multi-Agent Workflows** - Orchestrate multiple agents in iterative, pipeline, and debate patterns
 - 🌊 **Streaming Support** - Real-time response streaming for better UX
 - 📈 **Token Usage Tracking** - Monitor token consumption and costs
+- 🔍 **OpenTelemetry Tracing** - Distributed tracing with MLflow for observability
 
 ## Installation
 
@@ -540,6 +541,207 @@ from gluellm.config import reload_settings
 # Reload after changing .env file
 settings = reload_settings()
 ```
+
+## OpenTelemetry Tracing with MLflow
+
+GlueLLM supports distributed tracing using OpenTelemetry and MLflow for comprehensive observability of LLM interactions. This feature enables you to:
+
+- **Monitor LLM calls** with detailed span information
+- **Track token usage** and costs
+- **Trace tool executions** and their results
+- **Debug complex workflows** with visualization
+- **Analyze performance** across multiple calls
+
+### Prerequisites
+
+1. Install MLflow and OpenTelemetry dependencies:
+
+```bash
+pip install mlflow>=3.6.0 opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp
+```
+
+2. Start MLflow tracking server:
+
+```bash
+# Start with SQLite backend (required for OTLP ingestion)
+mlflow server --backend-store-uri sqlite:///mlflow.db --port 5000
+```
+
+**Note:** File-based backends do not support OpenTelemetry Protocol (OTLP) ingestion. Use a SQL-based backend (SQLite, PostgreSQL, MySQL).
+
+### Configuration
+
+Enable tracing by setting environment variables:
+
+```bash
+# Enable tracing
+export GLUELLM_ENABLE_TRACING=true
+
+# MLflow tracking server
+export GLUELLM_MLFLOW_TRACKING_URI=http://localhost:5000
+export GLUELLM_MLFLOW_EXPERIMENT_NAME=gluellm
+
+# OpenTelemetry OTLP endpoint
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:5000/v1/traces
+```
+
+Or use a `.env` file:
+
+```bash
+# .env
+GLUELLM_ENABLE_TRACING=true
+GLUELLM_MLFLOW_TRACKING_URI=http://localhost:5000
+GLUELLM_MLFLOW_EXPERIMENT_NAME=gluellm
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:5000/v1/traces
+```
+
+### Usage
+
+Once configured, tracing is automatic:
+
+```python
+import asyncio
+from gluellm.api import complete
+from gluellm.telemetry import configure_tracing
+
+async def main():
+    # Configure tracing on startup
+    configure_tracing()
+
+    # All LLM calls will be automatically traced
+    result = await complete("What is the capital of France?")
+    print(result.final_response)
+
+asyncio.run(main())
+```
+
+### Viewing Traces
+
+1. Open MLflow UI: `http://localhost:5000`
+2. Navigate to the "Traces" tab
+3. Click on a trace to see detailed execution information:
+   - LLM call parameters (model, messages count)
+   - Token usage (prompt, completion, total)
+   - Tool executions and results
+   - Error information if any
+   - Execution duration
+
+### Traced Attributes
+
+GlueLLM automatically captures the following trace attributes:
+
+**LLM Call Spans:**
+- `llm.provider` - Provider name (openai, anthropic, etc.)
+- `llm.model` - Model name
+- `llm.messages_count` - Number of messages in the request
+- `llm.tools_available` - Number of tools available
+- `llm.tokens.prompt` - Prompt tokens used
+- `llm.tokens.completion` - Completion tokens used
+- `llm.tokens.total` - Total tokens used
+- `llm.response.finish_reason` - Finish reason (stop, tool_calls, etc.)
+- `llm.response.has_tool_calls` - Whether response includes tool calls
+
+**Tool Execution Spans:**
+- `tool.name` - Name of the executed tool
+- `tool.arg_count` - Number of arguments passed
+- `tool.success` - Whether execution succeeded
+- `tool.error` - Error message if execution failed
+
+### Example with Tool Tracing
+
+```python
+import asyncio
+from gluellm.api import complete
+from gluellm.telemetry import configure_tracing
+
+def get_weather(location: str) -> str:
+    """Get weather for a location."""
+    return f"Weather in {location}: Sunny, 72°F"
+
+async def main():
+    configure_tracing()
+
+    result = await complete(
+        "What's the weather in San Francisco?",
+        tools=[get_weather]
+    )
+
+    print(result.final_response)
+    # Check MLflow UI to see both LLM call and tool execution traces
+
+asyncio.run(main())
+```
+
+### Advanced: Custom Span Attributes
+
+For custom instrumentation, use the tracing context:
+
+```python
+from gluellm.telemetry import trace_llm_call, set_span_attributes
+
+async def custom_llm_call():
+    with trace_llm_call(
+        model="openai:gpt-4o-mini",
+        messages=[{"role": "user", "content": "Hello"}],
+        custom_attribute="custom_value"
+    ) as span:
+        # Your custom logic
+        response = await some_llm_call()
+
+        # Add custom attributes
+        set_span_attributes(
+            span,
+            custom_metric=42,
+            user_id="user-123"
+        )
+
+        return response
+```
+
+### Example Code
+
+See `examples/opentelemetry_tracing.py` for comprehensive examples:
+
+```bash
+python examples/opentelemetry_tracing.py
+```
+
+This example demonstrates:
+- Simple completions with tracing
+- Tool execution tracing
+- Structured output tracing
+- Multi-turn conversation tracing
+- Error handling with tracing
+
+### Benefits
+
+**Development:**
+- Debug complex workflows visually
+- Identify performance bottlenecks
+- Track token usage and optimize costs
+- Understand tool execution patterns
+
+**Production:**
+- Monitor system health in real-time
+- Track LLM API reliability
+- Measure end-to-end latency
+- Correlate errors with specific calls
+
+**Analysis:**
+- Compare performance across models
+- Analyze token usage patterns
+- Optimize system prompts
+- Identify frequently used tools
+
+### Disabling Tracing
+
+To disable tracing without changing code:
+
+```bash
+export GLUELLM_ENABLE_TRACING=false
+```
+
+Tracing has minimal overhead when disabled - the code checks a flag before instrumenting.
 
 ## Advanced APIs
 

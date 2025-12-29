@@ -68,6 +68,12 @@ from tenacity import (
 
 from gluellm.config import settings
 from gluellm.models.conversation import Conversation, Role
+from gluellm.telemetry import (
+    is_tracing_enabled,
+    record_token_usage,
+    set_span_attributes,
+    trace_llm_call,
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -231,9 +237,10 @@ async def _safe_llm_call(
     response_format: type[BaseModel] | None = None,
     stream: bool = False,
 ) -> ChatCompletion | AsyncIterator[ChatCompletion]:
-    """Make an LLM call with error classification.
+    """Make an LLM call with error classification and tracing.
 
-    This wraps the any_llm_acompletion call to catch and classify errors.
+    This wraps the any_llm_acompletion call to catch and classify errors,
+    and optionally trace the call with OpenTelemetry.
     Raises our custom exception types for better error handling.
 
     Args:
@@ -247,13 +254,45 @@ async def _safe_llm_call(
         ChatCompletion if stream=False, AsyncIterator[ChatCompletion] if stream=True
     """
     try:
-        return await any_llm_acompletion(
-            messages=messages,
+        # Use tracing context if enabled
+        with trace_llm_call(
             model=model,
-            tools=tools if tools else None,
-            response_format=response_format,
+            messages=messages,
+            tools=tools,
             stream=stream,
-        )
+            response_format=response_format.__name__ if response_format else None,
+        ) as span:
+            response = await any_llm_acompletion(
+                messages=messages,
+                model=model,
+                tools=tools if tools else None,
+                response_format=response_format,
+                stream=stream,
+            )
+
+            # For non-streaming responses, record token usage
+            if not stream and hasattr(response, "usage") and response.usage:
+                usage = response.usage
+                tokens_used = {
+                    "prompt": getattr(usage, "prompt_tokens", 0) or 0,
+                    "completion": getattr(usage, "completion_tokens", 0) or 0,
+                    "total": getattr(usage, "total_tokens", 0) or 0,
+                }
+                record_token_usage(span, tokens_used)
+
+            # Record response metadata
+            if not stream and hasattr(response, "choices") and response.choices:
+                choice = response.choices[0]
+                set_span_attributes(
+                    span,
+                    **{
+                        "llm.response.finish_reason": getattr(choice, "finish_reason", "unknown"),
+                        "llm.response.has_tool_calls": bool(getattr(choice.message, "tool_calls", None)),
+                    },
+                )
+
+            return response
+
     except Exception as e:
         # Classify the error and raise the appropriate exception
         classified_error = classify_llm_error(e)
@@ -449,6 +488,21 @@ class GlueLLM:
                                     "error": False,
                                 }
                             )
+
+                            # Record tool execution in trace if enabled
+                            if is_tracing_enabled():
+                                from gluellm.telemetry import _tracer
+
+                                if _tracer is not None:
+                                    with _tracer.start_as_current_span(f"tool.{tool_name}") as tool_span:
+                                        set_span_attributes(
+                                            tool_span,
+                                            **{
+                                                "tool.name": tool_name,
+                                                "tool.arg_count": len(tool_args),
+                                                "tool.success": True,
+                                            },
+                                        )
                         except Exception as e:
                             # Tool execution error
                             tool_result_str = f"Error executing tool: {type(e).__name__}: {str(e)}"
@@ -462,6 +516,22 @@ class GlueLLM:
                                     "error": True,
                                 }
                             )
+
+                            # Record tool execution error in trace if enabled
+                            if is_tracing_enabled():
+                                from gluellm.telemetry import _tracer
+
+                                if _tracer is not None:
+                                    with _tracer.start_as_current_span(f"tool.{tool_name}") as tool_span:
+                                        set_span_attributes(
+                                            tool_span,
+                                            **{
+                                                "tool.name": tool_name,
+                                                "tool.arg_count": len(tool_args),
+                                                "tool.success": False,
+                                                "tool.error": str(e),
+                                            },
+                                        )
 
                         # Add tool result to messages
                         messages.append(

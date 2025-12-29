@@ -14,6 +14,7 @@ Available Settings:
     - Retry Behavior: retry_max_attempts, retry_min_wait, retry_max_wait, retry_multiplier
     - Logging: log_level
     - API Keys: openai_api_key, anthropic_api_key, xai_api_key
+    - Tracing: enable_tracing, mlflow_tracking_uri, mlflow_experiment_name, otel_exporter_endpoint
 
 Example:
     >>> from gluellm.config import settings, reload_settings
@@ -74,6 +75,12 @@ class GlueLLMSettings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     xai_api_key: str | None = None
+
+    # OpenTelemetry and MLflow tracing settings
+    enable_tracing: bool = False
+    mlflow_tracking_uri: str | None = None
+    mlflow_experiment_name: str = "gluellm"
+    otel_exporter_endpoint: str | None = None
 
 
 # Global settings instance
