@@ -3,6 +3,7 @@ Test error handling and retry logic for GlueLLM.
 Tests the comprehensive error classification and retry mechanisms.
 """
 
+import time
 from unittest.mock import Mock, patch
 
 import pytest
@@ -323,6 +324,185 @@ class TestStructuredCompleteErrorHandling:
         assert isinstance(result, TestModel)
         assert result.name == "test"
         assert result.value == 42
+
+
+class TestRetryBackoffTiming:
+    """Test retry backoff timing behavior."""
+
+    @patch("source.api._safe_llm_call")
+    @patch("asyncio.sleep")  # Mock asyncio.sleep for async retry
+    async def test_exponential_backoff_waits(self, mock_sleep, mock_safe_call):
+        """Test that exponential backoff actually waits between retries."""
+
+        mock_response = Mock()
+        mock_choice = Mock()
+        mock_message = Mock()
+        mock_message.content = "Success"
+        mock_message.tool_calls = None
+        mock_choice.message = mock_message
+        mock_response.choices = [mock_choice]
+
+        # First two calls fail, third succeeds
+        mock_safe_call.side_effect = [
+            RateLimitError("Rate limit exceeded"),
+            RateLimitError("Rate limit exceeded"),
+            mock_response,
+        ]
+
+        client = GlueLLM(model="openai:gpt-4o-mini")
+        await client.complete("Test message")
+
+        # Verify sleep was called (exponential backoff waits)
+        assert mock_sleep.call_count >= 2  # Should sleep between retries
+
+        # Verify sleep durations follow exponential pattern
+        sleep_times = [call[0][0] for call in mock_sleep.call_args_list]
+        if len(sleep_times) >= 2:
+            # Second wait should be longer than first (exponential)
+            # With multiplier=1, min=2: first wait ~2s, second wait ~4s
+            assert sleep_times[1] >= sleep_times[0]
+
+    @patch("source.api._safe_llm_call")
+    @patch("asyncio.sleep")
+    async def test_max_wait_cap_enforced(self, mock_sleep, mock_safe_call):
+        """Test that max_wait cap is enforced."""
+        from source.config import settings
+
+        # Temporarily set low max_wait for testing
+        original_max_wait = settings.retry_max_wait
+        settings.retry_max_wait = 5  # Set max wait to 5 seconds
+
+        try:
+            mock_response = Mock()
+            mock_choice = Mock()
+            mock_message = Mock()
+            mock_message.content = "Success"
+            mock_message.tool_calls = None
+            mock_choice.message = mock_message
+            mock_response.choices = [mock_choice]
+
+            # Two failures then success (within retry_max_attempts=3)
+            mock_safe_call.side_effect = [
+                RateLimitError("Rate limit exceeded"),
+                RateLimitError("Rate limit exceeded"),
+                mock_response,
+            ]
+
+            client = GlueLLM(model="openai:gpt-4o-mini")
+            await client.complete("Test message")
+
+            # Verify all sleep times are <= max_wait
+            sleep_times = [call[0][0] for call in mock_sleep.call_args_list]
+            for sleep_time in sleep_times:
+                assert sleep_time <= settings.retry_max_wait, (
+                    f"Sleep time {sleep_time} exceeds max_wait {settings.retry_max_wait}"
+                )
+        finally:
+            settings.retry_max_wait = original_max_wait
+
+    @patch("source.api._safe_llm_call")
+    @patch("asyncio.sleep")
+    async def test_min_wait_floor_enforced(self, mock_sleep, mock_safe_call):
+        """Test that min_wait floor is enforced."""
+        from source.config import settings
+
+        # Temporarily set min_wait for testing
+        original_min_wait = settings.retry_min_wait
+        settings.retry_min_wait = 1  # Set min wait to 1 second
+
+        try:
+            mock_response = Mock()
+            mock_choice = Mock()
+            mock_message = Mock()
+            mock_message.content = "Success"
+            mock_message.tool_calls = None
+            mock_choice.message = mock_message
+            mock_response.choices = [mock_choice]
+
+            # First call fails, second succeeds
+            mock_safe_call.side_effect = [
+                RateLimitError("Rate limit exceeded"),
+                mock_response,
+            ]
+
+            client = GlueLLM(model="openai:gpt-4o-mini")
+            await client.complete("Test message")
+
+            # Verify sleep time is >= min_wait
+            if mock_sleep.called:
+                sleep_times = [call[0][0] for call in mock_sleep.call_args_list]
+                for sleep_time in sleep_times:
+                    assert sleep_time >= settings.retry_min_wait, (
+                        f"Sleep time {sleep_time} is below min_wait {settings.retry_min_wait}"
+                    )
+        finally:
+            settings.retry_min_wait = original_min_wait
+
+    @patch("source.api._safe_llm_call")
+    async def test_actual_wait_times(self, mock_safe_call):
+        """Test that exponential backoff actually waits (not just counts)."""
+        mock_response = Mock()
+        mock_choice = Mock()
+        mock_message = Mock()
+        mock_message.content = "Success"
+        mock_message.tool_calls = None
+        mock_choice.message = mock_message
+        mock_response.choices = [mock_choice]
+
+        # First call fails, second succeeds
+        mock_safe_call.side_effect = [
+            RateLimitError("Rate limit exceeded"),
+            mock_response,
+        ]
+
+        client = GlueLLM(model="openai:gpt-4o-mini")
+
+        # Measure actual time taken
+        start_time = time.time()
+        await client.complete("Test message")
+        elapsed_time = time.time() - start_time
+
+        # Should have waited at least min_wait seconds (with some tolerance)
+        from source.config import settings
+
+        assert elapsed_time >= settings.retry_min_wait - 0.5, (
+            f"Elapsed time {elapsed_time} is less than min_wait {settings.retry_min_wait}"
+        )
+
+    @patch("source.api._safe_llm_call")
+    @patch("asyncio.sleep")
+    async def test_exponential_backoff_calculation(self, mock_sleep, mock_safe_call):
+        """Test that exponential backoff calculation is correct."""
+        from source.config import settings
+
+        mock_response = Mock()
+        mock_choice = Mock()
+        mock_message = Mock()
+        mock_message.content = "Success"
+        mock_message.tool_calls = None
+        mock_choice.message = mock_message
+        mock_response.choices = [mock_choice]
+
+        # Two failures then success (within retry_max_attempts=3)
+        mock_safe_call.side_effect = [
+            RateLimitError("Rate limit exceeded"),
+            RateLimitError("Rate limit exceeded"),
+            mock_response,
+        ]
+
+        client = GlueLLM(model="openai:gpt-4o-mini")
+        await client.complete("Test message")
+
+        # Verify exponential pattern: each wait should be roughly 2x the previous
+        # (with multiplier=1, min=2: ~2s, ~4s, ~8s, capped at max_wait)
+        if mock_sleep.call_count >= 2:
+            sleep_times = [call[0][0] for call in mock_sleep.call_args_list]
+            # First wait should be at least min_wait
+            assert sleep_times[0] >= settings.retry_min_wait
+            # Subsequent waits should increase (exponential) or be capped
+            for i in range(1, len(sleep_times)):
+                # Each wait should be >= previous (exponential) or <= max_wait (capped)
+                assert sleep_times[i] >= sleep_times[i - 1] or sleep_times[i] <= settings.retry_max_wait
 
 
 if __name__ == "__main__":

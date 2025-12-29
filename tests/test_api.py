@@ -386,5 +386,333 @@ class TestErrorHandling:
             )
 
 
+class TestToolDiscovery:
+    """Test tool discovery and validation edge cases."""
+
+    # These are synchronous tests, override the asyncio marker
+    pytestmark = []
+
+    def test_multiple_tools_same_name(self):
+        """Test behavior when multiple tools have the same name."""
+
+        # Create two tools with same name
+        def tool1(x: str) -> str:
+            """First tool."""
+            return f"Tool 1: {x}"
+
+        def tool2(x: str) -> str:
+            """Second tool."""
+            return f"Tool 2: {x}"
+
+        # Rename second tool to match first
+        tool2.__name__ = "tool1"
+
+        client = GlueLLM(tools=[tool1, tool2])
+
+        # _find_tool should return the first match
+        found = client._find_tool("tool1")
+        assert found is not None
+        # Should return first tool in list
+        assert found is tool1
+
+    def test_tool_with_no_docstring(self):
+        """Test tool with no docstring."""
+
+        def tool_no_doc(x: str) -> str:
+            return f"No doc: {x}"
+
+        # Ensure no docstring
+        tool_no_doc.__doc__ = None
+
+        client = GlueLLM(tools=[tool_no_doc])
+        found = client._find_tool("tool_no_doc")
+        assert found is not None
+        assert found is tool_no_doc
+
+    def test_lambda_function_as_tool(self):
+        """Test lambda function as tool."""
+        lambda_tool = lambda x: f"Lambda: {x}"  # noqa: E731
+        lambda_tool.__name__ = "lambda_tool"
+
+        client = GlueLLM(tools=[lambda_tool])
+        found = client._find_tool("lambda_tool")
+        assert found is not None
+        assert found is lambda_tool
+
+    def test_partial_function_as_tool(self):
+        """Test partial function as tool."""
+        from functools import partial
+
+        def base_tool(x: str, y: int = 5) -> str:
+            """Base tool."""
+            return f"{x}:{y}"
+
+        partial_tool = partial(base_tool, y=10)
+        partial_tool.__name__ = "partial_tool"
+
+        client = GlueLLM(tools=[partial_tool])
+        found = client._find_tool("partial_tool")
+        assert found is not None
+        assert found is partial_tool
+
+    def test_tool_name_case_sensitivity(self):
+        """Test that tool name lookup is case-sensitive."""
+
+        def tool_with_caps(x: str) -> str:
+            """Tool with capital letters."""
+            return x
+
+        client = GlueLLM(tools=[tool_with_caps])
+
+        # Case-sensitive match
+        found = client._find_tool("tool_with_caps")
+        assert found is not None
+
+        # Case-insensitive should not match
+        not_found = client._find_tool("toolwithcaps")
+        assert not_found is None
+
+    def test_class_method_as_tool(self):
+        """Test class method as tool."""
+
+        class ToolClass:
+            def method_tool(self, x: str) -> str:
+                """Method tool."""
+                return f"Method: {x}"
+
+        instance = ToolClass()
+        method_tool = instance.method_tool
+        # Bound methods already have __name__ from the underlying function
+
+        client = GlueLLM(tools=[method_tool])
+        found = client._find_tool("method_tool")
+        assert found is not None
+        assert found is method_tool
+
+
+class TestStructuredOutputEdgeCases:
+    """Test structured output edge cases."""
+
+    async def test_nested_model_with_optional_fields(self):
+        """Test nested model with optional fields."""
+
+        class OptionalNested(BaseModel):
+            value: str | None = None
+
+        class ParentModel(BaseModel):
+            name: str
+            nested: OptionalNested | None = None
+
+        result = await structured_complete(
+            user_message="Return name 'test' with nested value 'nested'",
+            response_format=ParentModel,
+            system_prompt="Extract the information.",
+        )
+
+        assert isinstance(result, ParentModel)
+        assert result.name == "test"
+        # Nested may or may not be present depending on LLM
+        if result.nested is not None:
+            assert isinstance(result.nested, OptionalNested)
+
+    async def test_list_fields_in_structured_output(self):
+        """Test structured output with list/array fields."""
+
+        class ListResponse(BaseModel):
+            items: Annotated[list[str], Field(description="List of items")]
+            count: Annotated[int, Field(description="Number of items")]
+
+        result = await structured_complete(
+            user_message="Return a list with items ['apple', 'banana', 'cherry']",
+            response_format=ListResponse,
+            system_prompt="Extract the list information.",
+        )
+
+        assert isinstance(result, ListResponse)
+        assert isinstance(result.items, list)
+        assert len(result.items) > 0
+        assert isinstance(result.count, int)
+
+    async def test_enum_fields_in_structured_output(self):
+        """Test structured output with enum fields."""
+        from enum import Enum
+
+        class Status(str, Enum):
+            ACTIVE = "active"
+            INACTIVE = "inactive"
+            PENDING = "pending"
+
+        class StatusResponse(BaseModel):
+            status: Annotated[Status, Field(description="Status value")]
+
+        result = await structured_complete(
+            user_message="Return status 'active'",
+            response_format=StatusResponse,
+            system_prompt="Extract the status.",
+        )
+
+        assert isinstance(result, StatusResponse)
+        assert result.status in Status
+
+    async def test_nested_list_in_structured_output(self):
+        """Test structured output with nested lists."""
+
+        class NestedListResponse(BaseModel):
+            matrix: Annotated[list[list[int]], Field(description="Matrix of numbers")]
+
+        result = await structured_complete(
+            user_message="Return a 2x2 matrix [[1, 2], [3, 4]]",
+            response_format=NestedListResponse,
+            system_prompt="Extract the matrix.",
+        )
+
+        assert isinstance(result, NestedListResponse)
+        assert isinstance(result.matrix, list)
+        if len(result.matrix) > 0:
+            assert isinstance(result.matrix[0], list)
+
+
+class TestToolResultSerialization:
+    """Test tool result serialization with various return types."""
+
+    async def test_tool_returning_int(self):
+        """Test tool that returns an integer."""
+
+        def int_tool(x: int) -> int:
+            """Return an integer."""
+            return x * 2
+
+        result = await complete(
+            user_message="Use int_tool with 5",
+            system_prompt="Use the int_tool when asked.",
+            tools=[int_tool],
+        )
+
+        assert isinstance(result, ToolExecutionResult)
+        if result.tool_execution_history:
+            # Integer result should be converted to string
+            assert isinstance(result.tool_execution_history[0]["result"], str)
+            assert "10" in result.tool_execution_history[0]["result"]
+
+    async def test_tool_returning_list(self):
+        """Test tool that returns a list."""
+
+        def list_tool() -> list[str]:
+            """Return a list."""
+            return ["item1", "item2", "item3"]
+
+        result = await complete(
+            user_message="Use list_tool",
+            system_prompt="Use the list_tool when asked.",
+            tools=[list_tool],
+        )
+
+        assert isinstance(result, ToolExecutionResult)
+        if result.tool_execution_history:
+            # List result should be converted to string
+            assert isinstance(result.tool_execution_history[0]["result"], str)
+            assert "item1" in result.tool_execution_history[0]["result"]
+
+    async def test_tool_returning_dict(self):
+        """Test tool that returns a dictionary."""
+
+        def dict_tool() -> dict[str, str]:
+            """Return a dictionary."""
+            return {"key1": "value1", "key2": "value2"}
+
+        result = await complete(
+            user_message="Use dict_tool",
+            system_prompt="Use the dict_tool when asked.",
+            tools=[dict_tool],
+        )
+
+        assert isinstance(result, ToolExecutionResult)
+        if result.tool_execution_history:
+            # Dict result should be converted to string
+            assert isinstance(result.tool_execution_history[0]["result"], str)
+            assert (
+                "key1" in result.tool_execution_history[0]["result"]
+                or "value1" in result.tool_execution_history[0]["result"]
+            )
+
+    async def test_tool_returning_none(self):
+        """Test tool that returns None."""
+
+        def none_tool() -> None:
+            """Return None."""
+            return
+
+        result = await complete(
+            user_message="Use none_tool",
+            system_prompt="Use the none_tool when asked.",
+            tools=[none_tool],
+        )
+
+        assert isinstance(result, ToolExecutionResult)
+        if result.tool_execution_history:
+            # None result should be converted to string
+            assert isinstance(result.tool_execution_history[0]["result"], str)
+            assert "None" in result.tool_execution_history[0]["result"]
+
+    async def test_tool_returning_large_value(self):
+        """Test tool that returns a large value (>1MB)."""
+        large_string = "x" * (2 * 1024 * 1024)  # 2MB
+
+        def large_tool() -> str:
+            """Return a large string."""
+            return large_string
+
+        result = await complete(
+            user_message="Use large_tool",
+            system_prompt="Use the large_tool when asked.",
+            tools=[large_tool],
+            max_tool_iterations=1,  # Limit iterations for this test
+        )
+
+        assert isinstance(result, ToolExecutionResult)
+        if result.tool_execution_history:
+            # Large result should still be serialized
+            assert isinstance(result.tool_execution_history[0]["result"], str)
+            assert len(result.tool_execution_history[0]["result"]) > 1000000
+
+    async def test_tool_returning_special_characters(self):
+        """Test tool that returns special characters."""
+
+        def special_char_tool() -> str:
+            """Return special characters."""
+            return "Special: \n\t\r\"'\\<>{}[]()&|$@#%^*+=~`"
+
+        result = await complete(
+            user_message="Use special_char_tool",
+            system_prompt="Use the special_char_tool when asked.",
+            tools=[special_char_tool],
+        )
+
+        assert isinstance(result, ToolExecutionResult)
+        if result.tool_execution_history:
+            # Special characters should be preserved in string conversion
+            assert isinstance(result.tool_execution_history[0]["result"], str)
+            assert "Special" in result.tool_execution_history[0]["result"]
+
+    async def test_tool_returning_unicode(self):
+        """Test tool that returns unicode characters."""
+
+        def unicode_tool() -> str:
+            """Return unicode characters."""
+            return "Unicode: 你好 🌟 émojis 🎉"
+
+        result = await complete(
+            user_message="Use unicode_tool",
+            system_prompt="Use the unicode_tool when asked.",
+            tools=[unicode_tool],
+        )
+
+        assert isinstance(result, ToolExecutionResult)
+        if result.tool_execution_history:
+            # Unicode should be preserved
+            assert isinstance(result.tool_execution_history[0]["result"], str)
+            assert "Unicode" in result.tool_execution_history[0]["result"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
