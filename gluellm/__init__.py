@@ -84,10 +84,31 @@ from gluellm.api import (
     structured_complete,
 )
 from gluellm.config import GlueLLMSettings, get_settings, reload_settings, settings
+from gluellm.context import (
+    clear_correlation_id,
+    clear_request_metadata,
+    get_context_dict,
+    get_correlation_id,
+    get_request_metadata,
+    set_correlation_id,
+    set_request_metadata,
+    with_correlation_id,
+)
 from gluellm.logging_config import setup_logging
 from gluellm.models.config import RequestConfig
 from gluellm.models.conversation import Conversation, Message, Role
 from gluellm.models.prompt import Prompt, SystemPrompt
+from gluellm.shutdown import (
+    ShutdownContext,
+    execute_shutdown_callbacks,
+    get_in_flight_count,
+    graceful_shutdown,
+    is_shutting_down,
+    register_shutdown_callback,
+    setup_signal_handlers,
+    unregister_shutdown_callback,
+    wait_for_shutdown,
+)
 
 # Initialize logging on package import
 _setup_logging_called = False
@@ -139,6 +160,25 @@ __all__ = [
     "settings",
     "get_settings",
     "reload_settings",
+    # Context and Correlation IDs
+    "get_correlation_id",
+    "set_correlation_id",
+    "clear_correlation_id",
+    "with_correlation_id",
+    "get_request_metadata",
+    "set_request_metadata",
+    "clear_request_metadata",
+    "get_context_dict",
+    # Graceful Shutdown
+    "ShutdownContext",
+    "is_shutting_down",
+    "setup_signal_handlers",
+    "graceful_shutdown",
+    "register_shutdown_callback",
+    "unregister_shutdown_callback",
+    "get_in_flight_count",
+    "wait_for_shutdown",
+    "execute_shutdown_callbacks",
 ]
 
 __version__ = "0.1.0"

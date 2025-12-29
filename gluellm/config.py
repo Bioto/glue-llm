@@ -12,6 +12,7 @@ Available Settings:
     - Model Configuration: default_model, default_system_prompt
     - Tool Execution: max_tool_iterations
     - Retry Behavior: retry_max_attempts, retry_min_wait, retry_max_wait, retry_multiplier
+    - Request Timeout: default_request_timeout, max_request_timeout
     - Logging: log_level, log_file_level, log_dir, log_file_name, log_json_format, log_max_bytes, log_backup_count
     - API Keys: openai_api_key, anthropic_api_key, xai_api_key
     - Tracing: enable_tracing, mlflow_tracking_uri, mlflow_experiment_name, otel_exporter_endpoint
@@ -67,6 +68,10 @@ class GlueLLMSettings(BaseSettings):
     retry_min_wait: Annotated[int, Field(ge=0)] = 2
     retry_max_wait: Annotated[int, Field(ge=0)] = 30
     retry_multiplier: Annotated[int, Field(ge=0)] = 1
+
+    # Request timeout settings (in seconds)
+    default_request_timeout: Annotated[float, Field(gt=0)] = 60.0  # Default 60 seconds
+    max_request_timeout: Annotated[float, Field(gt=0)] = 300.0  # Maximum 5 minutes
 
     # Logging settings
     log_level: str = "INFO"

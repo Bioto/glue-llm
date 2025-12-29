@@ -142,7 +142,13 @@ def is_tracing_enabled() -> bool:
 
 
 @contextmanager
-def trace_llm_call(model: str, messages: list[dict], tools: list[Any] | None = None, **attributes: Any):
+def trace_llm_call(
+    model: str,
+    messages: list[dict],
+    tools: list[Any] | None = None,
+    correlation_id: str | None = None,
+    **attributes: Any,
+):
     """Context manager for tracing LLM calls with OpenTelemetry.
 
     Creates a span for an LLM call with relevant attributes and metrics.
@@ -152,18 +158,20 @@ def trace_llm_call(model: str, messages: list[dict], tools: list[Any] | None = N
     - Tool usage information
     - Response metadata
     - Errors and exceptions
+    - Correlation ID (if provided)
 
     Args:
         model: Model identifier (e.g., "openai:gpt-4o-mini")
         messages: List of message dictionaries
         tools: Optional list of tools available for the call
+        correlation_id: Optional correlation ID for request tracking
         **attributes: Additional span attributes to include
 
     Yields:
         Span: The active span object for adding custom attributes
 
     Example:
-        >>> with trace_llm_call("openai:gpt-4o-mini", messages) as span:
+        >>> with trace_llm_call("openai:gpt-4o-mini", messages, correlation_id="req-123") as span:
         ...     response = await llm_call(messages)
         ...     span.set_attribute("response.tokens", response.usage.total_tokens)
     """
@@ -186,16 +194,17 @@ def trace_llm_call(model: str, messages: list[dict], tools: list[Any] | None = N
     provider, model_name = model.split(":", 1) if ":" in model else ("unknown", model)
 
     # Start a new span
-    with _tracer.start_as_current_span(
-        "llm.completion",
-        attributes={
-            "llm.provider": provider,
-            "llm.model": model_name,
-            "llm.messages_count": len(messages),
-            "llm.tools_available": len(tools) if tools else 0,
-            **attributes,
-        },
-    ) as span:
+    span_attributes = {
+        "llm.provider": provider,
+        "llm.model": model_name,
+        "llm.messages_count": len(messages),
+        "llm.tools_available": len(tools) if tools else 0,
+        **attributes,
+    }
+    if correlation_id:
+        span_attributes["correlation_id"] = correlation_id
+
+    with _tracer.start_as_current_span("llm.completion", attributes=span_attributes) as span:
         try:
             yield span
         except Exception as e:
