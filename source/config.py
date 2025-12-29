@@ -26,7 +26,15 @@ Example:
     >>> settings = reload_settings()
 """
 
+from pathlib import Path
+from typing import Annotated
+
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Find the project root (where .env file is located)
+_project_root = Path(__file__).parent.parent
+_env_file = _project_root / ".env"
 
 
 class GlueLLMSettings(BaseSettings):
@@ -40,7 +48,7 @@ class GlueLLMSettings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="GLUELLM_",
-        env_file=".env",
+        env_file=_env_file,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -51,13 +59,13 @@ class GlueLLMSettings(BaseSettings):
     default_system_prompt: str = "You are a helpful assistant."
 
     # Tool execution settings
-    max_tool_iterations: int = 10
+    max_tool_iterations: Annotated[int, Field(gt=0)] = 10
 
     # Retry settings
-    retry_max_attempts: int = 3
-    retry_min_wait: int = 2
-    retry_max_wait: int = 30
-    retry_multiplier: int = 1
+    retry_max_attempts: Annotated[int, Field(gt=0)] = 3
+    retry_min_wait: Annotated[int, Field(ge=0)] = 2
+    retry_max_wait: Annotated[int, Field(ge=0)] = 30
+    retry_multiplier: Annotated[int, Field(ge=0)] = 1
 
     # Logging settings
     log_level: str = "INFO"

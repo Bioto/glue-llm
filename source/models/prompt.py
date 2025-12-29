@@ -57,7 +57,7 @@ BASE_SYSTEM_PROMPT_TEMPLATE = r"""
             {% for tool in tools %}
                 <tool>
                     <name>{{ tool.__name__ }}</name>
-                    <description>{{ tool.__doc__ }}</description>
+                    <description>{{ tool.__doc__ if tool.__doc__ else '' }}</description>
                 </tool>
             {% endfor %}
         </tools>
