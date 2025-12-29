@@ -181,6 +181,16 @@ uv run python examples/basic_usage.py
 # Run CLI test commands
 uv run python source/cli.py test-completion
 uv run python source/cli.py test-tool-call
+
+# Test workflows
+uv run python source/cli.py test-iterative-workflow
+uv run python source/cli.py test-pipeline-workflow
+uv run python source/cli.py test-debate-workflow
+
+# Test workflows with custom options
+uv run python source/cli.py test-iterative-workflow -i "Write about AI" -n 3 -c 2
+uv run python source/cli.py test-pipeline-workflow -i "Topic: Python" -s 2
+uv run python source/cli.py test-debate-workflow -t "Is remote work better?" -r 3 --no-judge
 ```
 
 ## Architecture

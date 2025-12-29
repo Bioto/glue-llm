@@ -7,8 +7,17 @@ Available Models:
     - Agent: Configured LLM agent with specific capabilities
     - RequestConfig: Configuration for individual LLM requests
     - Conversation: Conversation history manager
-    - Message: Individual message in a conversation
-    - Role: Message role enumeration
-    - SystemPrompt: System prompt with tool integration
-    - Prompt: Basic prompt model
+     - Message: Individual message in a conversation
+     - Role: Message role enumeration
+     - SystemPrompt: System prompt with tool integration
+     - Prompt: Basic prompt model
+     - CriticConfig: Configuration for specialized critics in workflows
+     - IterativeConfig: Configuration for iterative refinement workflows
 """
+
+from source.models.workflow import CriticConfig, IterativeConfig
+
+__all__ = [
+    "CriticConfig",
+    "IterativeConfig",
+]
