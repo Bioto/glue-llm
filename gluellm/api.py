@@ -72,6 +72,7 @@ from gluellm.logging_config import get_logger
 from gluellm.models.conversation import Conversation, Role
 from gluellm.telemetry import (
     is_tracing_enabled,
+    log_llm_metrics,
     record_token_usage,
     set_span_attributes,
     trace_llm_call,
@@ -282,6 +283,10 @@ async def _safe_llm_call(
             elapsed_time = time.time() - start_time
 
             # For non-streaming responses, record token usage
+            tokens_used = None
+            finish_reason = None
+            has_tool_calls = False
+
             if not stream and hasattr(response, "usage") and response.usage:
                 usage = response.usage
                 # Safely extract token counts, ensuring they're integers
@@ -322,17 +327,40 @@ async def _safe_llm_call(
             elif stream:
                 logger.debug(f"LLM call streaming started: model={model}, latency={elapsed_time:.3f}s")
 
+            # Log metrics to MLflow
+            log_llm_metrics(
+                model=model,
+                latency=elapsed_time,
+                tokens_used=tokens_used,
+                finish_reason=finish_reason,
+                has_tool_calls=has_tool_calls,
+                error=False,
+            )
+
             return response
 
     except Exception as e:
         elapsed_time = time.time() - start_time
         # Classify the error and raise the appropriate exception
         classified_error = classify_llm_error(e)
+        error_type = type(classified_error).__name__
         logger.error(
             f"LLM call failed after {elapsed_time:.3f}s: model={model}, error={classified_error}, "
-            f"error_type={type(classified_error).__name__}",
+            f"error_type={error_type}",
             exc_info=True,
         )
+
+        # Log error metrics to MLflow
+        log_llm_metrics(
+            model=model,
+            latency=elapsed_time,
+            tokens_used=None,
+            finish_reason=None,
+            has_tool_calls=False,
+            error=True,
+            error_type=error_type,
+        )
+
         raise classified_error from e
 
 

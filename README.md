@@ -550,13 +550,14 @@ settings = reload_settings()
 
 ## OpenTelemetry Tracing with MLflow
 
-GlueLLM supports distributed tracing using OpenTelemetry and MLflow for comprehensive observability of LLM interactions. This feature enables you to:
+GlueLLM supports distributed tracing and metrics tracking using OpenTelemetry and MLflow for comprehensive observability of LLM interactions. This feature enables you to:
 
 - **Monitor LLM calls** with detailed span information
 - **Track token usage** and costs
 - **Trace tool executions** and their results
 - **Debug complex workflows** with visualization
 - **Analyze performance** across multiple calls
+- **Log metrics automatically** - Latency, token usage, success/error rates from any-llm clients
 
 ### Prerequisites
 
@@ -719,6 +720,55 @@ This example demonstrates:
 - Multi-turn conversation tracing
 - Error handling with tracing
 
+### MLflow Metrics Tracking
+
+In addition to OpenTelemetry tracing, GlueLLM automatically logs metrics to MLflow for each LLM call. Metrics are logged automatically when tracing is enabled:
+
+**Automatically Tracked Metrics:**
+- `llm.latency_seconds` - Time taken for each LLM call
+- `llm.tokens.prompt` - Prompt tokens used
+- `llm.tokens.completion` - Completion tokens used
+- `llm.tokens.total` - Total tokens used
+- `llm.success` - 1.0 for successful calls
+- `llm.error` - 1.0 for failed calls
+
+**Tracked Parameters:**
+- `llm.provider` - Provider name (openai, anthropic, etc.)
+- `llm.model` - Model name
+- `llm.finish_reason` - Completion finish reason
+- `llm.error_type` - Error type if call failed
+- `llm.has_tool_calls` - Whether response included tool calls
+
+**Automatic Run Management:**
+- If no MLflow run is active, GlueLLM automatically creates a default run named "gluellm_auto_metrics"
+- All metrics are logged to the active run
+- Metrics accumulate over time, allowing aggregation and analysis in MLflow UI
+
+**Manual Run Management:**
+For more control over run grouping, use the `mlflow_run_context`:
+
+```python
+from gluellm.telemetry import mlflow_run_context, configure_tracing
+from gluellm.api import complete
+
+configure_tracing()
+
+# Group multiple calls in a single run
+with mlflow_run_context("my_workflow", tags={"experiment": "v1"}):
+    result1 = await complete("First query")
+    result2 = await complete("Second query")
+    # Both calls logged to the same run
+```
+
+**Viewing Metrics in MLflow:**
+1. Open MLflow UI: `http://localhost:5000`
+2. Navigate to your experiment
+3. Click on a run to see:
+   - Metrics over time (latency, token usage)
+   - Parameters (model, provider, etc.)
+   - Aggregated statistics
+   - Comparison across runs
+
 ### Benefits
 
 **Development:**
@@ -726,18 +776,21 @@ This example demonstrates:
 - Identify performance bottlenecks
 - Track token usage and optimize costs
 - Understand tool execution patterns
+- Monitor metrics automatically without manual instrumentation
 
 **Production:**
 - Monitor system health in real-time
 - Track LLM API reliability
 - Measure end-to-end latency
 - Correlate errors with specific calls
+- Automatic metrics collection from any-llm clients
 
 **Analysis:**
 - Compare performance across models
 - Analyze token usage patterns
 - Optimize system prompts
 - Identify frequently used tools
+- Aggregate metrics over time for trend analysis
 
 ### Disabling Tracing
 
