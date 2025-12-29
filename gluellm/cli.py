@@ -12,6 +12,18 @@ Available Commands:
     - test_iterative_workflow: Test iterative refinement workflow
     - test_pipeline_workflow: Test pipeline workflow
     - test_debate_workflow: Test debate workflow
+    - test_reflection_workflow: Test reflection workflow
+    - test_chain_of_density_workflow: Test chain of density workflow
+    - test_socratic_workflow: Test Socratic workflow
+    - test_rag_workflow: Test RAG workflow
+    - test_round_robin_workflow: Test round-robin workflow
+    - test_consensus_workflow: Test consensus workflow
+    - test_hierarchical_workflow: Test hierarchical workflow
+    - test_map_reduce_workflow: Test MapReduce workflow
+    - test_react_workflow: Test ReAct workflow
+    - test_mixture_of_experts_workflow: Test Mixture of Experts workflow
+    - test_constitutional_workflow: Test Constitutional workflow
+    - test_tree_of_thoughts_workflow: Test Tree of Thoughts workflow
 """
 
 import click
@@ -659,6 +671,612 @@ def test_debate_workflow(topic: str, rounds: int, judge: bool) -> None:
                 console.print(f"  [bold]Judgment:[/bold] {interaction.get('output', '')[:100]}...")
 
     asyncio.run(run_debate_workflow())
+
+
+@cli.command()
+@click.option("--input", "-i", default="Write an article about Python", help="Input prompt for the workflow")
+@click.option("--reflections", "-r", default=2, help="Number of reflection iterations")
+def test_reflection_workflow(input: str, reflections: int) -> None:
+    """Test reflection workflow with self-critique and improvement.
+
+    Demonstrates the reflection workflow where an agent critiques and
+    improves its own output through iterative self-reflection.
+
+    Examples:
+        glm test-reflection-workflow
+        glm test-reflection-workflow -i "Write about AI" -r 3
+    """
+    import asyncio
+
+    async def run_reflection_workflow():
+        from gluellm.executors import SimpleExecutor
+        from gluellm.models.workflow import ReflectionConfig
+        from gluellm.workflows.reflection import ReflectionWorkflow
+
+        console.print("[bold cyan]Testing Reflection Workflow[/bold cyan]\n")
+        console.print(f"[dim]Input:[/dim] {input}")
+        console.print(f"[dim]Reflections:[/dim] {reflections}\n")
+
+        generator = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a helpful writer.",
+        )
+        reflector = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a critical reviewer.",
+        )
+
+        workflow = ReflectionWorkflow(
+            generator=generator,
+            reflector=reflector,
+            config=ReflectionConfig(max_reflections=reflections),
+        )
+
+        console.print("[yellow]Executing workflow...[/yellow]\n")
+        result = await workflow.execute(input)
+
+        console.print("[bold green]✓ Workflow completed![/bold green]\n")
+        console.print(f"[bold]Final Output:[/bold]\n{result.final_output}\n")
+        console.print(f"[bold]Iterations:[/bold] {result.iterations}")
+        console.print(f"[bold]Total interactions:[/bold] {len(result.agent_interactions)}")
+
+    asyncio.run(run_reflection_workflow())
+
+
+@cli.command()
+@click.option("--input", "-i", default="Summarize this article", help="Input prompt for the workflow")
+@click.option("--iterations", "-n", default=3, help="Number of density iterations")
+def test_chain_of_density_workflow(input: str, iterations: int) -> None:
+    """Test chain of density workflow.
+
+    Demonstrates iteratively increasing content density.
+
+    Examples:
+        glm test-chain-of-density-workflow
+        glm test-chain-of-density-workflow -i "Summarize" -n 5
+    """
+    import asyncio
+
+    async def run_chain_of_density_workflow():
+        from gluellm.executors import SimpleExecutor
+        from gluellm.models.workflow import ChainOfDensityConfig
+        from gluellm.workflows.chain_of_density import ChainOfDensityWorkflow
+
+        console.print("[bold cyan]Testing Chain of Density Workflow[/bold cyan]\n")
+        console.print(f"[dim]Input:[/dim] {input}")
+        console.print(f"[dim]Iterations:[/dim] {iterations}\n")
+
+        generator = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a helpful summarizer.",
+        )
+
+        workflow = ChainOfDensityWorkflow(
+            generator=generator,
+            config=ChainOfDensityConfig(num_iterations=iterations),
+        )
+
+        console.print("[yellow]Executing workflow...[/yellow]\n")
+        result = await workflow.execute(input)
+
+        console.print("[bold green]✓ Workflow completed![/bold green]\n")
+        console.print(f"[bold]Final Output:[/bold]\n{result.final_output}\n")
+        console.print(f"[bold]Iterations:[/bold] {result.iterations}")
+
+    asyncio.run(run_chain_of_density_workflow())
+
+
+@cli.command()
+@click.option("--topic", "-t", default="What is artificial intelligence?", help="Topic to explore")
+@click.option("--exchanges", "-e", default=3, help="Number of question-answer exchanges")
+def test_socratic_workflow(topic: str, exchanges: int) -> None:
+    """Test Socratic workflow with question-answer dialogue.
+
+    Demonstrates two agents engaging in Socratic dialogue.
+
+    Examples:
+        glm test-socratic-workflow
+        glm test-socratic-workflow -t "What is Python?" -e 5
+    """
+    import asyncio
+
+    async def run_socratic_workflow():
+        from gluellm.executors import SimpleExecutor
+        from gluellm.models.workflow import SocraticConfig
+        from gluellm.workflows.socratic import SocraticWorkflow
+
+        console.print("[bold cyan]Testing Socratic Workflow[/bold cyan]\n")
+        console.print(f"[dim]Topic:[/dim] {topic}")
+        console.print(f"[dim]Exchanges:[/dim] {exchanges}\n")
+
+        questioner = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a Socratic questioner.",
+        )
+        responder = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a thoughtful responder.",
+        )
+
+        workflow = SocraticWorkflow(
+            questioner=questioner,
+            responder=responder,
+            config=SocraticConfig(max_exchanges=exchanges),
+        )
+
+        console.print("[yellow]Executing workflow...[/yellow]\n")
+        result = await workflow.execute(topic)
+
+        console.print("[bold green]✓ Workflow completed![/bold green]\n")
+        console.print(f"[bold]Final Output:[/bold]\n{result.final_output}\n")
+        console.print(f"[bold]Exchanges:[/bold] {result.iterations}")
+
+    asyncio.run(run_socratic_workflow())
+
+
+@cli.command()
+@click.option("--query", "-q", default="What is Python?", help="Query to answer")
+def test_rag_workflow(query: str) -> None:
+    """Test RAG (Retrieval-Augmented Generation) workflow.
+
+    Demonstrates retrieval-augmented generation with context.
+
+    Examples:
+        glm test-rag-workflow
+        glm test-rag-workflow -q "What is machine learning?"
+    """
+    import asyncio
+
+    async def run_rag_workflow():
+        from gluellm.executors import SimpleExecutor
+        from gluellm.models.workflow import RAGConfig
+        from gluellm.workflows.rag import RAGWorkflow
+
+        console.print("[bold cyan]Testing RAG Workflow[/bold cyan]\n")
+        console.print(f"[dim]Query:[/dim] {query}\n")
+
+        def mock_retriever(q: str) -> list[dict]:
+            return [
+                {"content": f"Context about {q}", "source": "doc1"},
+                {"content": f"More information about {q}", "source": "doc2"},
+            ]
+
+        generator = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You answer questions using provided context.",
+        )
+
+        workflow = RAGWorkflow(
+            retriever=mock_retriever,
+            generator=generator,
+            config=RAGConfig(max_retrieved_chunks=2),
+        )
+
+        console.print("[yellow]Executing workflow...[/yellow]\n")
+        result = await workflow.execute(query)
+
+        console.print("[bold green]✓ Workflow completed![/bold green]\n")
+        console.print(f"[bold]Final Output:[/bold]\n{result.final_output}\n")
+        console.print(f"[bold]Retrieved chunks:[/bold] {result.metadata.get('retrieved_chunks', 0)}")
+
+    asyncio.run(run_rag_workflow())
+
+
+@cli.command()
+@click.option("--input", "-i", default="Write an article", help="Input task")
+@click.option("--rounds", "-r", default=2, help="Number of rounds")
+@click.option("--agents", "-a", default=2, help="Number of agents")
+def test_round_robin_workflow(input: str, rounds: int, agents: int) -> None:
+    """Test round-robin workflow with collaborative agents.
+
+    Demonstrates agents taking turns contributing.
+
+    Examples:
+        glm test-round-robin-workflow
+        glm test-round-robin-workflow -i "Write about AI" -r 3 -a 3
+    """
+    import asyncio
+
+    async def run_round_robin_workflow():
+        from gluellm.executors import SimpleExecutor
+        from gluellm.models.workflow import RoundRobinConfig
+        from gluellm.workflows.round_robin import RoundRobinWorkflow
+
+        console.print("[bold cyan]Testing Round-Robin Workflow[/bold cyan]\n")
+        console.print(f"[dim]Input:[/dim] {input}")
+        console.print(f"[dim]Rounds:[/dim] {rounds}")
+        console.print(f"[dim]Agents:[/dim] {agents}\n")
+
+        agent_list = []
+        for i in range(agents):
+            agent_list.append(
+                (
+                    f"Agent{i + 1}",
+                    SimpleExecutor(
+                        model="openai:gpt-4o-mini",
+                        system_prompt=f"You are Agent {i + 1}, a helpful contributor.",
+                    ),
+                )
+            )
+
+        workflow = RoundRobinWorkflow(
+            agents=agent_list,
+            config=RoundRobinConfig(max_rounds=rounds),
+        )
+
+        console.print("[yellow]Executing workflow...[/yellow]\n")
+        result = await workflow.execute(input)
+
+        console.print("[bold green]✓ Workflow completed![/bold green]\n")
+        console.print(f"[bold]Final Output:[/bold]\n{result.final_output[:200]}...\n")
+        console.print(f"[bold]Rounds:[/bold] {result.iterations}")
+
+    asyncio.run(run_round_robin_workflow())
+
+
+@cli.command()
+@click.option("--problem", "-p", default="Design a solution", help="Problem to solve")
+@click.option("--rounds", "-r", default=2, help="Number of consensus rounds")
+@click.option("--agents", "-a", default=3, help="Number of proposing agents")
+def test_consensus_workflow(problem: str, rounds: int, agents: int) -> None:
+    """Test consensus workflow with voting agents.
+
+    Demonstrates agents proposing solutions and reaching consensus.
+
+    Examples:
+        glm test-consensus-workflow
+        glm test-consensus-workflow -p "Solve X" -r 3 -a 4
+    """
+    import asyncio
+
+    async def run_consensus_workflow():
+        from gluellm.executors import SimpleExecutor
+        from gluellm.models.workflow import ConsensusConfig
+        from gluellm.workflows.consensus import ConsensusWorkflow
+
+        console.print("[bold cyan]Testing Consensus Workflow[/bold cyan]\n")
+        console.print(f"[dim]Problem:[/dim] {problem}")
+        console.print(f"[dim]Rounds:[/dim] {rounds}")
+        console.print(f"[dim]Agents:[/dim] {agents}\n")
+
+        proposers = []
+        for i in range(agents):
+            proposers.append(
+                (
+                    f"Agent{i + 1}",
+                    SimpleExecutor(
+                        model="openai:gpt-4o-mini",
+                        system_prompt=f"You are Agent {i + 1}, proposing solutions.",
+                    ),
+                )
+            )
+
+        workflow = ConsensusWorkflow(
+            proposers=proposers,
+            config=ConsensusConfig(max_rounds=rounds, min_agreement_ratio=0.6),
+        )
+
+        console.print("[yellow]Executing workflow...[/yellow]\n")
+        result = await workflow.execute(problem)
+
+        console.print("[bold green]✓ Workflow completed![/bold green]\n")
+        console.print(f"[bold]Final Output:[/bold]\n{result.final_output[:200]}...\n")
+        console.print(f"[bold]Consensus reached:[/bold] {result.metadata.get('consensus_reached', False)}")
+
+    asyncio.run(run_consensus_workflow())
+
+
+@cli.command()
+@click.option("--task", "-t", default="Research and write a report", help="Task to decompose")
+@click.option("--subtasks", "-s", default=3, help="Maximum subtasks")
+def test_hierarchical_workflow(task: str, subtasks: int) -> None:
+    """Test hierarchical workflow with manager and workers.
+
+    Demonstrates task decomposition and parallel execution.
+
+    Examples:
+        glm test-hierarchical-workflow
+        glm test-hierarchical-workflow -t "Complex task" -s 5
+    """
+    import asyncio
+
+    async def run_hierarchical_workflow():
+        from gluellm.executors import SimpleExecutor
+        from gluellm.models.workflow import HierarchicalConfig
+        from gluellm.workflows.hierarchical import HierarchicalWorkflow
+
+        console.print("[bold cyan]Testing Hierarchical Workflow[/bold cyan]\n")
+        console.print(f"[dim]Task:[/dim] {task}")
+        console.print(f"[dim]Max subtasks:[/dim] {subtasks}\n")
+
+        manager = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a manager who breaks down tasks.",
+        )
+        worker1 = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a worker executing subtasks.",
+        )
+        worker2 = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a worker executing subtasks.",
+        )
+
+        workflow = HierarchicalWorkflow(
+            manager=manager,
+            workers=[("Worker1", worker1), ("Worker2", worker2)],
+            config=HierarchicalConfig(max_subtasks=subtasks, parallel_workers=True),
+        )
+
+        console.print("[yellow]Executing workflow...[/yellow]\n")
+        result = await workflow.execute(task)
+
+        console.print("[bold green]✓ Workflow completed![/bold green]\n")
+        console.print(f"[bold]Final Output:[/bold]\n{result.final_output[:200]}...\n")
+        console.print(f"[bold]Subtasks created:[/bold] {result.metadata.get('subtasks_created', 0)}")
+
+    asyncio.run(run_hierarchical_workflow())
+
+
+@cli.command()
+@click.option("--input", "-i", default="Process this long document", help="Input to process")
+@click.option("--chunk-size", "-c", default=500, help="Chunk size for splitting")
+def test_map_reduce_workflow(input: str, chunk_size: int) -> None:
+    """Test MapReduce workflow with parallel processing.
+
+    Demonstrates parallel chunk processing and aggregation.
+
+    Examples:
+        glm test-map-reduce-workflow
+        glm test-map-reduce-workflow -i "Long text..." -c 1000
+    """
+    import asyncio
+
+    async def run_map_reduce_workflow():
+        from gluellm.executors import SimpleExecutor
+        from gluellm.models.workflow import MapReduceConfig
+        from gluellm.workflows.map_reduce import MapReduceWorkflow
+
+        console.print("[bold cyan]Testing MapReduce Workflow[/bold cyan]\n")
+
+        # Create long input if needed
+        workflow_input = input
+        if len(workflow_input) < chunk_size:
+            workflow_input = (workflow_input + " ") * (chunk_size // len(workflow_input) + 1)
+
+        console.print(f"[dim]Input length:[/dim] {len(workflow_input)} characters")
+        console.print(f"[dim]Chunk size:[/dim] {chunk_size}\n")
+
+        mapper = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You process text chunks.",
+        )
+        reducer = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You synthesize results.",
+        )
+
+        workflow = MapReduceWorkflow(
+            mapper=mapper,
+            reducer=reducer,
+            config=MapReduceConfig(chunk_size=chunk_size, reduce_strategy="summarize"),
+        )
+
+        console.print("[yellow]Executing workflow...[/yellow]\n")
+        result = await workflow.execute(workflow_input)
+
+        console.print("[bold green]✓ Workflow completed![/bold green]\n")
+        console.print(f"[bold]Final Output:[/bold]\n{result.final_output[:200]}...\n")
+        console.print(f"[bold]Chunks processed:[/bold] {result.metadata.get('chunks_processed', 0)}")
+
+    asyncio.run(run_map_reduce_workflow())
+
+
+@cli.command()
+@click.option("--question", "-q", default="What is the weather in Paris?", help="Question to solve")
+@click.option("--steps", "-s", default=5, help="Maximum reasoning steps")
+def test_react_workflow(question: str, steps: int) -> None:
+    """Test ReAct (Reasoning + Acting) workflow.
+
+    Demonstrates interleaved reasoning and action steps.
+
+    Examples:
+        glm test-react-workflow
+        glm test-react-workflow -q "Solve this problem" -s 10
+    """
+    import asyncio
+
+    async def run_react_workflow():
+        from gluellm.executors import SimpleExecutor
+        from gluellm.models.workflow import ReActConfig
+        from gluellm.workflows.react import ReActWorkflow
+
+        console.print("[bold cyan]Testing ReAct Workflow[/bold cyan]\n")
+        console.print(f"[dim]Question:[/dim] {question}")
+        console.print(f"[dim]Max steps:[/dim] {steps}\n")
+
+        reasoner = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You reason step by step and take actions.",
+        )
+
+        workflow = ReActWorkflow(
+            reasoner=reasoner,
+            config=ReActConfig(max_steps=steps, stop_on_final_answer=True),
+        )
+
+        console.print("[yellow]Executing workflow...[/yellow]\n")
+        result = await workflow.execute(question)
+
+        console.print("[bold green]✓ Workflow completed![/bold green]\n")
+        console.print(f"[bold]Final Answer:[/bold]\n{result.final_output}\n")
+        console.print(f"[bold]Steps taken:[/bold] {result.iterations}")
+
+    asyncio.run(run_react_workflow())
+
+
+@cli.command()
+@click.option("--query", "-q", default="Calculate something", help="Query to route")
+def test_mixture_of_experts_workflow(query: str) -> None:
+    """Test Mixture of Experts workflow.
+
+    Demonstrates routing to specialized experts.
+
+    Examples:
+        glm test-mixture-of-experts-workflow
+        glm test-mixture-of-experts-workflow -q "Write code"
+    """
+    import asyncio
+
+    async def run_moe_workflow():
+        from gluellm.executors import SimpleExecutor
+        from gluellm.models.workflow import ExpertConfig, MoEConfig
+        from gluellm.workflows.mixture_of_experts import MixtureOfExpertsWorkflow
+
+        console.print("[bold cyan]Testing Mixture of Experts Workflow[/bold cyan]\n")
+        console.print(f"[dim]Query:[/dim] {query}\n")
+
+        math_expert = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a math expert.",
+        )
+        code_expert = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a coding expert.",
+        )
+
+        workflow = MixtureOfExpertsWorkflow(
+            experts=[
+                ExpertConfig(
+                    executor=math_expert,
+                    specialty="mathematics",
+                    description="Expert in math",
+                    activation_keywords=["calculate", "math"],
+                ),
+                ExpertConfig(
+                    executor=code_expert,
+                    specialty="programming",
+                    description="Expert in coding",
+                    activation_keywords=["code", "program"],
+                ),
+            ],
+            config=MoEConfig(routing_strategy="keyword", top_k=2),
+        )
+
+        console.print("[yellow]Executing workflow...[/yellow]\n")
+        result = await workflow.execute(query)
+
+        console.print("[bold green]✓ Workflow completed![/bold green]\n")
+        console.print(f"[bold]Final Output:[/bold]\n{result.final_output[:200]}...\n")
+        console.print(f"[bold]Experts used:[/bold] {result.metadata.get('experts_used', 0)}")
+
+    asyncio.run(run_moe_workflow())
+
+
+@cli.command()
+@click.option("--input", "-i", default="Write about AI safety", help="Input to generate")
+def test_constitutional_workflow(input: str) -> None:
+    """Test Constitutional AI workflow.
+
+    Demonstrates principle-based generation and critique.
+
+    Examples:
+        glm test-constitutional-workflow
+        glm test-constitutional-workflow -i "Write a response"
+    """
+    import asyncio
+
+    async def run_constitutional_workflow():
+        from gluellm.executors import SimpleExecutor
+        from gluellm.models.workflow import ConstitutionalConfig, Principle
+        from gluellm.workflows.constitutional import ConstitutionalWorkflow
+
+        console.print("[bold cyan]Testing Constitutional Workflow[/bold cyan]\n")
+        console.print(f"[dim]Input:[/dim] {input}\n")
+
+        generator = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You generate helpful content.",
+        )
+        critic = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You critique content against principles.",
+        )
+
+        workflow = ConstitutionalWorkflow(
+            generator=generator,
+            critic=critic,
+            config=ConstitutionalConfig(
+                principles=[
+                    Principle(name="harmless", description="Should not harm", severity="critical"),
+                    Principle(name="helpful", description="Should be helpful", severity="error"),
+                ],
+                max_revisions=2,
+            ),
+        )
+
+        console.print("[yellow]Executing workflow...[/yellow]\n")
+        result = await workflow.execute(input)
+
+        console.print("[bold green]✓ Workflow completed![/bold green]\n")
+        console.print(f"[bold]Final Output:[/bold]\n{result.final_output[:200]}...\n")
+        console.print(f"[bold]Revisions:[/bold] {result.iterations}")
+
+    asyncio.run(run_constitutional_workflow())
+
+
+@cli.command()
+@click.option("--problem", "-p", default="Solve this problem", help="Problem to solve")
+@click.option("--depth", "-d", default=2, help="Maximum tree depth")
+@click.option("--branching", "-b", default=2, help="Branching factor")
+def test_tree_of_thoughts_workflow(problem: str, depth: int, branching: int) -> None:
+    """Test Tree of Thoughts workflow.
+
+    Demonstrates exploring multiple reasoning paths.
+
+    Examples:
+        glm test-tree-of-thoughts-workflow
+        glm test-tree-of-thoughts-workflow -p "Complex problem" -d 3 -b 3
+    """
+    import asyncio
+
+    async def run_tot_workflow():
+        from gluellm.executors import SimpleExecutor
+        from gluellm.models.workflow import TreeOfThoughtsConfig
+        from gluellm.workflows.tree_of_thoughts import TreeOfThoughtsWorkflow
+
+        console.print("[bold cyan]Testing Tree of Thoughts Workflow[/bold cyan]\n")
+        console.print(f"[dim]Problem:[/dim] {problem}")
+        console.print(f"[dim]Depth:[/dim] {depth}")
+        console.print(f"[dim]Branching:[/dim] {branching}\n")
+
+        thinker = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You think through problems step by step.",
+        )
+        evaluator = SimpleExecutor(
+            model="openai:gpt-4o-mini",
+            system_prompt="You evaluate reasoning paths.",
+        )
+
+        workflow = TreeOfThoughtsWorkflow(
+            thinker=thinker,
+            evaluator=evaluator,
+            config=TreeOfThoughtsConfig(
+                branching_factor=branching,
+                max_depth=depth,
+                evaluation_strategy="score",
+            ),
+        )
+
+        console.print("[yellow]Executing workflow...[/yellow]\n")
+        result = await workflow.execute(problem)
+
+        console.print("[bold green]✓ Workflow completed![/bold green]\n")
+        console.print(f"[bold]Final Output:[/bold]\n{result.final_output[:200]}...\n")
+        console.print(f"[bold]Depth explored:[/bold] {result.iterations}")
+
+    asyncio.run(run_tot_workflow())
 
 
 if __name__ == "__main__":

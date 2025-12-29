@@ -953,7 +953,7 @@ custom_agent = Agent(
 
 ## Multi-Agent Workflows
 
-GlueLLM provides three powerful workflow patterns for orchestrating multiple agents.
+GlueLLM provides 15 powerful workflow patterns for orchestrating multiple agents, from simple single-agent refinement to complex multi-agent coordination patterns.
 
 ### Iterative Refinement Workflow
 
@@ -1159,6 +1159,354 @@ print(f"\nTotal interactions: {len(result.agent_interactions)}")
 - Each participant sees previous arguments
 - Optional judge for final decision
 - Debate history tracking
+
+### Reflection Workflow
+
+Single agent critiques and improves its own output through self-reflection.
+
+```python
+from gluellm.workflows.reflection import ReflectionWorkflow, ReflectionConfig
+from gluellm.executors import AgentExecutor
+
+workflow = ReflectionWorkflow(
+    generator=AgentExecutor(generator_agent),
+    reflector=AgentExecutor(reflector_agent),  # Optional, defaults to generator
+    config=ReflectionConfig(max_reflections=3),
+)
+
+result = await workflow.execute("Write an article about Python")
+```
+
+**Key Features:**
+- Self-critique and improvement loop
+- Optional improvement threshold for early stopping
+- Custom reflection prompt templates
+
+### Chain of Density Workflow
+
+Iteratively increases content density by adding entities, details, or examples.
+
+```python
+from gluellm.workflows.chain_of_density import ChainOfDensityWorkflow, ChainOfDensityConfig
+
+workflow = ChainOfDensityWorkflow(
+    generator=AgentExecutor(generator_agent),
+    config=ChainOfDensityConfig(
+        num_iterations=5,
+        density_increment="entities",  # or "details" or "examples"
+        preserve_length=True,
+    ),
+)
+
+result = await workflow.execute("Summarize this article")
+```
+
+**Key Features:**
+- Progressive density increase
+- Optional length preservation
+- Multiple increment strategies
+
+### Socratic Workflow
+
+Two agents engage in question-answer dialogue to explore topics deeply.
+
+```python
+from gluellm.workflows.socratic import SocraticWorkflow, SocraticConfig
+
+workflow = SocraticWorkflow(
+    questioner=AgentExecutor(questioner_agent),
+    responder=AgentExecutor(responder_agent),
+    config=SocraticConfig(
+        max_exchanges=5,
+        mode="peer",  # or "teacher_student"
+        synthesis_at_end=True,
+    ),
+)
+
+result = await workflow.execute("What is artificial intelligence?")
+```
+
+**Key Features:**
+- Teacher-student or peer-to-peer modes
+- Optional synthesis at end
+- Deep exploration through questioning
+
+### RAG Workflow
+
+Retrieval-Augmented Generation with optional fact verification.
+
+```python
+from gluellm.workflows.rag import RAGWorkflow, RAGConfig
+
+def my_retriever(query: str) -> list[dict]:
+    # Your retrieval logic
+    return [
+        {"content": "Relevant context...", "source": "doc1"},
+        {"content": "More context...", "source": "doc2"},
+    ]
+
+workflow = RAGWorkflow(
+    retriever=my_retriever,
+    generator=AgentExecutor(generator_agent),
+    verifier=AgentExecutor(verifier_agent),  # Optional
+    config=RAGConfig(
+        max_retrieved_chunks=5,
+        include_sources=True,
+        verify_facts=True,
+    ),
+)
+
+result = await workflow.execute("What is Python?")
+```
+
+**Key Features:**
+- Custom retrieval function
+- Optional fact verification
+- Source attribution
+- Fallback on no context
+
+### Round-Robin Workflow
+
+Multiple agents take turns contributing collaboratively.
+
+```python
+from gluellm.workflows.round_robin import RoundRobinWorkflow, RoundRobinConfig
+
+workflow = RoundRobinWorkflow(
+    agents=[
+        ("Writer", AgentExecutor(writer_agent)),
+        ("Editor", AgentExecutor(editor_agent)),
+        ("Reviewer", AgentExecutor(reviewer_agent)),
+    ],
+    config=RoundRobinConfig(
+        max_rounds=3,
+        contribution_style="extend",  # or "refine" or "challenge"
+        final_synthesis=True,
+    ),
+)
+
+result = await workflow.execute("Write an article about AI")
+```
+
+**Key Features:**
+- Sequential contribution rounds
+- Multiple contribution styles
+- Optional final synthesis
+
+### Consensus Workflow
+
+Multiple agents propose solutions and iterate until consensus.
+
+```python
+from gluellm.workflows.consensus import ConsensusWorkflow, ConsensusConfig
+
+workflow = ConsensusWorkflow(
+    proposers=[
+        ("Agent1", AgentExecutor(agent1)),
+        ("Agent2", AgentExecutor(agent2)),
+        ("Agent3", AgentExecutor(agent3)),
+    ],
+    config=ConsensusConfig(
+        min_agreement_ratio=0.7,
+        max_rounds=5,
+        voting_strategy="majority",  # or "unanimous" or "weighted"
+    ),
+)
+
+result = await workflow.execute("Design a solution for X")
+```
+
+**Key Features:**
+- Proposal and voting mechanism
+- Configurable agreement threshold
+- Multiple voting strategies
+
+### Hierarchical Workflow
+
+Manager breaks down tasks, workers execute, manager synthesizes.
+
+```python
+from gluellm.workflows.hierarchical import HierarchicalWorkflow, HierarchicalConfig
+
+workflow = HierarchicalWorkflow(
+    manager=AgentExecutor(manager_agent),
+    workers=[
+        ("Worker1", AgentExecutor(worker1)),
+        ("Worker2", AgentExecutor(worker2)),
+    ],
+    config=HierarchicalConfig(
+        max_subtasks=5,
+        parallel_workers=True,
+        synthesis_strategy="summarize",  # or "concatenate" or "merge"
+    ),
+)
+
+result = await workflow.execute("Research and write a report on AI")
+```
+
+**Key Features:**
+- Task decomposition
+- Parallel or sequential worker execution
+- Multiple synthesis strategies
+
+### MapReduce Workflow
+
+Parallel map phase processes chunks, reduce phase aggregates results.
+
+```python
+from gluellm.workflows.map_reduce import MapReduceWorkflow, MapReduceConfig
+
+workflow = MapReduceWorkflow(
+    mapper=AgentExecutor(mapper_agent),
+    reducer=AgentExecutor(reducer_agent),  # Optional, defaults to mapper
+    config=MapReduceConfig(
+        chunk_size=1000,
+        chunk_overlap=100,
+        max_parallel_chunks=5,
+        reduce_strategy="summarize",  # or "concatenate" or "hierarchical"
+    ),
+)
+
+result = await workflow.execute("Process this long document...")
+```
+
+**Key Features:**
+- Automatic chunking
+- Parallel processing
+- Multiple reduce strategies
+
+### ReAct Workflow
+
+Reasoning + Acting pattern with interleaved thought/action steps.
+
+```python
+from gluellm.workflows.react import ReActWorkflow, ReActConfig
+
+workflow = ReActWorkflow(
+    reasoner=AgentExecutor(reasoner_agent),
+    config=ReActConfig(
+        max_steps=10,
+        stop_on_final_answer=True,
+    ),
+)
+
+result = await workflow.execute("What is the weather in Paris?")
+```
+
+**Key Features:**
+- Interleaved reasoning and action
+- Tool-using pattern
+- Automatic final answer detection
+
+### Mixture of Experts Workflow
+
+Routes queries to specialized experts and combines outputs.
+
+```python
+from gluellm.workflows.mixture_of_experts import (
+    MixtureOfExpertsWorkflow,
+    ExpertConfig,
+    MoEConfig,
+)
+
+workflow = MixtureOfExpertsWorkflow(
+    experts=[
+        ExpertConfig(
+            executor=AgentExecutor(math_expert),
+            specialty="mathematics",
+            description="Expert in math and calculations",
+            activation_keywords=["calculate", "math", "equation"],
+        ),
+        ExpertConfig(
+            executor=AgentExecutor(code_expert),
+            specialty="programming",
+            description="Expert in coding",
+            activation_keywords=["code", "program"],
+        ),
+    ],
+    config=MoEConfig(
+        routing_strategy="keyword",  # or "semantic", "all", "top_k"
+        top_k=2,
+        combine_strategy="synthesize",  # or "concatenate" or "vote"
+    ),
+)
+
+result = await workflow.execute("Calculate the factorial of 10")
+```
+
+**Key Features:**
+- Multiple routing strategies
+- Specialized expert agents
+- Flexible combination methods
+
+### Constitutional Workflow
+
+Generates content, checks against principles, revises until satisfied.
+
+```python
+from gluellm.workflows.constitutional import (
+    ConstitutionalWorkflow,
+    ConstitutionalConfig,
+    Principle,
+)
+
+workflow = ConstitutionalWorkflow(
+    generator=AgentExecutor(generator_agent),
+    critic=AgentExecutor(critic_agent),  # Optional, defaults to generator
+    config=ConstitutionalConfig(
+        principles=[
+            Principle(
+                name="harmless",
+                description="Content should not cause harm",
+                severity="critical",
+            ),
+            Principle(
+                name="helpful",
+                description="Content should be helpful",
+                severity="error",
+            ),
+        ],
+        max_revisions=3,
+        require_all_pass=True,
+    ),
+)
+
+result = await workflow.execute("Write a response about AI safety")
+```
+
+**Key Features:**
+- Principle-based critique
+- Severity levels
+- Automatic revision loop
+
+### Tree of Thoughts Workflow
+
+Explores multiple reasoning paths, evaluates and selects best.
+
+```python
+from gluellm.workflows.tree_of_thoughts import (
+    TreeOfThoughtsWorkflow,
+    TreeOfThoughtsConfig,
+)
+
+workflow = TreeOfThoughtsWorkflow(
+    thinker=AgentExecutor(thinker_agent),
+    evaluator=AgentExecutor(evaluator_agent),  # Optional, defaults to thinker
+    config=TreeOfThoughtsConfig(
+        branching_factor=3,
+        max_depth=3,
+        evaluation_strategy="score",  # or "vote" or "best_first"
+        prune_threshold=0.3,
+    ),
+)
+
+result = await workflow.execute("Solve this complex problem...")
+```
+
+**Key Features:**
+- Multiple reasoning paths
+- Evaluation and pruning
+- Best-first exploration
 
 ## Agents and Executors
 
