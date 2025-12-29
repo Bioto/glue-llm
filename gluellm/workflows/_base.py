@@ -4,13 +4,17 @@ This module defines the abstract base class for all workflows,
 which orchestrate multi-agent interactions and complex execution patterns.
 """
 
+import time
 from abc import ABC, abstractmethod
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from gluellm.hooks.manager import GLOBAL_HOOK_REGISTRY, HookManager
+from gluellm.logging_config import get_logger
 from gluellm.models.hook import HookRegistry, HookStage
+
+logger = get_logger(__name__)
 
 
 class WorkflowResult(BaseModel):
@@ -78,23 +82,36 @@ class Workflow(ABC):
         Returns:
             WorkflowResult: The result of the workflow execution
         """
+        workflow_start_time = time.time()
+        workflow_type = self.__class__.__name__
+        logger.info(f"Starting workflow execution: type={workflow_type}, input_length={len(initial_input)}")
+
         # Merge global and instance hooks
         merged_registry = self._get_merged_registry()
+        pre_hooks = merged_registry.get_hooks(HookStage.PRE_WORKFLOW)
+        post_hooks = merged_registry.get_hooks(HookStage.POST_WORKFLOW)
+        logger.debug(f"Workflow hooks: pre={len(pre_hooks)}, post={len(post_hooks)}")
 
         # Execute pre-workflow hooks
         metadata: dict[str, Any] = {
-            "workflow_type": self.__class__.__name__,
+            "workflow_type": workflow_type,
             "context": context or {},
         }
         processed_input = await self._hook_manager.execute_hooks(
             initial_input,
             HookStage.PRE_WORKFLOW,
             metadata,
-            merged_registry.get_hooks(HookStage.PRE_WORKFLOW),
+            pre_hooks,
         )
+        logger.debug(f"Pre-workflow hooks completed: input_length={len(processed_input)}")
 
         # Execute the actual workflow
+        logger.debug(f"Executing internal workflow logic: {workflow_type}")
         result = await self._execute_internal(processed_input, context)
+        logger.info(
+            f"Workflow internal execution completed: iterations={result.iterations}, "
+            f"output_length={len(result.final_output)}"
+        )
 
         # Execute post-workflow hooks
         metadata["original_input"] = initial_input
@@ -104,13 +121,20 @@ class Workflow(ABC):
             result.final_output,
             HookStage.POST_WORKFLOW,
             metadata,
-            merged_registry.get_hooks(HookStage.POST_WORKFLOW),
+            post_hooks,
         )
+        logger.debug(f"Post-workflow hooks completed: output_length={len(processed_output)}")
 
         # Update result with processed output and hook metadata
         result.final_output = processed_output
         # Note: hooks_executed and hook_errors would be tracked in a more
         # sophisticated implementation, but for now we'll leave them at defaults
+
+        workflow_elapsed = time.time() - workflow_start_time
+        logger.info(
+            f"Workflow execution completed: type={workflow_type}, duration={workflow_elapsed:.3f}s, "
+            f"iterations={result.iterations}"
+        )
 
         return result
 

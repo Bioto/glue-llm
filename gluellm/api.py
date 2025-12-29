@@ -51,6 +51,7 @@ Example:
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Callable
 from typing import Annotated, Any, TypeVar
 
@@ -67,6 +68,7 @@ from tenacity import (
 )
 
 from gluellm.config import settings
+from gluellm.logging_config import get_logger
 from gluellm.models.conversation import Conversation, Role
 from gluellm.telemetry import (
     is_tracing_enabled,
@@ -76,7 +78,7 @@ from gluellm.telemetry import (
 )
 
 # Configure logging
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -253,6 +255,13 @@ async def _safe_llm_call(
     Returns:
         ChatCompletion if stream=False, AsyncIterator[ChatCompletion] if stream=True
     """
+    start_time = time.time()
+    logger.debug(
+        f"Making LLM call: model={model}, stream={stream}, has_tools={bool(tools)}, "
+        f"response_format={response_format.__name__ if response_format else None}, "
+        f"message_count={len(messages)}"
+    )
+
     try:
         # Use tracing context if enabled
         with trace_llm_call(
@@ -270,33 +279,60 @@ async def _safe_llm_call(
                 stream=stream,
             )
 
+            elapsed_time = time.time() - start_time
+
             # For non-streaming responses, record token usage
             if not stream and hasattr(response, "usage") and response.usage:
                 usage = response.usage
+                # Safely extract token counts, ensuring they're integers
+                prompt_tokens = getattr(usage, "prompt_tokens", None)
+                completion_tokens = getattr(usage, "completion_tokens", None)
+                total_tokens = getattr(usage, "total_tokens", None)
                 tokens_used = {
-                    "prompt": getattr(usage, "prompt_tokens", 0) or 0,
-                    "completion": getattr(usage, "completion_tokens", 0) or 0,
-                    "total": getattr(usage, "total_tokens", 0) or 0,
+                    "prompt": int(prompt_tokens)
+                    if prompt_tokens is not None and isinstance(prompt_tokens, (int, float))
+                    else 0,
+                    "completion": int(completion_tokens)
+                    if completion_tokens is not None and isinstance(completion_tokens, (int, float))
+                    else 0,
+                    "total": int(total_tokens)
+                    if total_tokens is not None and isinstance(total_tokens, (int, float))
+                    else 0,
                 }
                 record_token_usage(span, tokens_used)
+                logger.info(
+                    f"LLM call completed: model={model}, latency={elapsed_time:.3f}s, "
+                    f"tokens={tokens_used['total']} (prompt={tokens_used['prompt']}, "
+                    f"completion={tokens_used['completion']})"
+                )
 
             # Record response metadata
             if not stream and hasattr(response, "choices") and response.choices:
                 choice = response.choices[0]
+                finish_reason = getattr(choice, "finish_reason", "unknown")
+                has_tool_calls = bool(getattr(choice.message, "tool_calls", None))
                 set_span_attributes(
                     span,
                     **{
-                        "llm.response.finish_reason": getattr(choice, "finish_reason", "unknown"),
-                        "llm.response.has_tool_calls": bool(getattr(choice.message, "tool_calls", None)),
+                        "llm.response.finish_reason": finish_reason,
+                        "llm.response.has_tool_calls": has_tool_calls,
                     },
                 )
+                logger.debug(f"Response metadata: finish_reason={finish_reason}, has_tool_calls={has_tool_calls}")
+            elif stream:
+                logger.debug(f"LLM call streaming started: model={model}, latency={elapsed_time:.3f}s")
 
             return response
 
     except Exception as e:
+        elapsed_time = time.time() - start_time
         # Classify the error and raise the appropriate exception
         classified_error = classify_llm_error(e)
-        logger.error(f"LLM call failed: {classified_error}")
+        logger.error(
+            f"LLM call failed after {elapsed_time:.3f}s: model={model}, error={classified_error}, "
+            f"error_type={type(classified_error).__name__}",
+            exc_info=True,
+        )
         raise classified_error from e
 
 
@@ -419,7 +455,12 @@ class GlueLLM:
         tool_calls_made = 0
 
         # Tool execution loop
+        logger.debug(
+            f"Starting tool execution loop: max_iterations={self.max_tool_iterations}, "
+            f"tools_available={len(self.tools) if self.tools else 0}"
+        )
         for iteration in range(self.max_tool_iterations):
+            logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
             try:
                 response = await _llm_call_with_retry(
                     messages=messages,
@@ -428,13 +469,15 @@ class GlueLLM:
                 )
             except LLMError as e:
                 # Log the error and re-raise with context
-                logger.error(f"LLM call failed on iteration {iteration + 1}: {e}")
+                logger.error(f"LLM call failed on iteration {iteration + 1}/{self.max_tool_iterations}: {e}")
                 # Add error context to the exception
                 error_msg = f"Failed during tool execution loop (iteration {iteration + 1}/{self.max_tool_iterations})"
                 raise type(e)(f"{error_msg}: {e}") from e
 
             # Check if model wants to call tools
             if execute_tools and self.tools and response.choices[0].message.tool_calls:
+                tool_calls = response.choices[0].message.tool_calls
+                logger.info(f"Iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
                 tool_calls = response.choices[0].message.tool_calls
 
                 # Add assistant message with tool calls to history
@@ -471,13 +514,18 @@ class GlueLLM:
                     # Find and execute the tool
                     tool_func = self._find_tool(tool_name)
                     if tool_func:
+                        tool_start_time = time.time()
                         try:
                             # Support both sync and async tools
                             if asyncio.iscoroutinefunction(tool_func):
+                                logger.debug(f"Executing async tool: {tool_name}")
                                 tool_result = await tool_func(**tool_args)
                             else:
+                                logger.debug(f"Executing sync tool: {tool_name}")
                                 tool_result = tool_func(**tool_args)
                             tool_result_str = str(tool_result)
+                            tool_elapsed = time.time() - tool_start_time
+                            logger.info(f"Tool {tool_name} executed successfully in {tool_elapsed:.3f}s")
 
                             # Record in history
                             tool_execution_history.append(
@@ -505,8 +553,11 @@ class GlueLLM:
                                         )
                         except Exception as e:
                             # Tool execution error
+                            tool_elapsed = time.time() - tool_start_time
                             tool_result_str = f"Error executing tool: {type(e).__name__}: {str(e)}"
-                            logger.warning(f"Tool {tool_name} execution failed: {e}")
+                            logger.warning(
+                                f"Tool {tool_name} execution failed after {tool_elapsed:.3f}s: {e}", exc_info=True
+                            )
 
                             tool_execution_history.append(
                                 {
@@ -566,15 +617,41 @@ class GlueLLM:
 
             # No more tool calls, we have final response
             final_content = response.choices[0].message.content or ""
+            logger.info(
+                f"Tool execution completed: total_tool_calls={tool_calls_made}, "
+                f"final_response_length={len(final_content)}"
+            )
 
             # Add assistant response to conversation
             self._conversation.add_message(Role.ASSISTANT, final_content)
+
+            # Extract token usage if available
+            tokens_used = None
+            if hasattr(response, "usage") and response.usage:
+                usage = response.usage
+                # Safely extract token counts, ensuring they're integers
+                prompt_tokens = getattr(usage, "prompt_tokens", None)
+                completion_tokens = getattr(usage, "completion_tokens", None)
+                total_tokens = getattr(usage, "total_tokens", None)
+                tokens_used = {
+                    "prompt": int(prompt_tokens)
+                    if prompt_tokens is not None and isinstance(prompt_tokens, (int, float))
+                    else 0,
+                    "completion": int(completion_tokens)
+                    if completion_tokens is not None and isinstance(completion_tokens, (int, float))
+                    else 0,
+                    "total": int(total_tokens)
+                    if total_tokens is not None and isinstance(total_tokens, (int, float))
+                    else 0,
+                }
+                logger.debug(f"Token usage: {tokens_used}")
 
             return ToolExecutionResult(
                 final_response=final_content,
                 tool_calls_made=tool_calls_made,
                 tool_execution_history=tool_execution_history,
                 raw_response=response,
+                tokens_used=tokens_used,
             )
 
         # Max iterations reached
@@ -585,10 +662,20 @@ class GlueLLM:
         tokens_used = None
         if hasattr(response, "usage") and response.usage:
             usage = response.usage
+            # Safely extract token counts, ensuring they're integers
+            prompt_tokens = getattr(usage, "prompt_tokens", None)
+            completion_tokens = getattr(usage, "completion_tokens", None)
+            total_tokens = getattr(usage, "total_tokens", None)
             tokens_used = {
-                "prompt": getattr(usage, "prompt_tokens", 0) or 0,
-                "completion": getattr(usage, "completion_tokens", 0) or 0,
-                "total": getattr(usage, "total_tokens", 0) or 0,
+                "prompt": int(prompt_tokens)
+                if prompt_tokens is not None and isinstance(prompt_tokens, (int, float))
+                else 0,
+                "completion": int(completion_tokens)
+                if completion_tokens is not None and isinstance(completion_tokens, (int, float))
+                else 0,
+                "total": int(total_tokens)
+                if total_tokens is not None and isinstance(total_tokens, (int, float))
+                else 0,
             }
 
         return ToolExecutionResult(
@@ -631,6 +718,7 @@ class GlueLLM:
         messages = [system_message] + self._conversation.messages_dict
 
         # Call with response_format (no tools for structured output)
+        logger.debug(f"Starting structured completion: model={self.model}, response_format={response_format.__name__}")
         try:
             response = await _llm_call_with_retry(
                 messages=messages,
@@ -638,12 +726,18 @@ class GlueLLM:
                 response_format=response_format,
             )
         except LLMError as e:
-            logger.error(f"Structured completion failed: {e}")
+            logger.error(
+                f"Structured completion failed: model={self.model}, "
+                f"response_format={response_format.__name__}, error={e}"
+            )
             raise
 
         # Parse the response
         parsed = response.choices[0].message.parsed
         content = response.choices[0].message.content
+        logger.debug(
+            f"Structured response received: parsed_type={type(parsed)}, content_length={len(content) if content else 0}"
+        )
 
         # Add assistant response to conversation
         if content:
@@ -652,16 +746,19 @@ class GlueLLM:
         # If parsed is already a Pydantic instance, return it
         # Otherwise, instantiate the model from the parsed dict/JSON
         if isinstance(parsed, response_format):
+            logger.debug(f"Returning parsed Pydantic instance: {response_format.__name__}")
             return parsed
 
         # Handle case where parsed is a dict
         if isinstance(parsed, dict):
+            logger.debug(f"Instantiating {response_format.__name__} from dict")
             return response_format(**parsed)
 
         # Fallback: try to parse from JSON string in content
         if content:
             try:
                 data = json.loads(content)
+                logger.debug(f"Parsed JSON from content, instantiating {response_format.__name__}")
                 return response_format(**data)
             except (json.JSONDecodeError, TypeError) as e:
                 logger.warning(f"Failed to parse structured response from content: {e}")
@@ -762,6 +859,7 @@ class GlueLLM:
             # Check if model wants to call tools
             if execute_tools and self.tools and response.choices[0].message.tool_calls:
                 tool_calls = response.choices[0].message.tool_calls
+                logger.info(f"Stream iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
 
                 # Yield a chunk indicating tool execution is happening
                 yield StreamingChunk(
@@ -777,9 +875,11 @@ class GlueLLM:
                 for tool_call in tool_calls:
                     tool_calls_made += 1
                     tool_name = tool_call.function.name
+                    logger.debug(f"Executing tool call {tool_calls_made}: {tool_name}")
 
                     try:
                         tool_args = json.loads(tool_call.function.arguments)
+                        logger.debug(f"Tool {tool_name} arguments: {tool_args}")
                     except json.JSONDecodeError as e:
                         error_msg = f"Invalid JSON in tool arguments: {str(e)}"
                         logger.warning(f"Tool {tool_name} - {error_msg}")
@@ -803,13 +903,18 @@ class GlueLLM:
                     # Find and execute the tool
                     tool_func = self._find_tool(tool_name)
                     if tool_func:
+                        tool_start_time = time.time()
                         try:
                             # Check if tool is async
                             if asyncio.iscoroutinefunction(tool_func):
+                                logger.debug(f"Executing async tool: {tool_name}")
                                 tool_result = await tool_func(**tool_args)
                             else:
+                                logger.debug(f"Executing sync tool: {tool_name}")
                                 tool_result = tool_func(**tool_args)
                             tool_result_str = str(tool_result)
+                            tool_elapsed = time.time() - tool_start_time
+                            logger.info(f"Tool {tool_name} executed successfully in {tool_elapsed:.3f}s")
 
                             tool_execution_history.append(
                                 {
@@ -820,8 +925,11 @@ class GlueLLM:
                                 }
                             )
                         except Exception as e:
+                            tool_elapsed = time.time() - tool_start_time
                             tool_result_str = f"Error executing tool: {type(e).__name__}: {str(e)}"
-                            logger.warning(f"Tool {tool_name} execution failed: {e}")
+                            logger.warning(
+                                f"Tool {tool_name} execution failed after {tool_elapsed:.3f}s: {e}", exc_info=True
+                            )
                             tool_execution_history.append(
                                 {
                                     "tool_name": tool_name,

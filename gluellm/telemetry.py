@@ -27,7 +27,6 @@ Example:
     >>> result = await complete("Hello, world!")
 """
 
-import logging
 from contextlib import contextmanager
 from typing import Any
 
@@ -39,8 +38,9 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Status, StatusCode
 
 from gluellm.config import settings
+from gluellm.logging_config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Global tracer instance
 _tracer = None

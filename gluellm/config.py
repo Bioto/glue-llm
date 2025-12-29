@@ -12,7 +12,7 @@ Available Settings:
     - Model Configuration: default_model, default_system_prompt
     - Tool Execution: max_tool_iterations
     - Retry Behavior: retry_max_attempts, retry_min_wait, retry_max_wait, retry_multiplier
-    - Logging: log_level
+    - Logging: log_level, log_file_level, log_dir, log_file_name, log_json_format, log_max_bytes, log_backup_count
     - API Keys: openai_api_key, anthropic_api_key, xai_api_key
     - Tracing: enable_tracing, mlflow_tracking_uri, mlflow_experiment_name, otel_exporter_endpoint
 
@@ -70,6 +70,12 @@ class GlueLLMSettings(BaseSettings):
 
     # Logging settings
     log_level: str = "INFO"
+    log_file_level: str = "DEBUG"
+    log_dir: Path | None = None  # None means use default 'logs' directory
+    log_file_name: str = "gluellm.log"
+    log_json_format: bool = False
+    log_max_bytes: int = 10485760  # 10MB
+    log_backup_count: int = 5
 
     # Optional API keys (can also be set via provider-specific env vars)
     openai_api_key: str | None = None

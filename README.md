@@ -512,7 +512,13 @@ export GLUELLM_RETRY_MAX_WAIT=30
 export GLUELLM_RETRY_MULTIPLIER=1
 
 # Logging
-export GLUELLM_LOG_LEVEL=INFO
+export GLUELLM_LOG_LEVEL=INFO                    # Console log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+export GLUELLM_LOG_FILE_LEVEL=DEBUG              # File log level (typically DEBUG for full details)
+export GLUELLM_LOG_DIR=logs                      # Log directory (default: logs/)
+export GLUELLM_LOG_FILE_NAME=gluellm.log         # Log file name
+export GLUELLM_LOG_JSON_FORMAT=false             # Enable JSON structured logging
+export GLUELLM_LOG_MAX_BYTES=10485760            # Max log file size before rotation (10MB)
+export GLUELLM_LOG_BACKUP_COUNT=5                # Number of backup log files to keep
 
 # API Keys (optional - can also use provider-specific vars)
 export GLUELLM_OPENAI_API_KEY=your-key
@@ -742,6 +748,150 @@ export GLUELLM_ENABLE_TRACING=false
 ```
 
 Tracing has minimal overhead when disabled - the code checks a flag before instrumenting.
+
+## Logging
+
+GlueLLM includes production-grade logging with colored console output, file logging with rotation, and optional JSON structured logging for log aggregation tools.
+
+### Features
+
+- **Colored Console Logs** - Easy-to-read colored output for development (using `colorlog`)
+- **File Logging** - Comprehensive DEBUG-level logs written to files for troubleshooting
+- **Automatic Rotation** - Log files rotate by size (default: 10MB, keep 5 backups)
+- **JSON Format Support** - Optional JSON structured logging for production monitoring
+- **Environment Configuration** - Configure via environment variables or settings
+
+### Default Configuration
+
+Logging is automatically configured when you import GlueLLM:
+
+- **Console**: INFO level with colored output
+- **File**: DEBUG level in `logs/gluellm.log`
+- **Rotation**: 10MB per file, 5 backup files
+- **Format**: Human-readable text (JSON optional)
+
+### Configuration
+
+Configure logging via environment variables:
+
+```bash
+# Console log level
+export GLUELLM_LOG_LEVEL=INFO              # DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# File log level (typically DEBUG for full details)
+export GLUELLM_LOG_FILE_LEVEL=DEBUG
+
+# Log file location
+export GLUELLM_LOG_DIR=logs                # Directory for log files
+export GLUELLM_LOG_FILE_NAME=gluellm.log  # Log file name
+
+# JSON structured logging (for log aggregation tools)
+export GLUELLM_LOG_JSON_FORMAT=true        # Enable JSON format
+
+# Log rotation
+export GLUELLM_LOG_MAX_BYTES=10485760      # Max file size (10MB)
+export GLUELLM_LOG_BACKUP_COUNT=5          # Number of backup files
+```
+
+Or configure programmatically:
+
+```python
+from gluellm.config import settings
+from gluellm.logging_config import setup_logging
+
+# Configure logging
+setup_logging(
+    log_level="INFO",
+    log_file_level="DEBUG",
+    log_dir="logs",
+    log_file_name="gluellm.log",
+    log_json_format=False,
+    log_max_bytes=10 * 1024 * 1024,  # 10MB
+    log_backup_count=5,
+    force=True,  # Force reconfiguration
+)
+```
+
+### Log Levels
+
+- **DEBUG**: Detailed information for diagnosing problems (file only by default)
+- **INFO**: General information about program execution (console default)
+- **WARNING**: Something unexpected but handled gracefully
+- **ERROR**: Serious problems that may allow the program to continue
+- **CRITICAL**: Critical errors that may cause the program to abort
+
+### Log File Location
+
+By default, log files are written to the `logs/` directory in your project root:
+
+```
+logs/
+├── gluellm.log        # Current log file
+├── gluellm.log.1     # Rotated backup 1
+├── gluellm.log.2     # Rotated backup 2
+└── ...
+```
+
+### JSON Structured Logging
+
+Enable JSON format for integration with log aggregation tools (ELK stack, Datadog, etc.):
+
+```bash
+export GLUELLM_LOG_JSON_FORMAT=true
+```
+
+JSON logs include structured fields for easy parsing:
+
+```json
+{
+  "asctime": "2024-01-15 10:30:45",
+  "name": "gluellm.api",
+  "levelname": "INFO",
+  "message": "LLM call completed",
+  "model": "openai:gpt-4o-mini",
+  "latency": 1.234,
+  "tokens": {"total": 150, "prompt": 100, "completion": 50}
+}
+```
+
+### Logging Utilities
+
+GlueLLM provides utilities for enhanced logging:
+
+```python
+from gluellm.logging_utils import (
+    log_function_call,
+    log_async_function_call,
+    log_timing,
+    log_operation,
+    get_logger,
+)
+
+# Automatic function logging decorator
+@log_async_function_call(log_args=True, log_result=True)
+async def my_function(x: int, y: int) -> int:
+    return x + y
+
+# Timing context manager
+with log_timing("database_query"):
+    result = await db.query(...)
+
+# Operation context manager
+with log_operation("file_processing"):
+    process_file(...)
+
+# Get configured logger
+logger = get_logger(__name__)
+logger.info("Custom log message")
+```
+
+### Example
+
+See `examples/logging_example.py` for a complete logging demonstration:
+
+```bash
+python examples/logging_example.py
+```
 
 ## Advanced APIs
 

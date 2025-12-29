@@ -6,12 +6,13 @@ error handling, and timeout management.
 
 import asyncio
 import inspect
-import logging
+import time
 from typing import Any
 
+from gluellm.logging_config import get_logger
 from gluellm.models.hook import HookConfig, HookContext, HookErrorStrategy, HookRegistry, HookStage
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class HookManager:
@@ -52,10 +53,17 @@ class HookManager:
         metadata = metadata or {}
         current_content = content
         original_content = content
+        enabled_hooks = [h for h in hooks if h.enabled]
+
+        logger.debug(f"Executing {len(enabled_hooks)} hook(s) for stage '{stage.value}'")
 
         for hook_config in hooks:
             if not hook_config.enabled:
+                logger.debug(f"Skipping disabled hook '{hook_config.name}'")
                 continue
+
+            hook_start_time = time.time()
+            logger.debug(f"Executing hook '{hook_config.name}' for stage '{stage.value}'")
 
             try:
                 # Create hook context
@@ -68,29 +76,45 @@ class HookManager:
 
                 # Execute hook with timeout if specified
                 if hook_config.timeout:
+                    logger.debug(f"Hook '{hook_config.name}' has timeout of {hook_config.timeout}s")
                     result = await self._execute_with_timeout(hook_config, context, hook_config.timeout)
                 else:
                     result = await self._execute_hook(hook_config, context)
 
+                hook_elapsed = time.time() - hook_start_time
+
                 # Update current content based on result type
                 if isinstance(result, HookContext):
                     current_content = result.content
+                    logger.debug(
+                        f"Hook '{hook_config.name}' completed in {hook_elapsed:.3f}s, "
+                        f"returned HookContext, content_length={len(current_content)}"
+                    )
                 elif isinstance(result, str):
                     current_content = result
+                    logger.debug(
+                        f"Hook '{hook_config.name}' completed in {hook_elapsed:.3f}s, "
+                        f"returned string, content_length={len(current_content)}"
+                    )
                 else:
                     logger.warning(
                         f"Hook '{hook_config.name}' returned unexpected type {type(result)}, using original content"
                     )
 
             except TimeoutError:
-                logger.warning(f"Hook '{hook_config.name}' timed out after {hook_config.timeout}s")
+                hook_elapsed = time.time() - hook_start_time
+                logger.warning(
+                    f"Hook '{hook_config.name}' timed out after {hook_elapsed:.3f}s (limit: {hook_config.timeout}s)"
+                )
                 current_content = self._handle_error(
                     hook_config, current_content, TimeoutError(f"Hook '{hook_config.name}' timed out")
                 )
             except Exception as e:
-                logger.error(f"Error executing hook '{hook_config.name}': {e}", exc_info=True)
+                hook_elapsed = time.time() - hook_start_time
+                logger.error(f"Error executing hook '{hook_config.name}' after {hook_elapsed:.3f}s: {e}", exc_info=True)
                 current_content = self._handle_error(hook_config, current_content, e)
 
+        logger.debug(f"Completed hook execution for stage '{stage.value}', final_content_length={len(current_content)}")
         return current_content
 
     async def _execute_hook(self, hook_config: HookConfig, context: HookContext) -> HookContext | str:
@@ -107,8 +131,10 @@ class HookManager:
 
         # Check if handler is async
         if inspect.iscoroutinefunction(handler):
+            logger.debug(f"Hook '{hook_config.name}' is async")
             result = await handler(context)
         else:
+            logger.debug(f"Hook '{hook_config.name}' is sync, running in executor")
             # Run sync handler in executor to avoid blocking
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, handler, context)
@@ -188,7 +214,10 @@ def register_global_hook(stage: HookStage, config: HookConfig) -> None:
     """
     registry = _get_global_registry()
     registry.add_hook(stage, config)
-    logger.info(f"Registered global hook '{config.name}' for stage '{stage.value}'")
+    logger.info(
+        f"Registered global hook '{config.name}' for stage '{stage.value}' "
+        f"(timeout={config.timeout}s, error_strategy={config.error_strategy.value})"
+    )
 
 
 def unregister_global_hook(stage: HookStage, name: str) -> bool:
