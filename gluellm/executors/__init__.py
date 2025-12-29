@@ -7,9 +7,9 @@ including simple and agent-based execution strategies.
 from collections.abc import Callable
 from typing import Optional
 
-from source.api import GlueLLM
-from source.config import settings
-from source.models.agent import Agent
+from gluellm.api import GlueLLM
+from gluellm.config import settings
+from gluellm.models.agent import Agent
 
 from ._base import Executor
 
@@ -27,7 +27,7 @@ class SimpleExecutor(Executor):
         max_tool_iterations: Maximum tool execution iterations
 
     Example:
-        >>> from source.executors import SimpleExecutor
+        >>> from gluellm.executors import SimpleExecutor
         >>> import asyncio
         >>>
         >>> async def main():
@@ -91,9 +91,9 @@ class AgentExecutor(Executor):
         agent: The Agent instance to use for execution
 
     Example:
-        >>> from source.executors import AgentExecutor
-        >>> from source.models.agent import Agent
-        >>> from source.models.prompt import SystemPrompt
+        >>> from gluellm.executors import AgentExecutor
+        >>> from gluellm.models.agent import Agent
+        >>> from gluellm.models.prompt import SystemPrompt
         >>> import asyncio
         >>>
         >>> agent = Agent(

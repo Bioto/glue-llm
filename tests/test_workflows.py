@@ -3,12 +3,12 @@
 import pytest
 from pydantic import ValidationError
 
-from source.executors._base import Executor
-from source.models.workflow import CriticConfig, IterativeConfig
-from source.workflows._base import WorkflowResult
-from source.workflows.debate import DebateConfig, DebateWorkflow
-from source.workflows.iterative import IterativeRefinementWorkflow
-from source.workflows.pipeline import PipelineWorkflow
+from gluellm.executors._base import Executor
+from gluellm.models.workflow import CriticConfig, IterativeConfig
+from gluellm.workflows._base import WorkflowResult
+from gluellm.workflows.debate import DebateConfig, DebateWorkflow
+from gluellm.workflows.iterative import IterativeRefinementWorkflow
+from gluellm.workflows.pipeline import PipelineWorkflow
 
 
 class MockExecutor(Executor):

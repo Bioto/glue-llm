@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from source.api import (
+from gluellm.api import (
     APIConnectionError,
     AuthenticationError,
     GlueLLM,
@@ -103,7 +103,7 @@ class TestErrorClassification:
 class TestRetryLogic:
     """Test retry behavior with mocked LLM calls."""
 
-    @patch("source.api._safe_llm_call")
+    @patch("gluellm.api._safe_llm_call")
     async def test_retry_on_rate_limit(self, mock_safe_call):
         """Test that rate limit errors trigger retries."""
         # Create a proper mock response
@@ -129,7 +129,7 @@ class TestRetryLogic:
         assert mock_safe_call.call_count == 3
         assert result.final_response == "Success"
 
-    @patch("source.api._safe_llm_call")
+    @patch("gluellm.api._safe_llm_call")
     async def test_retry_on_connection_error(self, mock_safe_call):
         """Test that connection errors trigger retries."""
         mock_response = Mock()
@@ -151,7 +151,7 @@ class TestRetryLogic:
         assert mock_safe_call.call_count == 2
         assert result.final_response == "Success after retry"
 
-    @patch("source.api._safe_llm_call")
+    @patch("gluellm.api._safe_llm_call")
     async def test_no_retry_on_token_limit(self, mock_safe_call):
         """Test that token limit errors do NOT trigger retries."""
         mock_safe_call.side_effect = TokenLimitError("Context length exceeded")
@@ -164,7 +164,7 @@ class TestRetryLogic:
         # Should only be called once (no retries)
         assert mock_safe_call.call_count == 1
 
-    @patch("source.api._safe_llm_call")
+    @patch("gluellm.api._safe_llm_call")
     async def test_no_retry_on_auth_error(self, mock_safe_call):
         """Test that authentication errors do NOT trigger retries."""
         mock_safe_call.side_effect = AuthenticationError("Invalid API key")
@@ -177,7 +177,7 @@ class TestRetryLogic:
         # Should only be called once (no retries)
         assert mock_safe_call.call_count == 1
 
-    @patch("source.api._safe_llm_call")
+    @patch("gluellm.api._safe_llm_call")
     async def test_max_retries_exceeded(self, mock_safe_call):
         """Test that max retries is respected."""
         # Always raise RateLimitError - test the actual retry decorator
@@ -195,7 +195,7 @@ class TestRetryLogic:
 class TestToolExecutionErrorHandling:
     """Test error handling during tool execution."""
 
-    @patch("source.api._safe_llm_call")
+    @patch("gluellm.api._safe_llm_call")
     async def test_tool_execution_exception_handling(self, mock_safe_call):
         """Test that tool execution errors are caught and added to history."""
 
@@ -241,7 +241,7 @@ class TestToolExecutionErrorHandling:
         assert "ValueError" in result.tool_execution_history[0]["result"]
         assert result.final_response == "I handled the error"
 
-    @patch("source.api._safe_llm_call")
+    @patch("gluellm.api._safe_llm_call")
     async def test_malformed_json_in_tool_args(self, mock_safe_call):
         """Test handling of malformed JSON in tool arguments."""
 
@@ -289,7 +289,7 @@ class TestToolExecutionErrorHandling:
 class TestStructuredCompleteErrorHandling:
     """Test error handling in structured_complete."""
 
-    @patch("source.api._safe_llm_call")
+    @patch("gluellm.api._safe_llm_call")
     async def test_structured_complete_with_rate_limit_retry(self, mock_safe_call):
         """Test that structured_complete also benefits from retry logic."""
         from pydantic import BaseModel
@@ -329,7 +329,7 @@ class TestStructuredCompleteErrorHandling:
 class TestRetryBackoffTiming:
     """Test retry backoff timing behavior."""
 
-    @patch("source.api._safe_llm_call")
+    @patch("gluellm.api._safe_llm_call")
     @patch("asyncio.sleep")  # Mock asyncio.sleep for async retry
     async def test_exponential_backoff_waits(self, mock_sleep, mock_safe_call):
         """Test that exponential backoff actually waits between retries."""
@@ -362,11 +362,11 @@ class TestRetryBackoffTiming:
             # With multiplier=1, min=2: first wait ~2s, second wait ~4s
             assert sleep_times[1] >= sleep_times[0]
 
-    @patch("source.api._safe_llm_call")
+    @patch("gluellm.api._safe_llm_call")
     @patch("asyncio.sleep")
     async def test_max_wait_cap_enforced(self, mock_sleep, mock_safe_call):
         """Test that max_wait cap is enforced."""
-        from source.config import settings
+        from gluellm.config import settings
 
         # Temporarily set low max_wait for testing
         original_max_wait = settings.retry_max_wait
@@ -400,11 +400,11 @@ class TestRetryBackoffTiming:
         finally:
             settings.retry_max_wait = original_max_wait
 
-    @patch("source.api._safe_llm_call")
+    @patch("gluellm.api._safe_llm_call")
     @patch("asyncio.sleep")
     async def test_min_wait_floor_enforced(self, mock_sleep, mock_safe_call):
         """Test that min_wait floor is enforced."""
-        from source.config import settings
+        from gluellm.config import settings
 
         # Temporarily set min_wait for testing
         original_min_wait = settings.retry_min_wait
@@ -438,7 +438,7 @@ class TestRetryBackoffTiming:
         finally:
             settings.retry_min_wait = original_min_wait
 
-    @patch("source.api._safe_llm_call")
+    @patch("gluellm.api._safe_llm_call")
     async def test_actual_wait_times(self, mock_safe_call):
         """Test that exponential backoff actually waits (not just counts)."""
         mock_response = Mock()
@@ -463,17 +463,17 @@ class TestRetryBackoffTiming:
         elapsed_time = time.time() - start_time
 
         # Should have waited at least min_wait seconds (with some tolerance)
-        from source.config import settings
+        from gluellm.config import settings
 
         assert elapsed_time >= settings.retry_min_wait - 0.5, (
             f"Elapsed time {elapsed_time} is less than min_wait {settings.retry_min_wait}"
         )
 
-    @patch("source.api._safe_llm_call")
+    @patch("gluellm.api._safe_llm_call")
     @patch("asyncio.sleep")
     async def test_exponential_backoff_calculation(self, mock_sleep, mock_safe_call):
         """Test that exponential backoff calculation is correct."""
-        from source.config import settings
+        from gluellm.config import settings
 
         mock_response = Mock()
         mock_choice = Mock()

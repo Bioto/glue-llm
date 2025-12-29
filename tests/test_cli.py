@@ -11,7 +11,7 @@ from click.testing import CliRunner
 
 # Add source directory to path for imports
 project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root / "source"))
+sys.path.insert(0, str(project_root / "gluellm"))
 
 from cli import cli, get_weather
 

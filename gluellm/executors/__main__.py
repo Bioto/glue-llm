@@ -6,7 +6,7 @@ the SimpleExecutor functionality.
 
 import asyncio
 
-from source.executors import SimpleExecutor
+from gluellm.executors import SimpleExecutor
 
 
 async def main():

@@ -6,7 +6,7 @@ LLM agent with a specific role, tools, and behavior.
 
 from collections.abc import Callable
 
-from source.models.prompt import SystemPrompt
+from gluellm.models.prompt import SystemPrompt
 
 
 class Agent:
@@ -25,8 +25,8 @@ class Agent:
         max_tool_iterations: Maximum tool execution iterations
 
     Example:
-        >>> from source.models.agent import Agent
-        >>> from source.models.prompt import SystemPrompt
+        >>> from gluellm.models.agent import Agent
+        >>> from gluellm.models.prompt import SystemPrompt
         >>>
         >>> def search_web(query: str) -> str:
         ...     return f"Results for: {query}"
@@ -60,7 +60,7 @@ class Agent:
                 (defaults to 10)
             model: LLM model to use (defaults to settings.default_model)
         """
-        from source.config import settings
+        from gluellm.config import settings
 
         self.name = name
         self.description = description

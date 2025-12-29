@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-from source.config import GlueLLMSettings, get_settings, reload_settings
+from gluellm.config import GlueLLMSettings, get_settings, reload_settings
 
 
 class TestConfigurationLoading:

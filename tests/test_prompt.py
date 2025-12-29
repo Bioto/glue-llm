@@ -2,7 +2,7 @@
 
 from functools import partial
 
-from source.models.prompt import SystemPrompt, _flatten_xml
+from gluellm.models.prompt import SystemPrompt, _flatten_xml
 
 
 class TestXMLFlattening:
@@ -208,7 +208,7 @@ class TestTemplateEdgeCases:
     def test_template_with_undefined_variable(self):
         """Test template rendering with undefined variables."""
         # The template should handle undefined variables gracefully
-        from source.models.prompt import BASE_SYSTEM_PROMPT
+        from gluellm.models.prompt import BASE_SYSTEM_PROMPT
 
         # Render with required variables
         result = BASE_SYSTEM_PROMPT.render(instructions="Test", tools=[])

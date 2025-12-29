@@ -27,7 +27,7 @@ Features:
 
 Example:
     >>> import asyncio
-    >>> from source.api import complete, structured_complete
+    >>> from gluellm.api import complete, structured_complete
     >>> from pydantic import BaseModel
     >>>
     >>> async def main():
@@ -65,8 +65,8 @@ from tenacity import (
     wait_exponential,
 )
 
-from source.config import settings
-from source.models.conversation import Conversation, Role
+from gluellm.config import settings
+from gluellm.models.conversation import Conversation, Role
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -558,7 +558,7 @@ class GlueLLM:
 
     def _format_system_prompt(self) -> str:
         """Format system prompt with tools if available."""
-        from source.models.prompt import BASE_SYSTEM_PROMPT
+        from gluellm.models.prompt import BASE_SYSTEM_PROMPT
 
         return BASE_SYSTEM_PROMPT.render(
             instructions=self.system_prompt,
