@@ -9,6 +9,7 @@ Features:
     - OpenTelemetry span creation and management
     - Configurable trace export to MLflow tracking server
     - Token usage and cost tracking via span attributes
+    - MLflow metrics logging for LLM calls
 
 Configuration:
     Set environment variables or use settings:
@@ -45,6 +46,9 @@ logger = get_logger(__name__)
 # Global tracer instance
 _tracer = None
 _tracing_enabled = False
+_mlflow_enabled = False
+_mlflow_client = None
+_default_mlflow_run = None
 
 
 def configure_tracing() -> None:
@@ -58,11 +62,12 @@ def configure_tracing() -> None:
     2. Configure the TracerProvider with appropriate resource attributes
     3. Set up the OTLP exporter to send traces to MLflow
     4. Initialize MLflow experiment if tracking URI is configured
+    5. Enable MLflow metrics tracking
 
     Note:
         This function is idempotent - calling it multiple times is safe.
     """
-    global _tracer, _tracing_enabled
+    global _tracer, _tracing_enabled, _mlflow_enabled, _mlflow_client, _default_mlflow_run
 
     if not settings.enable_tracing:
         logger.info("OpenTelemetry tracing is disabled")
@@ -81,6 +86,15 @@ def configure_tracing() -> None:
         if settings.mlflow_experiment_name:
             mlflow.set_experiment(settings.mlflow_experiment_name)
             logger.info(f"MLflow experiment set to: {settings.mlflow_experiment_name}")
+
+        # Initialize MLflow client for metrics tracking
+        try:
+            _mlflow_client = mlflow.tracking.MlflowClient()
+            _mlflow_enabled = True
+            logger.info("MLflow metrics tracking enabled")
+        except Exception as e:
+            logger.warning(f"Failed to initialize MLflow client: {e}")
+            _mlflow_enabled = False
 
         # Create resource with service information
         resource = Resource.create(
@@ -111,9 +125,11 @@ def configure_tracing() -> None:
     except ImportError:
         logger.warning("MLflow not installed. Install with: pip install mlflow>=3.6.0")
         _tracing_enabled = False
+        _mlflow_enabled = False
     except Exception as e:
         logger.error(f"Failed to configure tracing: {e}")
         _tracing_enabled = False
+        _mlflow_enabled = False
 
 
 def is_tracing_enabled() -> bool:
@@ -251,3 +267,138 @@ def record_tool_execution(span: Any, tool_name: str, arguments: dict, result: st
             f"tool.{tool_name}.arg_count": len(arguments),
         },
     )
+
+
+def log_llm_metrics(
+    model: str,
+    latency: float,
+    tokens_used: dict[str, int] | None = None,
+    finish_reason: str | None = None,
+    has_tool_calls: bool = False,
+    error: bool = False,
+    error_type: str | None = None,
+) -> None:
+    """Log LLM call metrics to MLflow.
+
+    This function logs metrics from any-llm client calls to MLflow for tracking
+    and analysis. Metrics include latency, token usage, and call metadata.
+
+    Args:
+        model: Model identifier (e.g., "openai:gpt-4o-mini")
+        latency: Call latency in seconds
+        tokens_used: Dictionary with token counts (prompt, completion, total)
+        finish_reason: Reason the completion finished
+        has_tool_calls: Whether the response included tool calls
+        error: Whether the call failed
+        error_type: Type of error if call failed
+    """
+    if not _mlflow_enabled or _mlflow_client is None:
+        return
+
+    try:
+        import mlflow
+
+        # Parse model into provider and name
+        provider, model_name = model.split(":", 1) if ":" in model else ("unknown", model)
+
+        # Prepare metrics to log
+        metrics = {
+            "llm.latency_seconds": latency,
+        }
+
+        # Add token usage metrics if available
+        if tokens_used:
+            metrics["llm.tokens.prompt"] = tokens_used.get("prompt", 0)
+            metrics["llm.tokens.completion"] = tokens_used.get("completion", 0)
+            metrics["llm.tokens.total"] = tokens_used.get("total", 0)
+
+        # Add error metric if call failed
+        if error:
+            metrics["llm.error"] = 1.0
+        else:
+            metrics["llm.success"] = 1.0
+
+        # Log metrics to current run or create a default run if none exists
+        try:
+            current_run = mlflow.active_run()
+            if current_run is None:
+                # No active run - create a default one for automatic metrics tracking
+                # This ensures metrics are always logged without requiring manual run management
+                global _default_mlflow_run
+                if _default_mlflow_run is None:
+                    _default_mlflow_run = mlflow.start_run(run_name="gluellm_auto_metrics")
+                    logger.debug("Created default MLflow run for automatic metrics tracking")
+
+            # Log metrics to the active run
+            # MLflow accumulates metrics over time, allowing aggregation and analysis
+            mlflow.log_metrics(metrics)
+
+            # Log parameters for this call
+            # Note: Parameters are overwritten on each call, which is fine for tracking
+            # the most recent call's metadata. For historical tracking, use tags or metrics.
+            params = {
+                "llm.provider": provider,
+                "llm.model": model_name,
+            }
+            if finish_reason:
+                params["llm.finish_reason"] = finish_reason
+            if error_type:
+                params["llm.error_type"] = error_type
+            params["llm.has_tool_calls"] = str(has_tool_calls)
+            mlflow.log_params(params)
+        except Exception as e:
+            logger.debug(f"Failed to log metrics to MLflow: {e}")
+
+    except ImportError:
+        logger.debug("MLflow not available for metrics logging")
+    except Exception as e:
+        logger.debug(f"Error logging metrics to MLflow: {e}")
+
+
+@contextmanager
+def mlflow_run_context(run_name: str | None = None, tags: dict[str, str] | None = None):
+    """Context manager for MLflow run tracking.
+
+    Creates an MLflow run for tracking a group of LLM calls or operations.
+    All metrics logged within this context will be associated with this run.
+
+    Args:
+        run_name: Optional name for the run
+        tags: Optional dictionary of tags to add to the run
+
+    Yields:
+        The MLflow run object
+
+    Example:
+        >>> with mlflow_run_context("my_llm_workflow"):
+        ...     result = await complete("Hello!")
+        ...     log_llm_metrics(...)
+    """
+    if not _mlflow_enabled:
+        # Return a no-op context if MLflow is not enabled
+        class NoOpRun:
+            pass
+
+        yield NoOpRun()
+        return
+
+    try:
+        import mlflow
+
+        with mlflow.start_run(run_name=run_name, tags=tags):
+            yield mlflow.active_run()
+    except ImportError:
+        logger.debug("MLflow not available for run context")
+        yield None
+    except Exception as e:
+        logger.debug(f"Error creating MLflow run: {e}")
+        yield None
+
+
+def is_mlflow_enabled() -> bool:
+    """Check if MLflow metrics tracking is enabled.
+
+    Returns:
+        bool: True if MLflow is enabled and configured, False otherwise
+    """
+    return _mlflow_enabled
