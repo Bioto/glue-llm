@@ -8,6 +8,7 @@ import asyncio
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import TreeOfThoughtsConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
 
@@ -45,6 +46,7 @@ class TreeOfThoughtsWorkflow(Workflow):
         thinker: Executor,
         evaluator: Executor | None = None,
         config: TreeOfThoughtsConfig | None = None,
+        hook_registry: HookRegistry | None = None,
     ):
         """Initialize a TreeOfThoughtsWorkflow.
 
@@ -52,12 +54,14 @@ class TreeOfThoughtsWorkflow(Workflow):
             thinker: The executor for generating thoughts
             evaluator: Optional executor for evaluating thoughts (defaults to thinker)
             config: Optional configuration for ToT process
+            hook_registry: Optional webhook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.thinker = thinker
         self.evaluator = evaluator or thinker
         self.config = config or TreeOfThoughtsConfig()
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute Tree of Thoughts workflow.
 
         Args:

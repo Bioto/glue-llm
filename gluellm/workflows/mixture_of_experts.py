@@ -8,6 +8,7 @@ import asyncio
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import ExpertConfig, MoEConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
 
@@ -55,6 +56,7 @@ class MixtureOfExpertsWorkflow(Workflow):
         router: Executor | None = None,
         combiner: Executor | None = None,
         config: MoEConfig | None = None,
+        hook_registry: HookRegistry | None = None,
     ):
         """Initialize a MixtureOfExpertsWorkflow.
 
@@ -63,13 +65,15 @@ class MixtureOfExpertsWorkflow(Workflow):
             router: Optional executor for routing (uses first expert if None)
             combiner: Optional executor for combining outputs (uses router if None)
             config: Optional configuration for MoE process
+            hook_registry: Optional webhook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.experts = experts
         self.router = router or (experts[0].executor if experts else None)
         self.combiner = combiner or self.router
         self.config = config or MoEConfig()
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute Mixture of Experts workflow.
 
         Args:

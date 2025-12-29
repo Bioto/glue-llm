@@ -7,6 +7,7 @@ to take turns contributing to a shared output.
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import RoundRobinConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
 
@@ -37,17 +38,24 @@ class RoundRobinWorkflow(Workflow):
         >>> result = await workflow.execute("Write an article about AI")
     """
 
-    def __init__(self, agents: list[tuple[str, Executor]], config: RoundRobinConfig | None = None):
+    def __init__(
+        self,
+        agents: list[tuple[str, Executor]],
+        config: RoundRobinConfig | None = None,
+        hook_registry: HookRegistry | None = None,
+    ):
         """Initialize a RoundRobinWorkflow.
 
         Args:
             agents: List of (agent_name, executor) tuples
             config: Optional configuration for round-robin process
+            hook_registry: Optional webhook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.agents = agents
         self.config = config or RoundRobinConfig()
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute round-robin workflow.
 
         Args:

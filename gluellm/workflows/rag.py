@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import RAGConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
 
@@ -47,6 +48,7 @@ class RAGWorkflow(Workflow):
         generator: Executor,
         verifier: Executor | None = None,
         config: RAGConfig | None = None,
+        hook_registry: HookRegistry | None = None,
     ):
         """Initialize a RAGWorkflow.
 
@@ -55,13 +57,15 @@ class RAGWorkflow(Workflow):
             generator: The executor for generating responses
             verifier: Optional executor for verifying facts in generated response
             config: Optional configuration for RAG process
+            hook_registry: Optional hook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.retriever = retriever
         self.generator = generator
         self.verifier = verifier
         self.config = config or RAGConfig()
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute RAG workflow.
 
         Args:

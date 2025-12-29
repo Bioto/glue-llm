@@ -49,10 +49,11 @@ class MockExecutor(Executor):
         Args:
             responses: Optional list of responses to return in sequence
         """
+        super().__init__()
         self.responses = responses or []
         self.call_count = 0
 
-    async def execute(self, query: str) -> str:
+    async def _execute_internal(self, query: str) -> str:
         """Execute query and return mock response.
 
         Args:
@@ -307,7 +308,7 @@ async def test_iterative_workflow_critic_error_handling():
 
     # Create a critic that raises an exception
     class FailingExecutor(Executor):
-        async def execute(self, query: str) -> str:
+        async def _execute_internal(self, query: str) -> str:
             raise Exception("Critic failed")
 
     critic_bad = FailingExecutor()
@@ -735,7 +736,7 @@ async def test_iterative_workflow_critic_prompt_formatting():
     captured_prompts = []
 
     class CapturingExecutor(Executor):
-        async def execute(self, query: str) -> str:
+        async def _execute_internal(self, query: str) -> str:
             captured_prompts.append(query)
             return "Feedback"
 
@@ -821,9 +822,10 @@ async def test_pipeline_workflow_data_flow():
     # Each stage appends its name to the input
     class AppendExecutor(Executor):
         def __init__(self, name: str):
+            super().__init__()
             self.name = name
 
-        async def execute(self, query: str) -> str:
+        async def _execute_internal(self, query: str) -> str:
             return f"{query} -> {self.name}"
 
     stage1 = AppendExecutor("stage1")
@@ -946,7 +948,8 @@ async def test_socratic_workflow_basic():
 
     assert result.iterations == 2
     assert questioner.call_count == 2
-    assert responder.call_count == 2
+    # Responder is called 2 times during exchanges + 1 time for synthesis (default)
+    assert responder.call_count == 3
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ checks it against principles, and revises until all principles pass.
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import ConstitutionalConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
 
@@ -54,6 +55,7 @@ class ConstitutionalWorkflow(Workflow):
         generator: Executor,
         critic: Executor | None = None,
         config: ConstitutionalConfig | None = None,
+        hook_registry: HookRegistry | None = None,
     ):
         """Initialize a ConstitutionalWorkflow.
 
@@ -61,14 +63,16 @@ class ConstitutionalWorkflow(Workflow):
             generator: The executor for generating content
             critic: Optional executor for critiquing (defaults to generator if None)
             config: Configuration with principles (required)
+            hook_registry: Optional webhook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.generator = generator
         self.critic = critic or generator
         if config is None:
             raise ValueError("ConstitutionalConfig with principles is required")
         self.config = config
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute Constitutional AI workflow.
 
         Args:

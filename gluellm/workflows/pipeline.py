@@ -7,6 +7,7 @@ where the output of one agent becomes the input to the next.
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.workflows._base import Workflow, WorkflowResult
 
 
@@ -34,15 +35,17 @@ class PipelineWorkflow(Workflow):
         >>> result = await workflow.execute("Topic: Climate Change")
     """
 
-    def __init__(self, stages: list[tuple[str, Executor]]):
+    def __init__(self, stages: list[tuple[str, Executor]], hook_registry: HookRegistry | None = None):
         """Initialize a PipelineWorkflow.
 
         Args:
             stages: List of (stage_name, executor) tuples defining the pipeline
+            hook_registry: Optional webhook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.stages = stages
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute pipeline workflow.
 
         Args:

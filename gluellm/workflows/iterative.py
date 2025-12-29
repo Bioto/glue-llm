@@ -10,6 +10,7 @@ import asyncio
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import CriticConfig, IterativeConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
 
@@ -62,6 +63,7 @@ class IterativeRefinementWorkflow(Workflow):
         producer: Executor,
         critics: CriticConfig | list[CriticConfig],
         config: IterativeConfig | None = None,
+        hook_registry: HookRegistry | None = None,
     ):
         """Initialize an IterativeRefinementWorkflow.
 
@@ -69,7 +71,9 @@ class IterativeRefinementWorkflow(Workflow):
             producer: The executor for the producer agent
             critics: Single CriticConfig or list of CriticConfig instances
             config: Optional configuration for iterative refinement
+            hook_registry: Optional webhook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.producer = producer
 
         # Normalize critics to always be a list
@@ -80,7 +84,7 @@ class IterativeRefinementWorkflow(Workflow):
 
         self.config = config or IterativeConfig()
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute iterative refinement workflow.
 
         Args:

@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import ReActConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
 
@@ -34,17 +35,21 @@ class ReActWorkflow(Workflow):
         >>> result = await workflow.execute("What is the weather in Paris?")
     """
 
-    def __init__(self, reasoner: Executor, config: ReActConfig | None = None):
+    def __init__(
+        self, reasoner: Executor, config: ReActConfig | None = None, hook_registry: HookRegistry | None = None
+    ):
         """Initialize a ReActWorkflow.
 
         Args:
             reasoner: The executor for reasoning and acting
             config: Optional configuration for ReAct process
+            hook_registry: Optional webhook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.reasoner = reasoner
         self.config = config or ReActConfig()
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute ReAct workflow.
 
         Args:
