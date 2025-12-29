@@ -84,9 +84,33 @@ from gluellm.api import (
     structured_complete,
 )
 from gluellm.config import GlueLLMSettings, get_settings, reload_settings, settings
+from gluellm.logging_config import setup_logging
 from gluellm.models.config import RequestConfig
 from gluellm.models.conversation import Conversation, Message, Role
 from gluellm.models.prompt import Prompt, SystemPrompt
+
+# Initialize logging on package import
+_setup_logging_called = False
+
+
+def _initialize_logging() -> None:
+    """Initialize logging configuration from settings."""
+    global _setup_logging_called
+    if not _setup_logging_called:
+        setup_logging(
+            log_level=settings.log_level,
+            log_file_level=settings.log_file_level,
+            log_dir=settings.log_dir,
+            log_file_name=settings.log_file_name,
+            log_json_format=settings.log_json_format,
+            log_max_bytes=settings.log_max_bytes,
+            log_backup_count=settings.log_backup_count,
+        )
+        _setup_logging_called = True
+
+
+# Initialize logging when package is imported
+_initialize_logging()
 
 __all__ = [
     # High-level API

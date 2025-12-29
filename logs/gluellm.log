@@ -1,0 +1,1 @@
+2025-12-28 22:57:12 | INFO     | gluellm.logging_config | Logging configured: console=INFO, file=DEBUG, file_path=/home/nick/Projects/gluellm/logs/gluellm.log, json_format=False

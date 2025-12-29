@@ -4,12 +4,16 @@ This module defines the abstract base class for all executors,
 which are responsible for executing queries using LLM agents.
 """
 
+import time
 from abc import ABC, abstractmethod
 from typing import Any
 
 from gluellm.hooks import manager as hooks_manager
 from gluellm.hooks.manager import HookManager
+from gluellm.logging_config import get_logger
 from gluellm.models.hook import HookRegistry, HookStage
+
+logger = get_logger(__name__)
 
 
 class Executor(ABC):
@@ -46,24 +50,38 @@ class Executor(ABC):
         Returns:
             str: The response from the LLM after webhook processing
         """
+        executor_start_time = time.time()
+        executor_type = self.__class__.__name__
+        logger.info(f"Starting executor execution: type={executor_type}, query_length={len(query)}")
+
         # Merge global and instance hooks
         merged_registry = self._get_merged_registry()
+        pre_hooks = merged_registry.get_hooks(HookStage.PRE_EXECUTOR)
+        post_hooks = merged_registry.get_hooks(HookStage.POST_EXECUTOR)
+        logger.debug(f"Executor hooks: pre={len(pre_hooks)}, post={len(post_hooks)}")
 
         # Execute pre-executor hooks
-        metadata: dict[str, Any] = {"executor_type": self.__class__.__name__}
-        processed_query = await self._hook_manager.execute_hooks(
-            query, HookStage.PRE_EXECUTOR, metadata, merged_registry.get_hooks(HookStage.PRE_EXECUTOR)
-        )
+        metadata: dict[str, Any] = {"executor_type": executor_type}
+        processed_query = await self._hook_manager.execute_hooks(query, HookStage.PRE_EXECUTOR, metadata, pre_hooks)
+        logger.debug(f"Pre-executor hooks completed: query_length={len(processed_query)}")
 
         # Execute the actual query
+        logger.debug(f"Executing internal executor logic: {executor_type}")
         result = await self._execute_internal(processed_query)
+        logger.debug(f"Executor internal execution completed: result_length={len(result)}")
 
         # Execute post-executor hooks
         metadata["original_query"] = query
         metadata["processed_query"] = processed_query
-        return await self._hook_manager.execute_hooks(
-            result, HookStage.POST_EXECUTOR, metadata, merged_registry.get_hooks(HookStage.POST_EXECUTOR)
+        final_result = await self._hook_manager.execute_hooks(result, HookStage.POST_EXECUTOR, metadata, post_hooks)
+
+        executor_elapsed = time.time() - executor_start_time
+        logger.info(
+            f"Executor execution completed: type={executor_type}, duration={executor_elapsed:.3f}s, "
+            f"result_length={len(final_result)}"
         )
+
+        return final_result
 
     @abstractmethod
     async def _execute_internal(self, query: str) -> str:
