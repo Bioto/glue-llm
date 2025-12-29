@@ -68,8 +68,10 @@ from tenacity import (
 )
 
 from gluellm.config import settings
+from gluellm.context import get_correlation_id, set_correlation_id
 from gluellm.logging_config import get_logger
 from gluellm.models.conversation import Conversation, Role
+from gluellm.shutdown import ShutdownContext, is_shutting_down
 from gluellm.telemetry import (
     is_tracing_enabled,
     log_llm_metrics,
@@ -239,6 +241,7 @@ async def _safe_llm_call(
     tools: list[Callable] | None = None,
     response_format: type[BaseModel] | None = None,
     stream: bool = False,
+    timeout: float | None = None,
 ) -> ChatCompletion | AsyncIterator[ChatCompletion]:
     """Make an LLM call with error classification and tracing.
 
@@ -252,15 +255,23 @@ async def _safe_llm_call(
         tools: Optional list of tools
         response_format: Optional Pydantic model for structured output
         stream: Whether to stream the response
+        timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
 
     Returns:
         ChatCompletion if stream=False, AsyncIterator[ChatCompletion] if stream=True
+
+    Raises:
+        asyncio.TimeoutError: If the request exceeds the timeout
     """
+    correlation_id = get_correlation_id()
+    timeout = timeout or settings.default_request_timeout
+    timeout = min(timeout, settings.max_request_timeout)  # Enforce max timeout
+
     start_time = time.time()
     logger.debug(
         f"Making LLM call: model={model}, stream={stream}, has_tools={bool(tools)}, "
         f"response_format={response_format.__name__ if response_format else None}, "
-        f"message_count={len(messages)}"
+        f"message_count={len(messages)}, timeout={timeout}s, correlation_id={correlation_id}"
     )
 
     try:
@@ -271,13 +282,22 @@ async def _safe_llm_call(
             tools=tools,
             stream=stream,
             response_format=response_format.__name__ if response_format else None,
+            correlation_id=correlation_id,
         ) as span:
-            response = await any_llm_acompletion(
-                messages=messages,
-                model=model,
-                tools=tools if tools else None,
-                response_format=response_format,
-                stream=stream,
+            # Add correlation ID to span attributes
+            if correlation_id:
+                set_span_attributes(span, correlation_id=correlation_id)
+
+            # Make LLM call with timeout
+            response = await asyncio.wait_for(
+                any_llm_acompletion(
+                    messages=messages,
+                    model=model,
+                    tools=tools if tools else None,
+                    response_format=response_format,
+                    stream=stream,
+                ),
+                timeout=timeout,
             )
 
             elapsed_time = time.time() - start_time
@@ -339,6 +359,24 @@ async def _safe_llm_call(
 
             return response
 
+    except TimeoutError:
+        elapsed_time = time.time() - start_time
+        logger.error(
+            f"LLM call timed out after {elapsed_time:.3f}s (timeout={timeout}s): model={model}, "
+            f"correlation_id={correlation_id}",
+            exc_info=True,
+        )
+        # Log timeout metrics
+        log_llm_metrics(
+            model=model,
+            latency=elapsed_time,
+            tokens_used=None,
+            finish_reason=None,
+            has_tool_calls=False,
+            error=True,
+            error_type="TimeoutError",
+        )
+        raise
     except Exception as e:
         elapsed_time = time.time() - start_time
         # Classify the error and raise the appropriate exception
@@ -346,7 +384,7 @@ async def _safe_llm_call(
         error_type = type(classified_error).__name__
         logger.error(
             f"LLM call failed after {elapsed_time:.3f}s: model={model}, error={classified_error}, "
-            f"error_type={error_type}",
+            f"error_type={error_type}, correlation_id={correlation_id}",
             exc_info=True,
         )
 
@@ -378,6 +416,7 @@ async def _llm_call_with_retry(
     model: str,
     tools: list[Callable] | None = None,
     response_format: type[BaseModel] | None = None,
+    timeout: float | None = None,
 ) -> ChatCompletion:
     """Make an LLM call with automatic retry on transient errors.
 
@@ -389,12 +428,21 @@ async def _llm_call_with_retry(
     - Token limit errors (need to reduce input)
     - Authentication errors (bad credentials)
     - Invalid request errors (bad parameters)
+    - Timeout errors
+
+    Args:
+        messages: List of message dictionaries
+        model: Model identifier
+        tools: Optional list of tools
+        response_format: Optional Pydantic model for structured output
+        timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
     """
     return await _safe_llm_call(
         messages=messages,
         model=model,
         tools=tools,
         response_format=response_format,
+        timeout=timeout,
     )
 
 
@@ -452,12 +500,16 @@ class GlueLLM:
         self,
         user_message: str,
         execute_tools: bool = True,
+        correlation_id: str | None = None,
+        timeout: float | None = None,
     ) -> ToolExecutionResult:
         """Complete a request with automatic tool execution loop.
 
         Args:
             user_message: The user's message/request
             execute_tools: Whether to automatically execute tools and loop
+            correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
+            timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
 
         Returns:
             ToolExecutionResult with final response and execution history
@@ -468,9 +520,27 @@ class GlueLLM:
             APIConnectionError: If connection fails after retries
             AuthenticationError: If authentication fails
             InvalidRequestError: If request parameters are invalid
+            asyncio.TimeoutError: If request exceeds timeout
+            RuntimeError: If shutdown is in progress
         """
-        # Add user message to conversation
-        self._conversation.add_message(Role.USER, user_message)
+        # Check for shutdown
+        if is_shutting_down():
+            raise RuntimeError("Cannot process request: shutdown in progress")
+
+        # Set correlation ID if provided
+        if correlation_id:
+            set_correlation_id(correlation_id)
+        elif not get_correlation_id():
+            # Auto-generate if not set
+            set_correlation_id()
+
+        correlation_id = get_correlation_id()
+        logger.info(f"Starting completion request: correlation_id={correlation_id}, message_length={len(user_message)}")
+
+        # Use shutdown context to track in-flight requests
+        with ShutdownContext():
+            # Add user message to conversation
+            self._conversation.add_message(Role.USER, user_message)
 
         # Build initial messages
         system_message = {
@@ -494,6 +564,7 @@ class GlueLLM:
                     messages=messages,
                     model=self.model,
                     tools=self.tools if self.tools else None,
+                    timeout=timeout,
                 )
             except LLMError as e:
                 # Log the error and re-raise with context
@@ -718,12 +789,16 @@ class GlueLLM:
         self,
         user_message: str,
         response_format: type[T],
+        correlation_id: str | None = None,
+        timeout: float | None = None,
     ) -> T:
         """Complete a request and return structured output.
 
         Args:
             user_message: The user's message/request
             response_format: Pydantic model class for structured output
+            correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
+            timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
 
         Returns:
             Instance of response_format with parsed data
@@ -734,9 +809,30 @@ class GlueLLM:
             APIConnectionError: If connection fails after retries
             AuthenticationError: If authentication fails
             InvalidRequestError: If request parameters are invalid
+            asyncio.TimeoutError: If request exceeds timeout
+            RuntimeError: If shutdown is in progress
         """
-        # Add user message to conversation
-        self._conversation.add_message(Role.USER, user_message)
+        # Check for shutdown
+        if is_shutting_down():
+            raise RuntimeError("Cannot process request: shutdown in progress")
+
+        # Set correlation ID if provided
+        if correlation_id:
+            set_correlation_id(correlation_id)
+        elif not get_correlation_id():
+            # Auto-generate if not set
+            set_correlation_id()
+
+        correlation_id = get_correlation_id()
+        logger.info(
+            f"Starting structured completion: correlation_id={correlation_id}, "
+            f"response_format={response_format.__name__}, message_length={len(user_message)}"
+        )
+
+        # Use shutdown context to track in-flight requests
+        with ShutdownContext():
+            # Add user message to conversation
+            self._conversation.add_message(Role.USER, user_message)
 
         # Build messages
         system_message = {
@@ -752,6 +848,7 @@ class GlueLLM:
                 messages=messages,
                 model=self.model,
                 response_format=response_format,
+                timeout=timeout,
             )
         except LLMError as e:
             logger.error(
@@ -1035,6 +1132,8 @@ async def complete(
     tools: list[Callable] | None = None,
     execute_tools: bool = True,
     max_tool_iterations: int | None = None,
+    correlation_id: str | None = None,
+    timeout: float | None = None,
 ) -> ToolExecutionResult:
     """Quick completion with automatic tool execution.
 
@@ -1045,6 +1144,8 @@ async def complete(
         tools: List of callable functions to use as tools
         execute_tools: Whether to automatically execute tools
         max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
+        correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
+        timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
 
     Returns:
         ToolExecutionResult with final response and execution history
@@ -1055,7 +1156,9 @@ async def complete(
         tools=tools,
         max_tool_iterations=max_tool_iterations,
     )
-    return await client.complete(user_message, execute_tools=execute_tools)
+    return await client.complete(
+        user_message, execute_tools=execute_tools, correlation_id=correlation_id, timeout=timeout
+    )
 
 
 async def structured_complete(
@@ -1063,6 +1166,8 @@ async def structured_complete(
     response_format: type[T],
     model: str | None = None,
     system_prompt: str | None = None,
+    correlation_id: str | None = None,
+    timeout: float | None = None,
 ) -> T:
     """Quick structured completion.
 
@@ -1071,6 +1176,8 @@ async def structured_complete(
         response_format: Pydantic model class for structured output
         model: Model identifier in format "provider:model_name" (defaults to settings.default_model)
         system_prompt: System prompt content (defaults to settings.default_system_prompt)
+        correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
+        timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
 
     Returns:
         Instance of response_format with parsed data
@@ -1079,7 +1186,9 @@ async def structured_complete(
         model=model,
         system_prompt=system_prompt,
     )
-    return await client.structured_complete(user_message, response_format)
+    return await client.structured_complete(
+        user_message, response_format, correlation_id=correlation_id, timeout=timeout
+    )
 
 
 async def stream_complete(

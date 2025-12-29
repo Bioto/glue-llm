@@ -16,6 +16,8 @@ from pathlib import Path
 import colorlog
 from pythonjsonlogger import json
 
+from gluellm.context import get_correlation_id
+
 
 def setup_logging(
     log_level: str = "INFO",
@@ -101,8 +103,9 @@ def setup_logging(
     console_handler.setLevel(numeric_level)
 
     # Color scheme for different log levels
+    # Add correlation ID to format if available
     color_formatter = colorlog.ColoredFormatter(
-        "%(log_color)s%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        "%(log_color)s%(asctime)s | %(levelname)-8s | %(name)s | [%(correlation_id)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         reset=True,
         log_colors={
@@ -130,16 +133,16 @@ def setup_logging(
 
     # Choose formatter based on JSON setting
     if log_json_format:
-        # JSON structured logging
+        # JSON structured logging with correlation ID
         json_formatter = json.JsonFormatter(
             "%(asctime)s %(name)s %(levelname)s %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
         file_handler.setFormatter(json_formatter)
     else:
-        # Standard text formatter
+        # Standard text formatter with correlation ID
         file_formatter = logging.Formatter(
-            "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            "%(asctime)s | %(levelname)-8s | %(name)s | [%(correlation_id)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
         file_handler.setFormatter(file_formatter)
@@ -161,17 +164,31 @@ def get_logger(name: str) -> logging.Logger:
     """Get a logger instance with the given name.
 
     This is a convenience function that ensures logging is configured
-    before returning a logger instance.
+    before returning a logger instance. The logger automatically includes
+    correlation IDs in log records when available.
 
     Args:
         name: Logger name (typically __name__)
 
     Returns:
-        logging.Logger: Configured logger instance
+        logging.Logger: Configured logger instance with correlation ID support
     """
     # Ensure logging is configured
     root_logger = logging.getLogger()
     if not root_logger.handlers:
         setup_logging()
 
-    return logging.getLogger(name)
+    logger = logging.getLogger(name)
+
+    # Add correlation ID filter to include it in log records
+    class CorrelationIDFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            correlation_id = get_correlation_id()
+            record.correlation_id = correlation_id if correlation_id else "N/A"
+            return True
+
+    # Only add filter once per logger
+    if not any(isinstance(f, CorrelationIDFilter) for f in logger.filters):
+        logger.addFilter(CorrelationIDFilter())
+
+    return logger
