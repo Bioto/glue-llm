@@ -5,8 +5,8 @@ This script demonstrates different ways to configure GlueLLM.
 
 import os
 
-from source.api import GlueLLM
-from source.config import GlueLLMSettings, settings
+from gluellm.api import GlueLLM
+from gluellm.config import GlueLLMSettings, settings
 
 print("=" * 60)
 print("GlueLLM Configuration Examples")

@@ -10,7 +10,7 @@ GlueLLM is a Python SDK that simplifies working with Large Language Models by pr
 
 Quick Start:
     >>> import asyncio
-    >>> from source import complete, structured_complete, GlueLLM
+    >>> from gluellm import complete, structured_complete, GlueLLM
     >>> from pydantic import BaseModel
     >>>
     >>> async def main():
@@ -68,7 +68,7 @@ Exceptions:
     - AuthenticationError: Authentication failed
 """
 
-from source.api import (
+from gluellm.api import (
     APIConnectionError,
     AuthenticationError,
     GlueLLM,
@@ -81,10 +81,10 @@ from source.api import (
     complete,
     structured_complete,
 )
-from source.config import GlueLLMSettings, get_settings, reload_settings, settings
-from source.models.config import RequestConfig
-from source.models.conversation import Conversation, Message, Role
-from source.models.prompt import Prompt, SystemPrompt
+from gluellm.config import GlueLLMSettings, get_settings, reload_settings, settings
+from gluellm.models.config import RequestConfig
+from gluellm.models.conversation import Conversation, Message, Role
+from gluellm.models.prompt import Prompt, SystemPrompt
 
 __all__ = [
     # High-level API

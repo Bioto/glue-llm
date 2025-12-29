@@ -36,7 +36,7 @@ uv pip install -e ".[dev]"
 
 ```python
 import asyncio
-from source.api import complete
+from gluellm.api import complete
 
 async def main():
     result = await complete(
@@ -52,7 +52,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from source.api import complete
+from gluellm.api import complete
 
 def get_weather(location: str, unit: str = "celsius") -> str:
     """Get the current weather for a location.
@@ -80,7 +80,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from source.api import structured_complete
+from gluellm.api import structured_complete
 from pydantic import BaseModel, Field
 from typing import Annotated
 
@@ -188,7 +188,7 @@ GLUELLM_DEFAULT_MODEL=openai:gpt-4o-mini
 ```
 
 ```python
-from source.api import complete
+from gluellm.api import complete
 
 # Uses default model from config
 result = await complete("Hello!")
@@ -210,7 +210,7 @@ For more details on any-llm-sdk capabilities and supported providers, see the [a
 The main client class for stateful LLM interactions with conversation memory.
 
 ```python
-from source.api import GlueLLM
+from gluellm.api import GlueLLM
 
 client = GlueLLM(
     model="openai:gpt-4o-mini",          # Model in "provider:model" format
@@ -235,7 +235,7 @@ client.reset_conversation()
 For one-off requests without maintaining conversation state:
 
 ```python
-from source.api import complete, structured_complete
+from gluellm.api import complete, structured_complete
 
 # Simple completion
 result = await complete(
@@ -421,7 +421,7 @@ person = await structured_complete(
 Use the `GlueLLM` client to maintain conversation context across multiple turns:
 
 ```python
-from source.api import GlueLLM
+from gluellm.api import GlueLLM
 
 # Create client with conversation memory
 client = GlueLLM(
@@ -453,7 +453,7 @@ GlueLLM uses `pydantic-settings` for flexible configuration via environment vari
 ### Configuration Options
 
 ```python
-from source.config import settings
+from gluellm.config import settings
 
 # Access current settings
 print(settings.default_model)           # "openai:gpt-4o-mini"
@@ -504,7 +504,7 @@ GLUELLM_LOG_LEVEL=INFO
 ### Reloading Configuration
 
 ```python
-from source.config import reload_settings
+from gluellm.config import reload_settings
 
 # Reload after changing .env file
 settings = reload_settings()
@@ -519,11 +519,11 @@ GlueLLM provides three powerful workflow patterns for orchestrating multiple age
 Producer agent creates content, critic agents provide parallel feedback, content is refined iteratively.
 
 ```python
-from source.workflows.iterative import IterativeRefinementWorkflow
-from source.models.workflow import IterativeConfig, CriticConfig
-from source.executors import AgentExecutor
-from source.models.agent import Agent
-from source.models.prompt import SystemPrompt
+from gluellm.workflows.iterative import IterativeRefinementWorkflow
+from gluellm.models.workflow import IterativeConfig, CriticConfig
+from gluellm.executors import AgentExecutor
+from gluellm.models.agent import Agent
+from gluellm.models.prompt import SystemPrompt
 
 # Create producer (writer)
 writer = Agent(
@@ -595,10 +595,10 @@ print(f"Total interactions: {len(result.agent_interactions)}")
 Agents execute sequentially, output of one becomes input to the next.
 
 ```python
-from source.workflows.pipeline import PipelineWorkflow
-from source.executors import AgentExecutor
-from source.models.agent import Agent
-from source.models.prompt import SystemPrompt
+from gluellm.workflows.pipeline import PipelineWorkflow
+from gluellm.executors import AgentExecutor
+from gluellm.models.agent import Agent
+from gluellm.models.prompt import SystemPrompt
 
 # Create pipeline stages
 researcher = Agent(
@@ -659,10 +659,10 @@ for interaction in result.agent_interactions:
 Multiple agents debate a topic, optional judge makes final decision.
 
 ```python
-from source.workflows.debate import DebateWorkflow, DebateConfig
-from source.executors import AgentExecutor
-from source.models.agent import Agent
-from source.models.prompt import SystemPrompt
+from gluellm.workflows.debate import DebateWorkflow, DebateConfig
+from gluellm.executors import AgentExecutor
+from gluellm.models.agent import Agent
+from gluellm.models.prompt import SystemPrompt
 
 # Create debaters
 pro_agent = Agent(
@@ -726,8 +726,8 @@ print(f"\nTotal interactions: {len(result.agent_interactions)}")
 An `Agent` represents a configured LLM with specific capabilities:
 
 ```python
-from source.models.agent import Agent
-from source.models.prompt import SystemPrompt
+from gluellm.models.agent import Agent
+from gluellm.models.prompt import SystemPrompt
 
 agent = Agent(
     name="Research Assistant",
@@ -746,7 +746,7 @@ Executors run agents or direct LLM queries:
 **SimpleExecutor** - Direct LLM execution:
 
 ```python
-from source.executors import SimpleExecutor
+from gluellm.executors import SimpleExecutor
 
 executor = SimpleExecutor(
     model="openai:gpt-4o-mini",
@@ -762,9 +762,9 @@ print(response)
 **AgentExecutor** - Execute using a pre-configured Agent:
 
 ```python
-from source.executors import AgentExecutor
-from source.models.agent import Agent
-from source.models.prompt import SystemPrompt
+from gluellm.executors import AgentExecutor
+from gluellm.models.agent import Agent
+from gluellm.models.prompt import SystemPrompt
 
 agent = Agent(
     name="Assistant",
@@ -789,7 +789,7 @@ GlueLLM provides comprehensive error handling with automatic classification and 
 ### Exception Hierarchy
 
 ```python
-from source.api import (
+from gluellm.api import (
     LLMError,              # Base exception
     TokenLimitError,       # Token/context length exceeded
     RateLimitError,        # Rate limit hit (429)
@@ -802,7 +802,7 @@ from source.api import (
 ### Handling Errors
 
 ```python
-from source.api import complete, TokenLimitError, RateLimitError
+from gluellm.api import complete, TokenLimitError, RateLimitError
 
 try:
     result = await complete(

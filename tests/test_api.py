@@ -5,7 +5,7 @@ from typing import Annotated
 import pytest
 from pydantic import BaseModel, Field
 
-from source.api import GlueLLM, ToolExecutionResult, complete, structured_complete
+from gluellm.api import GlueLLM, ToolExecutionResult, complete, structured_complete
 
 # Mark all tests as async
 pytestmark = pytest.mark.asyncio
@@ -387,12 +387,12 @@ class TestErrorHandling:
 
 
 class TestToolDiscovery:
-    """Test tool discovery and validation edge cases."""
+    """Test tool discovery and validation edge cases.
 
-    # These are synchronous tests, override the asyncio marker
-    pytestmark = []
+    These tests are now async to match the module-level asyncio marker.
+    """
 
-    def test_multiple_tools_same_name(self):
+    async def test_multiple_tools_same_name(self):
         """Test behavior when multiple tools have the same name."""
 
         # Create two tools with same name
@@ -415,7 +415,7 @@ class TestToolDiscovery:
         # Should return first tool in list
         assert found is tool1
 
-    def test_tool_with_no_docstring(self):
+    async def test_tool_with_no_docstring(self):
         """Test tool with no docstring."""
 
         def tool_no_doc(x: str) -> str:
@@ -429,7 +429,7 @@ class TestToolDiscovery:
         assert found is not None
         assert found is tool_no_doc
 
-    def test_lambda_function_as_tool(self):
+    async def test_lambda_function_as_tool(self):
         """Test lambda function as tool."""
         lambda_tool = lambda x: f"Lambda: {x}"  # noqa: E731
         lambda_tool.__name__ = "lambda_tool"
@@ -439,7 +439,7 @@ class TestToolDiscovery:
         assert found is not None
         assert found is lambda_tool
 
-    def test_partial_function_as_tool(self):
+    async def test_partial_function_as_tool(self):
         """Test partial function as tool."""
         from functools import partial
 
@@ -455,7 +455,7 @@ class TestToolDiscovery:
         assert found is not None
         assert found is partial_tool
 
-    def test_tool_name_case_sensitivity(self):
+    async def test_tool_name_case_sensitivity(self):
         """Test that tool name lookup is case-sensitive."""
 
         def tool_with_caps(x: str) -> str:
@@ -472,7 +472,7 @@ class TestToolDiscovery:
         not_found = client._find_tool("toolwithcaps")
         assert not_found is None
 
-    def test_class_method_as_tool(self):
+    async def test_class_method_as_tool(self):
         """Test class method as tool."""
 
         class ToolClass:

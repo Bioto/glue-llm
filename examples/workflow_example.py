@@ -6,11 +6,11 @@ specialized critics to iteratively improve content.
 
 import asyncio
 
-from source.executors import AgentExecutor
-from source.models.agent import Agent
-from source.models.prompt import SystemPrompt
-from source.models.workflow import CriticConfig, IterativeConfig
-from source.workflows.iterative import IterativeRefinementWorkflow
+from gluellm.executors import AgentExecutor
+from gluellm.models.agent import Agent
+from gluellm.models.prompt import SystemPrompt
+from gluellm.models.workflow import CriticConfig, IterativeConfig
+from gluellm.workflows.iterative import IterativeRefinementWorkflow
 
 
 async def main():

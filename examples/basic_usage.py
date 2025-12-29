@@ -4,7 +4,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field
 
-from source.api import GlueLLM, complete, structured_complete
+from gluellm.api import GlueLLM, complete, structured_complete
 
 
 # Example 1: Simple completion

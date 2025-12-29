@@ -36,7 +36,7 @@ class Message(BaseModel):
         content: The text content of the message
 
     Example:
-        >>> from source.models.conversation import Message, Role
+        >>> from gluellm.models.conversation import Message, Role
         >>> msg = Message(
         ...     id="123e4567-e89b-12d3-a456-426614174000",
         ...     role=Role.USER,
@@ -60,7 +60,7 @@ class Conversation(BaseModel):
         messages: List of Message objects in chronological order
 
     Example:
-        >>> from source.models.conversation import Conversation, Role
+        >>> from gluellm.models.conversation import Conversation, Role
         >>> conv = Conversation()
         >>> conv.add_message(Role.USER, "What is 2+2?")
         >>> conv.add_message(Role.ASSISTANT, "2+2 equals 4")

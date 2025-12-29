@@ -10,8 +10,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, Field, PrivateAttr
 
-from source.models.conversation import Conversation, Role
-from source.models.prompt import SystemPrompt
+from gluellm.models.conversation import Conversation, Role
+from gluellm.models.prompt import SystemPrompt
 
 
 class RequestConfig(BaseModel):
@@ -32,9 +32,9 @@ class RequestConfig(BaseModel):
         _conversation: Internal conversation history manager
 
     Example:
-        >>> from source.models.config import RequestConfig
-        >>> from source.models.prompt import SystemPrompt
-        >>> from source.models.conversation import Role
+        >>> from gluellm.models.config import RequestConfig
+        >>> from gluellm.models.prompt import SystemPrompt
+        >>> from gluellm.models.conversation import Role
         >>> from pydantic import BaseModel
         >>>
         >>> class OutputFormat(BaseModel):

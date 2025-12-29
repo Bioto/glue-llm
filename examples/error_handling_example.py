@@ -4,7 +4,7 @@ Example demonstrating error handling and retry logic in GlueLLM.
 
 import logging
 
-from source import (
+from gluellm import (
     APIConnectionError,
     AuthenticationError,
     GlueLLM,

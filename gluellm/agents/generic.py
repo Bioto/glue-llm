@@ -4,8 +4,8 @@ This module provides a GenericAgent that can be used as a starting point
 for building custom agents with specific capabilities.
 """
 
-from source.models.agent import Agent
-from source.models.prompt import SystemPrompt
+from gluellm.models.agent import Agent
+from gluellm.models.prompt import SystemPrompt
 
 
 class GenericAgent(Agent):
@@ -16,7 +16,7 @@ class GenericAgent(Agent):
     used directly for general-purpose tasks.
 
     Example:
-        >>> from source.agents.generic import GenericAgent
+        >>> from gluellm.agents.generic import GenericAgent
         >>>
         >>> agent = GenericAgent()
         >>> print(agent.name)
