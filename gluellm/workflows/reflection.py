@@ -7,6 +7,7 @@ critique and improve its own output through iterative reflection cycles.
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import ReflectionConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
 
@@ -41,6 +42,7 @@ class ReflectionWorkflow(Workflow):
         generator: Executor,
         reflector: Executor | None = None,
         config: ReflectionConfig | None = None,
+        hook_registry: HookRegistry | None = None,
     ):
         """Initialize a ReflectionWorkflow.
 
@@ -48,12 +50,14 @@ class ReflectionWorkflow(Workflow):
             generator: The executor for generating content
             reflector: Optional executor for reflection (defaults to generator if None)
             config: Optional configuration for reflection process
+            hook_registry: Optional webhook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.generator = generator
         self.reflector = reflector or generator
         self.config = config or ReflectionConfig()
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute reflection workflow.
 
         Args:

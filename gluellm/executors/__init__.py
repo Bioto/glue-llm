@@ -47,6 +47,7 @@ class SimpleExecutor(Executor):
         system_prompt: str | None = None,
         tools: list[Callable] | None = None,
         max_tool_iterations: int | None = None,
+        hook_registry=None,
     ):
         """Initialize a SimpleExecutor.
 
@@ -55,13 +56,15 @@ class SimpleExecutor(Executor):
             system_prompt: System prompt for the LLM (optional)
             tools: List of callable tools (defaults to empty list)
             max_tool_iterations: Maximum tool execution iterations (optional)
+            hook_registry: Optional hook registry for this executor
         """
+        super().__init__(hook_registry=hook_registry)
         self.model = model or settings.default_model
         self.system_prompt = system_prompt
         self.tools = tools
         self.max_tool_iterations = max_tool_iterations
 
-    async def execute(self, query: str) -> str:
+    async def _execute_internal(self, query: str) -> str:
         """Execute a query using the configured LLM.
 
         Args:
@@ -112,15 +115,17 @@ class AgentExecutor(Executor):
         >>> asyncio.run(main())
     """
 
-    def __init__(self, agent: Agent):
+    def __init__(self, agent: Agent, hook_registry=None):
         """Initialize an AgentExecutor.
 
         Args:
             agent: The Agent instance to use for query execution
+            hook_registry: Optional hook registry for this executor
         """
+        super().__init__(hook_registry=hook_registry)
         self.agent = agent
 
-    async def execute(self, query: str) -> str:
+    async def _execute_internal(self, query: str) -> str:
         """Execute a query using the agent's configuration.
 
         Args:
@@ -144,6 +149,22 @@ __all__ = [
     "SimpleExecutor",
     "AgentExecutor",
 ]
+
+
+# Trigger model rebuild now that Executor is fully defined
+def _trigger_model_rebuild():
+    """Trigger rebuild of workflow models that use Executor."""
+    try:
+        from gluellm.models import workflow
+
+        workflow._rebuild_models()
+    except Exception:
+        # Models might not be imported yet, which is fine
+        pass
+
+
+_trigger_model_rebuild()
+
 
 if __name__ == "__main__":
     import asyncio

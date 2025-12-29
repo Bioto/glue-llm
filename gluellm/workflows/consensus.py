@@ -8,6 +8,7 @@ import asyncio
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import ConsensusConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
 
@@ -38,17 +39,24 @@ class ConsensusWorkflow(Workflow):
         >>> result = await workflow.execute("Design a solution for X")
     """
 
-    def __init__(self, proposers: list[tuple[str, Executor]], config: ConsensusConfig | None = None):
+    def __init__(
+        self,
+        proposers: list[tuple[str, Executor]],
+        config: ConsensusConfig | None = None,
+        hook_registry: HookRegistry | None = None,
+    ):
         """Initialize a ConsensusWorkflow.
 
         Args:
             proposers: List of (agent_name, executor) tuples
             config: Optional configuration for consensus process
+            hook_registry: Optional webhook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.proposers = proposers
         self.config = config or ConsensusConfig()
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute consensus workflow.
 
         Args:

@@ -9,6 +9,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.workflows._base import Workflow, WorkflowResult
 
 
@@ -59,6 +60,7 @@ class DebateWorkflow(Workflow):
         participants: list[tuple[str, Executor]],
         judge: Executor | None = None,
         config: DebateConfig | None = None,
+        hook_registry: HookRegistry | None = None,
     ):
         """Initialize a DebateWorkflow.
 
@@ -66,12 +68,14 @@ class DebateWorkflow(Workflow):
             participants: List of (participant_name, executor) tuples
             judge: Optional judge executor for final decision
             config: Optional configuration for the debate
+            hook_registry: Optional webhook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.participants = participants
         self.judge = judge
         self.config = config or DebateConfig()
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute debate workflow.
 
         Args:

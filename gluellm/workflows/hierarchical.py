@@ -9,6 +9,7 @@ import asyncio
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import HierarchicalConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
 
@@ -46,6 +47,7 @@ class HierarchicalWorkflow(Workflow):
         manager: Executor,
         workers: list[tuple[str, Executor]],
         config: HierarchicalConfig | None = None,
+        hook_registry: HookRegistry | None = None,
     ):
         """Initialize a HierarchicalWorkflow.
 
@@ -53,12 +55,14 @@ class HierarchicalWorkflow(Workflow):
             manager: The executor for the manager agent
             workers: List of (worker_name, executor) tuples
             config: Optional configuration for hierarchical process
+            hook_registry: Optional webhook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.manager = manager
         self.workers = workers
         self.config = config or HierarchicalConfig()
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute hierarchical workflow.
 
         Args:

@@ -314,13 +314,21 @@ class RAGConfig(BaseModel):
 def _rebuild_models():
     """Rebuild Pydantic models to resolve forward references."""
     try:
-        from gluellm.executors._base import Executor  # noqa: F401
+        from gluellm.executors._base import Executor
 
-        CriticConfig.model_rebuild()
-        ExpertConfig.model_rebuild()
-    except ImportError:
-        # Executor not available yet, will be rebuilt when imported
-        pass
+        # Rebuild models with Executor in the namespace
+        CriticConfig.model_rebuild(_types_namespace={"Executor": Executor})
+        ExpertConfig.model_rebuild(_types_namespace={"Executor": Executor})
+    except (ImportError, Exception):
+        # Executor not available yet or circular import issue
+        import sys
+
+        if "pytest" in sys.modules or "unittest" in sys.modules:
+            # In tests, try again later
+            pass
+        else:
+            # During normal import, this is expected
+            pass
 
 
 # Try to rebuild immediately if Executor is already available

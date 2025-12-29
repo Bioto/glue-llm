@@ -7,6 +7,7 @@ engage in a Socratic dialogue through iterative questioning and answering.
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import SocraticConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
 
@@ -41,6 +42,7 @@ class SocraticWorkflow(Workflow):
         questioner: Executor,
         responder: Executor,
         config: SocraticConfig | None = None,
+        hook_registry: HookRegistry | None = None,
     ):
         """Initialize a SocraticWorkflow.
 
@@ -48,12 +50,14 @@ class SocraticWorkflow(Workflow):
             questioner: The executor for asking questions
             responder: The executor for answering questions
             config: Optional configuration for Socratic dialogue
+            hook_registry: Optional webhook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.questioner = questioner
         self.responder = responder
         self.config = config or SocraticConfig()
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute Socratic dialogue workflow.
 
         Args:

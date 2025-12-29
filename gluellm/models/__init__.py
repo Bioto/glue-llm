@@ -15,9 +15,15 @@ Available Models:
      - IterativeConfig: Configuration for iterative refinement workflows
 """
 
+from gluellm.models.hook import HookConfig, HookContext, HookErrorStrategy, HookRegistry, HookStage
 from gluellm.models.workflow import CriticConfig, IterativeConfig
 
 __all__ = [
     "CriticConfig",
     "IterativeConfig",
+    "HookConfig",
+    "HookContext",
+    "HookErrorStrategy",
+    "HookRegistry",
+    "HookStage",
 ]

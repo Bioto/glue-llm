@@ -8,6 +8,7 @@ import asyncio
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import MapReduceConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
 
@@ -41,6 +42,7 @@ class MapReduceWorkflow(Workflow):
         mapper: Executor,
         reducer: Executor | None = None,
         config: MapReduceConfig | None = None,
+        hook_registry: HookRegistry | None = None,
     ):
         """Initialize a MapReduceWorkflow.
 
@@ -48,12 +50,14 @@ class MapReduceWorkflow(Workflow):
             mapper: The executor for processing chunks
             reducer: Optional executor for reducing results (defaults to mapper)
             config: Optional configuration for MapReduce process
+            hook_registry: Optional webhook registry for this workflow
         """
+        super().__init__(hook_registry=hook_registry)
         self.mapper = mapper
         self.reducer = reducer or mapper
         self.config = config or MapReduceConfig()
 
-    async def execute(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
+    async def _execute_internal(self, initial_input: str, context: dict[str, Any] | None = None) -> WorkflowResult:
         """Execute MapReduce workflow.
 
         Args:

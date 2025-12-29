@@ -11,3 +11,15 @@ def reset_settings():
     from gluellm.config import reload_settings
 
     reload_settings()
+
+
+@pytest.fixture(autouse=True)
+def clear_global_hooks():
+    """Clear global hooks before and after each test to ensure test isolation."""
+    from gluellm.hooks import clear_global_hooks as clear_hooks
+
+    # Clear before test
+    clear_hooks()
+    yield
+    # Clear after test
+    clear_hooks()
