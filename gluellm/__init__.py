@@ -76,9 +76,11 @@ from gluellm.api import (
     # Exceptions
     LLMError,
     RateLimitError,
+    StreamingChunk,
     TokenLimitError,
     ToolExecutionResult,
     complete,
+    stream_complete,
     structured_complete,
 )
 from gluellm.config import GlueLLMSettings, get_settings, reload_settings, settings
@@ -90,8 +92,10 @@ __all__ = [
     # High-level API
     "GlueLLM",
     "complete",
+    "stream_complete",
     "structured_complete",
     "ToolExecutionResult",
+    "StreamingChunk",
     # Exceptions
     "LLMError",
     "TokenLimitError",

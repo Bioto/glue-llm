@@ -1,9 +1,36 @@
 [project]
 name = "gluellm"
 version = "0.1.0"
-description = "Add your description here"
+description = "A high-level Python SDK for Large Language Models with automatic tool execution, structured output support, and multi-agent workflows"
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [
+    {name = "GlueLLM Contributors"}
+]
+keywords = [
+    "llm",
+    "language-model",
+    "ai",
+    "openai",
+    "anthropic",
+    "claude",
+    "gpt",
+    "tool-calling",
+    "multi-agent",
+    "workflow",
+    "async"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "any-llm-sdk[openai]>=1.5.0",
     "click>=8.3.1",
@@ -14,6 +41,15 @@ dependencies = [
     "rich>=14.2.0",
     "tenacity>=9.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/gluellm"
+Documentation = "https://github.com/yourusername/gluellm#readme"
+Repository = "https://github.com/yourusername/gluellm"
+Issues = "https://github.com/yourusername/gluellm/issues"
+
+[project.scripts]
+gluellm = "gluellm.cli:cli"
 
 [project.optional-dependencies]
 dev = [
