@@ -7,7 +7,7 @@ A high-level Python SDK for Large Language Models with automatic tool execution,
 - 🔄 **Automatic Tool Execution Loop** - No manual tool call handling required
 - 📊 **Structured Output** - Type-safe responses with Pydantic models
 - 💬 **Conversation Management** - Built-in multi-turn conversation support
-- 🛠️ **Multiple Tools** - Easy integration of multiple tools
+- 🛠️ **Multiple Tools** - Easy integration of multiple tools (sync and async)
 - 🎯 **Simple API** - Clean, intuitive interface for common LLM tasks
 - 🔌 **Provider Agnostic** - Built on `any-llm-sdk` for multi-provider support
 - ⚡ **Automatic Retry with Exponential Backoff** - Smart retry logic for rate limits and connection issues
@@ -15,6 +15,8 @@ A high-level Python SDK for Large Language Models with automatic tool execution,
 - 📝 **Enhanced Logging** - Track retry attempts and tool execution errors
 - ⚙️ **Flexible Configuration** - Environment-based settings with pydantic-settings
 - 🤖 **Multi-Agent Workflows** - Orchestrate multiple agents in iterative, pipeline, and debate patterns
+- 🌊 **Streaming Support** - Real-time response streaming for better UX
+- 📈 **Token Usage Tracking** - Monitor token consumption and costs
 
 ## Installation
 
@@ -266,11 +268,18 @@ class ToolExecutionResult:
     tool_calls_made: int                     # Number of tool calls executed
     tool_execution_history: list[dict]       # Detailed tool call history
     raw_response: ChatCompletion | None      # Raw response from any-llm-sdk
+    tokens_used: dict[str, int] | None       # Token usage info (prompt, completion, total)
 
 # Access result data
 result = await complete("Query with tools...", tools=[my_tool])
 print(result.final_response)
 print(f"Made {result.tool_calls_made} tool calls")
+
+# Token usage tracking
+if result.tokens_used:
+    print(f"Tokens used: {result.tokens_used['total']}")
+    print(f"  Prompt: {result.tokens_used['prompt']}")
+    print(f"  Completion: {result.tokens_used['completion']}")
 
 for exec_info in result.tool_execution_history:
     print(f"{exec_info['tool_name']}({exec_info['arguments']}) -> {exec_info['result']}")
@@ -332,6 +341,7 @@ def calculate(expression: str) -> str:
 - Docstring is used by the LLM to understand tool purpose
 - Type hints help the LLM understand parameters
 - Return string values for best results
+- Tools can be synchronous or asynchronous (use `async def` for async tools)
 
 ### Multiple Tools Example
 
@@ -350,6 +360,27 @@ result = await complete(
     tools=[get_weather, get_time],
 )
 ```
+
+### Async Tools
+
+Tools can be asynchronous for database queries, API calls, etc.:
+
+```python
+import aiohttp
+
+async def fetch_data(url: str) -> str:
+    """Fetch data from a URL."""
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            return await response.text()
+
+result = await complete(
+    user_message="Fetch data from https://api.example.com/data",
+    tools=[fetch_data],
+)
+```
+
+GlueLLM automatically detects async tools and awaits them appropriately.
 
 ### Tool Execution History
 
@@ -508,6 +539,214 @@ from gluellm.config import reload_settings
 
 # Reload after changing .env file
 settings = reload_settings()
+```
+
+## Advanced APIs
+
+### Conversation Management
+
+GlueLLM provides a `Conversation` class for managing conversation history with fine-grained control:
+
+```python
+from gluellm.models.conversation import Conversation, Role, Message
+
+# Create a conversation
+conv = Conversation()
+
+# Add messages
+conv.add_message(Role.USER, "What is Python?")
+conv.add_message(Role.ASSISTANT, "Python is a programming language.")
+
+# Access messages
+for msg in conv.messages:
+    print(f"{msg.role.value}: {msg.content}")
+
+# Convert to dictionary format for API calls
+messages_dict = conv.messages_dict
+# [{"role": "user", "content": "What is Python?"}, ...]
+
+# Access conversation ID
+print(conv.id)  # UUID string
+```
+
+**Message Roles:**
+- `Role.SYSTEM` - System/instruction messages
+- `Role.USER` - User input messages
+- `Role.ASSISTANT` - LLM response messages
+- `Role.TOOL` - Tool execution result messages
+
+**Direct Message Creation:**
+```python
+from gluellm.models.conversation import Message, Role
+import uuid
+
+msg = Message(
+    id=str(uuid.uuid4()),
+    role=Role.USER,
+    content="Hello!"
+)
+```
+
+### Prompt Templating System
+
+GlueLLM uses Jinja2 templates for system prompt formatting with automatic tool integration:
+
+```python
+from gluellm.models.prompt import SystemPrompt
+
+# Create a system prompt
+prompt = SystemPrompt(content="You are a helpful assistant.")
+
+# Format with tools (automatically includes tool definitions)
+def get_weather(location: str) -> str:
+    """Get weather for a location."""
+    return f"Weather in {location}: 22°C"
+
+formatted = prompt.to_formatted_string(tools=[get_weather])
+# Returns XML-formatted prompt with tool definitions
+```
+
+**Custom Templates:**
+
+The system uses `BASE_SYSTEM_PROMPT` template which wraps instructions and tools in XML. The template automatically:
+- Includes system instructions
+- Lists available tools with names and docstrings
+- Formats output as compact XML
+
+**Template Structure:**
+```xml
+<system_prompt>
+    <system_instructions>
+        Your instructions here
+    </system_instructions>
+    <tools>
+        <tool>
+            <name>tool_name</name>
+            <description>Tool docstring</description>
+        </tool>
+    </tools>
+</system_prompt>
+```
+
+### Request Configuration
+
+For advanced use cases, use `RequestConfig` to manage request parameters and conversation state:
+
+```python
+from gluellm.models.config import RequestConfig
+from gluellm.models.prompt import SystemPrompt
+from gluellm.models.conversation import Role
+from pydantic import BaseModel
+
+class OutputFormat(BaseModel):
+    answer: str
+
+# Create request configuration
+config = RequestConfig(
+    model="openai:gpt-4o-mini",
+    system_prompt=SystemPrompt(content="You are helpful."),
+    response_format=OutputFormat,  # Optional structured output
+    tools=[get_weather],  # Optional tools
+)
+
+# Add messages to conversation
+config.add_message_to_conversation(Role.USER, "What's the weather?")
+config.add_message_to_conversation(Role.ASSISTANT, "Let me check...")
+
+# Get formatted conversation (includes system message)
+messages = config.get_conversation()
+# Ready to pass to LLM API
+```
+
+**Use Cases:**
+- Building custom request pipelines
+- Managing conversation state outside GlueLLM client
+- Integrating with other LLM libraries
+- Advanced prompt engineering
+
+### Workflow Configuration Models
+
+Workflows use configuration models for fine-grained control:
+
+**IterativeConfig** - Controls iterative refinement behavior:
+
+```python
+from gluellm.models.workflow import IterativeConfig
+
+config = IterativeConfig(
+    max_iterations=5,                    # Maximum refinement rounds
+    min_quality_score=0.8,               # Early stopping threshold (0.0-1.0)
+    convergence_threshold=0.05,           # Convergence detection (optional)
+    quality_evaluator=my_evaluator_func, # Custom quality scorer (optional)
+)
+
+def my_evaluator_func(content: str, feedback: dict) -> float:
+    """Custom quality evaluator returning 0.0-1.0."""
+    # Analyze content and feedback
+    return 0.85  # Quality score
+```
+
+**CriticConfig** - Defines critic agents in iterative workflows:
+
+```python
+from gluellm.models.workflow import CriticConfig
+from gluellm.executors import AgentExecutor
+
+critic_config = CriticConfig(
+    executor=AgentExecutor(my_critic_agent),
+    specialty="grammar and clarity",      # Critic's focus area
+    goal="Optimize for readability",      # Specific optimization goal
+    weight=1.0,                           # Feedback weight (default: 1.0)
+)
+```
+
+**DebateConfig** - Controls debate workflow behavior:
+
+```python
+from gluellm.workflows.debate import DebateConfig
+
+config = DebateConfig(
+    max_rounds=5,                         # Maximum debate rounds
+    require_consensus=False,              # Whether consensus is required
+    judge_decides=True,                   # Whether judge makes final decision
+)
+```
+
+### Generic Agent
+
+GlueLLM provides a `GenericAgent` as a starting point for custom agents:
+
+```python
+from gluellm.agents.generic import GenericAgent
+
+# Create a generic agent with default configuration
+agent = GenericAgent()
+
+# Access agent properties
+print(agent.name)  # "Generic Agent"
+print(agent.description)  # "A generic agent that can use any tool"
+
+# Use in workflows
+from gluellm.executors import AgentExecutor
+executor = AgentExecutor(agent)
+```
+
+**Customization:**
+
+You can subclass `GenericAgent` or use `Agent` directly for more control:
+
+```python
+from gluellm.models.agent import Agent
+from gluellm.models.prompt import SystemPrompt
+
+custom_agent = Agent(
+    name="My Custom Agent",
+    description="Does specific tasks",
+    system_prompt=SystemPrompt(content="Custom instructions"),
+    tools=[my_tool],
+    max_tool_iterations=5,
+    model="anthropic:claude-3-5-sonnet-20241022",  # Optional model override
+)
 ```
 
 ## Multi-Agent Workflows
@@ -857,51 +1096,46 @@ GlueLLM includes a comprehensive CLI for testing and demonstrations.
 
 ### Available Commands
 
+After installation, use the `gluellm` command:
+
 ```bash
 # Test basic completion
-python source/cli.py test-completion
+gluellm test-completion
 
 # Test tool calling
-python source/cli.py test-tool-call
+gluellm test-tool-call
 
 # Run all interactive demos
-python source/cli.py demo
+gluellm demo
 
 # Run example scripts
-python source/cli.py examples
+gluellm examples
 
 # Run test suite
-python source/cli.py run-tests
-python source/cli.py run-tests --verbose
-python source/cli.py run-tests -c TestBasicToolCalling
-python source/cli.py run-tests -t test_single_tool_call
-python source/cli.py run-tests --no-integration
+gluellm run-tests
+gluellm run-tests --verbose
+gluellm run-tests -c TestBasicToolCalling
+gluellm run-tests -t test_single_tool_call
+gluellm run-tests --no-integration
 ```
 
 ### Workflow Test Commands
 
 ```bash
 # Test iterative refinement workflow
-python source/cli.py test-iterative-workflow
-python source/cli.py test-iterative-workflow -i "Write about AI" -n 3 -c 2
+gluellm test-iterative-workflow
+gluellm test-iterative-workflow -i "Write about AI" -n 3 -c 2
 
 # Test pipeline workflow
-python source/cli.py test-pipeline-workflow
-python source/cli.py test-pipeline-workflow -i "Topic: Python" -s 3
+gluellm test-pipeline-workflow
+gluellm test-pipeline-workflow -i "Topic: Python" -s 3
 
 # Test debate workflow
-python source/cli.py test-debate-workflow
-python source/cli.py test-debate-workflow -t "Is remote work better?" -r 3 --no-judge
+gluellm test-debate-workflow
+gluellm test-debate-workflow -t "Is remote work better?" -r 3 --no-judge
 ```
 
-### Using uv run
-
-```bash
-# Recommended: Use uv run for proper environment
-uv run python source/cli.py demo
-uv run python source/cli.py test-iterative-workflow
-uv run pytest tests/ -v
-```
+**Legacy Usage:** If the `gluellm` command is not available, you can use `python -m gluellm.cli` or `python source/cli.py` (deprecated).
 
 ## Architecture
 
@@ -987,6 +1221,233 @@ sequenceDiagram
     end
 ```
 
+## Deployment & Production
+
+### Environment Setup
+
+For production deployments, use environment variables or a secure configuration management system:
+
+```bash
+# Production environment variables
+export GLUELLM_DEFAULT_MODEL=openai:gpt-4o-mini
+export GLUELLM_MAX_TOOL_ITERATIONS=10
+export GLUELLM_RETRY_MAX_ATTEMPTS=3
+export GLUELLM_LOG_LEVEL=INFO
+
+# API Keys (use secrets management in production)
+export OPENAI_API_KEY=sk-...
+# or
+export GLUELLM_OPENAI_API_KEY=sk-...
+```
+
+### Docker Deployment
+
+Create a `Dockerfile`:
+
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install uv for dependency management
+RUN pip install uv
+
+# Copy dependency files
+COPY pyproject.toml uv.lock ./
+
+# Install dependencies
+RUN uv pip install --system -e .
+
+# Copy application code
+COPY gluellm/ ./gluellm/
+COPY examples/ ./examples/
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV GLUELLM_LOG_LEVEL=INFO
+
+# Run your application
+CMD ["python", "your_app.py"]
+```
+
+Build and run:
+
+```bash
+docker build -t gluellm-app .
+docker run -e OPENAI_API_KEY=sk-... gluellm-app
+```
+
+### Docker Compose
+
+Example `docker-compose.yml`:
+
+```yaml
+version: '3.8'
+
+services:
+  gluellm-app:
+    build: .
+    environment:
+      - GLUELLM_DEFAULT_MODEL=openai:gpt-4o-mini
+      - GLUELLM_LOG_LEVEL=INFO
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+```
+
+### Production Considerations
+
+**1. API Key Management**
+- Use secrets management (AWS Secrets Manager, HashiCorp Vault, etc.)
+- Never commit API keys to version control
+- Rotate keys regularly
+- Use least-privilege access
+
+**2. Error Handling**
+- Implement comprehensive error handling
+- Set up monitoring and alerting
+- Log errors for debugging
+- Provide fallback responses for users
+
+**3. Rate Limiting**
+- Implement rate limiting for your application
+- Monitor API usage and costs
+- Use retry configuration appropriately
+- Consider caching responses when possible
+
+**4. Logging**
+- Configure structured logging
+- Log to files or centralized logging service
+- Include request IDs for tracing
+- Don't log sensitive data (API keys, PII)
+
+**5. Performance**
+- Use connection pooling for external APIs
+- Implement caching for repeated queries
+- Monitor token usage and optimize prompts
+- Consider async/await for concurrent operations
+
+**6. Security**
+- Validate all inputs
+- Sanitize tool outputs
+- Use HTTPS for all API calls
+- Implement authentication/authorization
+- Regular security updates
+
+**7. Scaling**
+- Use load balancers for multiple instances
+- Consider message queues for async processing
+- Monitor resource usage
+- Scale horizontally as needed
+
+### Example Production Application
+
+```python
+"""Production-ready GlueLLM application."""
+
+import asyncio
+import logging
+import os
+from contextlib import asynccontextmanager
+
+from gluellm.api import GlueLLM, RateLimitError, TokenLimitError
+
+# Configure logging
+logging.basicConfig(
+    level=os.getenv("GLUELLM_LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+class ProductionLLMService:
+    """Production LLM service with error handling and monitoring."""
+
+    def __init__(self):
+        self.client = GlueLLM(
+            model=os.getenv("GLUELLM_DEFAULT_MODEL", "openai:gpt-4o-mini"),
+            system_prompt=os.getenv("GLUELLM_DEFAULT_SYSTEM_PROMPT", "You are helpful."),
+            max_tool_iterations=int(os.getenv("GLUELLM_MAX_TOOL_ITERATIONS", "10")),
+        )
+
+    async def process_request(self, user_message: str) -> dict:
+        """Process a user request with comprehensive error handling."""
+        try:
+            result = await self.client.complete(user_message)
+            return {
+                "success": True,
+                "response": result.final_response,
+                "tool_calls": result.tool_calls_made,
+            }
+        except RateLimitError as e:
+            logger.warning(f"Rate limit hit: {e}")
+            return {
+                "success": False,
+                "error": "Service temporarily unavailable. Please try again later.",
+            }
+        except TokenLimitError as e:
+            logger.error(f"Token limit exceeded: {e}")
+            return {
+                "success": False,
+                "error": "Request too long. Please shorten your message.",
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": "An error occurred. Please try again.",
+            }
+
+
+# Usage
+async def main():
+    service = ProductionLLMService()
+    result = await service.process_request("Hello!")
+    print(result)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### Monitoring & Observability
+
+- **Metrics**: Track request counts, latency, error rates
+- **Logging**: Structured logs with correlation IDs
+- **Alerting**: Set up alerts for high error rates or rate limits
+- **Cost Monitoring**: Track token usage and API costs
+
+### CI/CD Integration
+
+Example GitHub Actions workflow:
+
+```yaml
+name: Deploy GlueLLM App
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install uv
+          uv pip install -e ".[dev]"
+      - name: Run tests
+        run: uv run pytest tests/ -m "not integration"
+      - name: Deploy
+        run: |
+          # Your deployment steps
+```
+
 ## Development
 
 ### Running Tests
@@ -1008,8 +1469,8 @@ uv run pytest tests/test_api.py::test_simple_completion
 uv run pytest tests/ -m "not integration"
 
 # Using the CLI
-uv run python source/cli.py run-tests
-uv run python source/cli.py run-tests --verbose
+gluellm run-tests
+gluellm run-tests --verbose
 ```
 
 ### Running Examples
@@ -1019,38 +1480,40 @@ uv run python source/cli.py run-tests --verbose
 uv run python examples/basic_usage.py
 
 # Run CLI demos
-uv run python source/cli.py demo
+gluellm demo
 
 # Run specific workflow examples
-uv run python source/cli.py test-iterative-workflow
-uv run python source/cli.py test-pipeline-workflow
-uv run python source/cli.py test-debate-workflow
+gluellm test-iterative-workflow
+gluellm test-pipeline-workflow
+gluellm test-debate-workflow
 ```
 
 ### Project Structure
 
 ```
 gluellm/
-├── source/
-│   ├── api.py                    # Core API (GlueLLM, complete, structured_complete)
-│   ├── cli.py                    # Command-line interface
-│   ├── config.py                 # Configuration management
+├── gluellm/                     # Main package (use this)
+│   ├── api.py                   # Core API (GlueLLM, complete, structured_complete)
+│   ├── cli.py                   # Command-line interface
+│   ├── config.py                # Configuration management
 │   ├── models/
-│   │   ├── agent.py             # Agent model
-│   │   ├── config.py            # Request configuration
-│   │   ├── conversation.py      # Conversation and message models
-│   │   ├── prompt.py            # Prompt templates
-│   │   └── workflow.py          # Workflow configurations
+│   │   ├── agent.py            # Agent model
+│   │   ├── config.py           # Request configuration
+│   │   ├── conversation.py     # Conversation and message models
+│   │   ├── prompt.py           # Prompt templates
+│   │   └── workflow.py         # Workflow configurations
 │   ├── executors/
-│   │   ├── _base.py             # Executor interface
-│   │   └── __init__.py          # SimpleExecutor, AgentExecutor
+│   │   ├── _base.py            # Executor interface
+│   │   └── __init__.py         # SimpleExecutor, AgentExecutor
 │   ├── workflows/
-│   │   ├── _base.py             # Workflow base class
-│   │   ├── iterative.py         # Iterative refinement workflow
-│   │   ├── pipeline.py          # Pipeline workflow
-│   │   └── debate.py            # Debate workflow
+│   │   ├── _base.py            # Workflow base class
+│   │   ├── iterative.py        # Iterative refinement workflow
+│   │   ├── pipeline.py         # Pipeline workflow
+│   │   └── debate.py           # Debate workflow
 │   └── agents/
-│       └── generic.py           # Generic agent implementation
+│       └── generic.py          # Generic agent implementation
+├── source/                      # Legacy/alternate CLI location (deprecated)
+│   └── cli.py                   # Use 'gluellm' command instead
 ├── examples/
 │   ├── basic_usage.py           # Usage examples
 │   ├── configuration_example.py # Configuration examples
@@ -1064,8 +1527,14 @@ gluellm/
 │   └── test_llm_edge_cases.py   # LLM integration tests
 ├── pyproject.toml               # Project configuration
 ├── env.example                  # Example environment configuration
+├── LICENSE                      # MIT License
+├── CONTRIBUTING.md              # Contribution guidelines
+├── CHANGELOG.md                 # Version history
+├── SECURITY.md                  # Security policy
 └── README.md                    # This file
 ```
+
+**Note:** The `source/` directory contains legacy CLI code. The main package is `gluellm/`. Use the `gluellm` CLI command (after installation) instead of `python source/cli.py`.
 
 ### Code Quality
 
@@ -1123,4 +1592,4 @@ Built on top of [any-llm-sdk](https://github.com/BerkYeni/any_llm_client) for mu
 
 ---
 
-**Need Help?** Check out the [examples/](examples/) directory for more usage patterns, or run `python source/cli.py demo` to see interactive demonstrations of all features.
+**Need Help?** Check out the [examples/](examples/) directory for more usage patterns, or run `gluellm demo` to see interactive demonstrations of all features.

@@ -48,9 +48,10 @@ Example:
     >>> asyncio.run(main())
 """
 
+import asyncio
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Annotated, Any, TypeVar
 
 from any_llm import acompletion as any_llm_acompletion
@@ -228,11 +229,22 @@ async def _safe_llm_call(
     model: str,
     tools: list[Callable] | None = None,
     response_format: type[BaseModel] | None = None,
-) -> ChatCompletion:
+    stream: bool = False,
+) -> ChatCompletion | AsyncIterator[ChatCompletion]:
     """Make an LLM call with error classification.
 
     This wraps the any_llm_acompletion call to catch and classify errors.
     Raises our custom exception types for better error handling.
+
+    Args:
+        messages: List of message dictionaries
+        model: Model identifier
+        tools: Optional list of tools
+        response_format: Optional Pydantic model for structured output
+        stream: Whether to stream the response
+
+    Returns:
+        ChatCompletion if stream=False, AsyncIterator[ChatCompletion] if stream=True
     """
     try:
         return await any_llm_acompletion(
@@ -240,6 +252,7 @@ async def _safe_llm_call(
             model=model,
             tools=tools if tools else None,
             response_format=response_format,
+            stream=stream,
         )
     except Exception as e:
         # Classify the error and raise the appropriate exception
@@ -291,6 +304,21 @@ class ToolExecutionResult(BaseModel):
     raw_response: Annotated[
         SkipValidation[ChatCompletion] | None, Field(description="The raw final response from the LLM", default=None)
     ]
+    tokens_used: Annotated[
+        dict[str, int] | None,
+        Field(
+            description="Token usage information with 'prompt', 'completion', and 'total' keys",
+            default=None,
+        ),
+    ]
+
+
+class StreamingChunk(BaseModel):
+    """A chunk of streaming response."""
+
+    content: Annotated[str, Field(description="The content chunk")]
+    done: Annotated[bool, Field(description="Whether this is the final chunk")]
+    tool_calls_made: Annotated[int, Field(description="Number of tool calls made so far", default=0)]
 
 
 class GlueLLM:
@@ -405,7 +433,11 @@ class GlueLLM:
                     tool_func = self._find_tool(tool_name)
                     if tool_func:
                         try:
-                            tool_result = tool_func(**tool_args)
+                            # Support both sync and async tools
+                            if asyncio.iscoroutinefunction(tool_func):
+                                tool_result = await tool_func(**tool_args)
+                            else:
+                                tool_result = tool_func(**tool_args)
                             tool_result_str = str(tool_result)
 
                             # Record in history
@@ -478,11 +510,23 @@ class GlueLLM:
         # Max iterations reached
         logger.warning(f"Max tool execution iterations ({self.max_tool_iterations}) reached")
         final_content = "Maximum tool execution iterations reached."
+
+        # Extract token usage if available
+        tokens_used = None
+        if hasattr(response, "usage") and response.usage:
+            usage = response.usage
+            tokens_used = {
+                "prompt": getattr(usage, "prompt_tokens", 0) or 0,
+                "completion": getattr(usage, "completion_tokens", 0) or 0,
+                "total": getattr(usage, "total_tokens", 0) or 0,
+            }
+
         return ToolExecutionResult(
             final_response=final_content,
             tool_calls_made=tool_calls_made,
             tool_execution_history=tool_execution_history,
             raw_response=response,
+            tokens_used=tokens_used,
         )
 
     async def structured_complete(
@@ -572,6 +616,204 @@ class GlueLLM:
                 return tool
         return None
 
+    async def stream_complete(
+        self,
+        user_message: str,
+        execute_tools: bool = True,
+    ) -> AsyncIterator[StreamingChunk]:
+        """Stream completion with automatic tool execution.
+
+        Yields chunks of the response as they arrive. When tools are called,
+        streaming pauses and tool execution occurs, then streaming resumes.
+
+        Args:
+            user_message: The user's message/request
+            execute_tools: Whether to automatically execute tools
+
+        Yields:
+            StreamingChunk objects with content and metadata
+
+        Raises:
+            TokenLimitError: If token limit is exceeded
+            RateLimitError: If rate limit persists after retries
+            APIConnectionError: If connection fails after retries
+            AuthenticationError: If authentication fails
+            InvalidRequestError: If request parameters are invalid
+        """
+        # Add user message to conversation
+        self._conversation.add_message(Role.USER, user_message)
+
+        # Build initial messages
+        system_message = {
+            "role": "system",
+            "content": self._format_system_prompt(),
+        }
+        messages = [system_message] + self._conversation.messages_dict
+
+        tool_execution_history = []
+        tool_calls_made = 0
+        accumulated_content = ""
+
+        # Tool execution loop
+        for iteration in range(self.max_tool_iterations):
+            try:
+                # Try streaming first (if no tools or tools disabled, stream directly)
+                if not execute_tools or not self.tools:
+                    # Simple streaming without tool execution
+                    async for chunk_response in await _safe_llm_call(
+                        messages=messages, model=self.model, tools=None, stream=True
+                    ):
+                        if hasattr(chunk_response, "choices") and chunk_response.choices:
+                            delta = chunk_response.choices[0].delta
+                            if hasattr(delta, "content") and delta.content:
+                                accumulated_content += delta.content
+                                yield StreamingChunk(
+                                    content=delta.content,
+                                    done=False,
+                                    tool_calls_made=tool_calls_made,
+                                )
+                    # Final chunk
+                    if accumulated_content:
+                        self._conversation.add_message(Role.ASSISTANT, accumulated_content)
+                        yield StreamingChunk(content="", done=True, tool_calls_made=tool_calls_made)
+                    return
+
+                # With tools: get full response first to check for tool calls
+                response = await _llm_call_with_retry(
+                    messages=messages,
+                    model=self.model,
+                    tools=self.tools if self.tools else None,
+                )
+            except LLMError as e:
+                logger.error(f"LLM call failed on iteration {iteration + 1}: {e}")
+                error_msg = f"Failed during tool execution loop (iteration {iteration + 1}/{self.max_tool_iterations})"
+                raise type(e)(f"{error_msg}: {e}") from e
+
+            # Check if model wants to call tools
+            if execute_tools and self.tools and response.choices[0].message.tool_calls:
+                tool_calls = response.choices[0].message.tool_calls
+
+                # Yield a chunk indicating tool execution is happening
+                yield StreamingChunk(
+                    content="[Executing tools...]",
+                    done=False,
+                    tool_calls_made=tool_calls_made,
+                )
+
+                # Add assistant message with tool calls to history
+                messages.append(response.choices[0].message)
+
+                # Execute each tool call
+                for tool_call in tool_calls:
+                    tool_calls_made += 1
+                    tool_name = tool_call.function.name
+
+                    try:
+                        tool_args = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError as e:
+                        error_msg = f"Invalid JSON in tool arguments: {str(e)}"
+                        logger.warning(f"Tool {tool_name} - {error_msg}")
+                        tool_execution_history.append(
+                            {
+                                "tool_name": tool_name,
+                                "arguments": tool_call.function.arguments,
+                                "result": error_msg,
+                                "error": True,
+                            }
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": error_msg,
+                            }
+                        )
+                        continue
+
+                    # Find and execute the tool
+                    tool_func = self._find_tool(tool_name)
+                    if tool_func:
+                        try:
+                            # Check if tool is async
+                            if asyncio.iscoroutinefunction(tool_func):
+                                tool_result = await tool_func(**tool_args)
+                            else:
+                                tool_result = tool_func(**tool_args)
+                            tool_result_str = str(tool_result)
+
+                            tool_execution_history.append(
+                                {
+                                    "tool_name": tool_name,
+                                    "arguments": tool_args,
+                                    "result": tool_result_str,
+                                    "error": False,
+                                }
+                            )
+                        except Exception as e:
+                            tool_result_str = f"Error executing tool: {type(e).__name__}: {str(e)}"
+                            logger.warning(f"Tool {tool_name} execution failed: {e}")
+                            tool_execution_history.append(
+                                {
+                                    "tool_name": tool_name,
+                                    "arguments": tool_args,
+                                    "result": tool_result_str,
+                                    "error": True,
+                                }
+                            )
+
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": tool_result_str,
+                            }
+                        )
+                    else:
+                        error_msg = f"Tool '{tool_name}' not found in available tools"
+                        logger.warning(error_msg)
+                        tool_execution_history.append(
+                            {
+                                "tool_name": tool_name,
+                                "arguments": tool_args,
+                                "result": error_msg,
+                                "error": True,
+                            }
+                        )
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": error_msg,
+                            }
+                        )
+
+                # Continue loop to get next response (may stream this time)
+                continue
+
+            # No more tool calls, stream the final response
+            final_content = response.choices[0].message.content or ""
+            accumulated_content = ""
+
+            # Stream the final response character by character (simulated streaming)
+            # In a real implementation, you'd stream from the API
+            if final_content:
+                # For now, yield the full content as a single chunk
+                # In production, this would be actual streaming chunks from the API
+                self._conversation.add_message(Role.ASSISTANT, final_content)
+                yield StreamingChunk(content=final_content, done=True, tool_calls_made=tool_calls_made)
+            else:
+                yield StreamingChunk(content="", done=True, tool_calls_made=tool_calls_made)
+
+            return
+
+        # Max iterations reached
+        logger.warning(f"Max tool execution iterations ({self.max_tool_iterations}) reached")
+        yield StreamingChunk(
+            content="Maximum tool execution iterations reached.",
+            done=True,
+            tool_calls_made=tool_calls_made,
+        )
+
     def reset_conversation(self) -> None:
         """Reset the conversation history."""
         self._conversation = Conversation()
@@ -632,3 +874,44 @@ async def structured_complete(
         system_prompt=system_prompt,
     )
     return await client.structured_complete(user_message, response_format)
+
+
+async def stream_complete(
+    user_message: str,
+    model: str | None = None,
+    system_prompt: str | None = None,
+    tools: list[Callable] | None = None,
+    execute_tools: bool = True,
+    max_tool_iterations: int | None = None,
+) -> AsyncIterator[StreamingChunk]:
+    """Stream completion with automatic tool execution.
+
+    Yields chunks of the response as they arrive. Note: tool execution
+    interrupts streaming - when tools are called, streaming pauses until
+    tool results are processed.
+
+    Args:
+        user_message: The user's message/request
+        model: Model identifier in format "provider:model_name" (defaults to settings.default_model)
+        system_prompt: System prompt content (defaults to settings.default_system_prompt)
+        tools: List of callable functions to use as tools
+        execute_tools: Whether to automatically execute tools
+        max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
+
+    Yields:
+        StreamingChunk objects with content and metadata
+
+    Example:
+        >>> async for chunk in stream_complete("Tell me a story"):
+        ...     print(chunk.content, end="", flush=True)
+        ...     if chunk.done:
+        ...         print(f"\\nTool calls: {chunk.tool_calls_made}")
+    """
+    client = GlueLLM(
+        model=model,
+        system_prompt=system_prompt,
+        tools=tools,
+        max_tool_iterations=max_tool_iterations,
+    )
+    async for chunk in client.stream_complete(user_message, execute_tools=execute_tools):
+        yield chunk

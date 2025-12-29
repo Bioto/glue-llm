@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  gluellm-app:
+    build: .
+    environment:
+      - GLUELLM_DEFAULT_MODEL=${GLUELLM_DEFAULT_MODEL:-openai:gpt-4o-mini}
+      - GLUELLM_LOG_LEVEL=${GLUELLM_LOG_LEVEL:-INFO}
+      - GLUELLM_MAX_TOOL_ITERATIONS=${GLUELLM_MAX_TOOL_ITERATIONS:-10}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - XAI_API_KEY=${XAI_API_KEY:-}
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    # Override command as needed
+    # command: ["python", "your_app.py"]
