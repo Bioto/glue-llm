@@ -13,8 +13,10 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from gluellm.api import GlueLLM
+from gluellm.api_key_pool import APIKeyPool, extract_provider_from_model
 from gluellm.logging_config import get_logger
 from gluellm.models.batch import (
+    APIKeyConfig,
     BatchConfig,
     BatchErrorStrategy,
     BatchRequest,
@@ -68,6 +70,17 @@ class BatchProcessor:
         self.tools = tools
         self.max_tool_iterations = max_tool_iterations
         self.config = config or BatchConfig()
+        # Initialize API key pool if keys are provided
+        self.key_pool: APIKeyPool | None = None
+        if self.config.api_keys:
+            from gluellm.api_key_pool import APIKeyConfig as PoolAPIKeyConfig
+
+            key_configs = [
+                PoolAPIKeyConfig.from_batch_config(k) if isinstance(k, APIKeyConfig) else k
+                for k in self.config.api_keys
+            ]
+            self.key_pool = APIKeyPool(keys=key_configs)
+            logger.info(f"Initialized API key pool with {len(self.config.api_keys)} keys")
 
     async def process(self, requests: list[BatchRequest]) -> BatchResponse:
         """Process a batch of requests.
@@ -176,6 +189,15 @@ class BatchProcessor:
 
             for attempt in range(max_attempts):
                 try:
+                    # Get API key from pool if available
+                    api_key = None
+                    if self.key_pool:
+                        model_to_use = self.model or "openai:gpt-4o-mini"  # Default fallback
+                        provider = extract_provider_from_model(model_to_use)
+                        api_key = await self.key_pool.acquire_key(provider=provider, model=model_to_use)
+                        if api_key:
+                            logger.debug(f"Using API key from pool for request {request_id}")
+
                     # Create client with request-specific or default settings
                     client = GlueLLM(
                         model=self.model,
@@ -190,6 +212,7 @@ class BatchProcessor:
                         execute_tools=request.execute_tools,
                         correlation_id=request_id,
                         timeout=request.timeout,
+                        api_key=api_key,
                     )
 
                     elapsed_time = time.time() - start_time

@@ -7,6 +7,7 @@ import pytest
 from gluellm.api import ToolExecutionResult
 from gluellm.batch import BatchProcessor, batch_complete, batch_complete_simple
 from gluellm.models.batch import (
+    APIKeyConfig,
     BatchConfig,
     BatchErrorStrategy,
     BatchRequest,
@@ -96,6 +97,21 @@ class TestBatchConfig:
         assert config.error_strategy == BatchErrorStrategy.FAIL_FAST
         assert config.show_progress is True
         assert config.retry_failed is True
+
+    def test_batch_config_with_api_keys(self):
+        """Test BatchConfig with API keys."""
+        api_keys = [
+            APIKeyConfig(key="key1", provider="openai"),
+            APIKeyConfig(key="key2", provider="openai"),
+        ]
+        config = BatchConfig(api_keys=api_keys)
+        assert config.api_keys == api_keys
+        assert len(config.api_keys) == 2
+
+    def test_batch_config_api_keys_none_by_default(self):
+        """Test that api_keys is None by default."""
+        config = BatchConfig()
+        assert config.api_keys is None
 
 
 class TestBatchProcessor:
@@ -214,6 +230,71 @@ class TestBatchProcessor:
             assert response.successful_requests == 1
             assert response.failed_requests == 1
             assert len(response.results) == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_processor_with_api_key_pool(self):
+        """Test BatchProcessor with API key pool."""
+        api_keys = [
+            APIKeyConfig(key="test-key-1", provider="openai"),
+            APIKeyConfig(key="test-key-2", provider="openai"),
+        ]
+        config = BatchConfig(api_keys=api_keys, max_concurrent=2)
+        processor = BatchProcessor(config=config)
+
+        # Should have initialized key pool
+        assert processor.key_pool is not None
+        assert processor.key_pool.has_keys("openai")
+
+        requests = [
+            BatchRequest(id="req-1", user_message="Test 1"),
+            BatchRequest(id="req-2", user_message="Test 2"),
+        ]
+
+        # Mock successful completions
+        with patch("gluellm.batch.GlueLLM") as mock_gluellm:
+            mock_client = AsyncMock()
+            mock_client.complete = AsyncMock(
+                return_value=ToolExecutionResult(
+                    final_response="Success",
+                    tool_calls_made=0,
+                    tool_execution_history=[],
+                )
+            )
+            mock_gluellm.return_value = mock_client
+
+            response = await processor.process(requests)
+
+            assert response.total_requests == 2
+            assert response.successful_requests == 2
+            # Verify that complete was called
+            assert mock_client.complete.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_processor_without_api_key_pool(self):
+        """Test BatchProcessor without API key pool."""
+        config = BatchConfig(max_concurrent=2)
+        processor = BatchProcessor(config=config)
+
+        # Should not have key pool
+        assert processor.key_pool is None
+
+        requests = [BatchRequest(id="req-1", user_message="Test 1")]
+
+        with patch("gluellm.batch.GlueLLM") as mock_gluellm:
+            mock_client = AsyncMock()
+            mock_client.complete = AsyncMock(
+                return_value=ToolExecutionResult(
+                    final_response="Success",
+                    tool_calls_made=0,
+                    tool_execution_history=[],
+                )
+            )
+            mock_gluellm.return_value = mock_client
+
+            response = await processor.process(requests)
+
+            assert response.total_requests == 1
+            assert response.successful_requests == 1
 
     @pytest.mark.asyncio
     async def test_error_strategy_skip(self):

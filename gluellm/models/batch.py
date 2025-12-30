@@ -24,6 +24,26 @@ class BatchErrorStrategy(str, Enum):
     SKIP = "skip"
 
 
+class APIKeyConfig(BaseModel):
+    """Configuration for a single API key in a pool.
+
+    Attributes:
+        key: The API key value
+        provider: Provider name (e.g., "openai", "anthropic", "xai")
+        requests_per_minute: Optional per-key rate limit override
+        burst: Optional per-key burst capacity override
+    """
+
+    key: Annotated[str, Field(description="The API key value")]
+    provider: Annotated[str, Field(description="Provider name (e.g., 'openai', 'anthropic', 'xai')")]
+    requests_per_minute: Annotated[
+        int | None, Field(description="Optional per-key rate limit override", default=None, gt=0)
+    ] = None
+    burst: Annotated[int | None, Field(description="Optional per-key burst capacity override", default=None, gt=0)] = (
+        None
+    )
+
+
 class BatchRequest(BaseModel):
     """A single request in a batch.
 
@@ -110,6 +130,7 @@ class BatchConfig(BaseModel):
         error_strategy: How to handle errors (fail_fast, continue, skip)
         show_progress: Whether to show progress during processing
         retry_failed: Whether to retry failed requests once
+        api_keys: Optional list of API keys to use for rate limit distribution
     """
 
     max_concurrent: Annotated[int, Field(description="Maximum concurrent requests", default=5, gt=0)]
@@ -118,3 +139,7 @@ class BatchConfig(BaseModel):
     ]
     show_progress: Annotated[bool, Field(description="Show progress during processing", default=False)]
     retry_failed: Annotated[bool, Field(description="Retry failed requests once", default=False)]
+    api_keys: Annotated[
+        list[APIKeyConfig] | None,
+        Field(description="Optional list of API keys for rate limit distribution", default=None),
+    ] = None

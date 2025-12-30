@@ -84,6 +84,7 @@ from gluellm.api import (
     stream_complete,
     structured_complete,
 )
+from gluellm.api_key_pool import APIKeyPool
 from gluellm.batch import (
     BatchProcessor,
     batch_complete,
@@ -102,6 +103,7 @@ from gluellm.context import (
 )
 from gluellm.logging_config import setup_logging
 from gluellm.models.batch import (
+    APIKeyConfig,
     BatchConfig,
     BatchErrorStrategy,
     BatchRequest,
@@ -163,6 +165,9 @@ __all__ = [
     "BatchResponse",
     "BatchConfig",
     "BatchErrorStrategy",
+    "APIKeyConfig",
+    # Rate Limiting
+    "APIKeyPool",
     # Exceptions
     "LLMError",
     "TokenLimitError",
