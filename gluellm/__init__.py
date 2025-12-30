@@ -4,6 +4,7 @@ GlueLLM is a Python SDK that simplifies working with Large Language Models by pr
 - Automatic tool/function calling with execution loops
 - Structured outputs using Pydantic models
 - Multi-turn conversations with memory
+- Batch processing with configurable concurrency
 - Automatic retry with exponential backoff
 - Comprehensive error handling
 - Provider-agnostic interface (OpenAI, Anthropic, xAI, etc.)
@@ -83,6 +84,11 @@ from gluellm.api import (
     stream_complete,
     structured_complete,
 )
+from gluellm.batch import (
+    BatchProcessor,
+    batch_complete,
+    batch_complete_simple,
+)
 from gluellm.config import GlueLLMSettings, get_settings, reload_settings, settings
 from gluellm.context import (
     clear_correlation_id,
@@ -95,6 +101,13 @@ from gluellm.context import (
     with_correlation_id,
 )
 from gluellm.logging_config import setup_logging
+from gluellm.models.batch import (
+    BatchConfig,
+    BatchErrorStrategy,
+    BatchRequest,
+    BatchResponse,
+    BatchResult,
+)
 from gluellm.models.config import RequestConfig
 from gluellm.models.conversation import Conversation, Message, Role
 from gluellm.models.prompt import Prompt, SystemPrompt
@@ -141,6 +154,15 @@ __all__ = [
     "structured_complete",
     "ToolExecutionResult",
     "StreamingChunk",
+    # Batch Processing
+    "BatchProcessor",
+    "batch_complete",
+    "batch_complete_simple",
+    "BatchRequest",
+    "BatchResult",
+    "BatchResponse",
+    "BatchConfig",
+    "BatchErrorStrategy",
     # Exceptions
     "LLMError",
     "TokenLimitError",

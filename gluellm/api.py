@@ -68,7 +68,7 @@ from tenacity import (
 )
 
 from gluellm.config import settings
-from gluellm.context import get_correlation_id, set_correlation_id
+from gluellm.context import clear_correlation_id, get_correlation_id, set_correlation_id
 from gluellm.logging_config import get_logger
 from gluellm.models.conversation import Conversation, Role
 from gluellm.shutdown import ShutdownContext, is_shutting_down
@@ -537,253 +537,260 @@ class GlueLLM:
         correlation_id = get_correlation_id()
         logger.info(f"Starting completion request: correlation_id={correlation_id}, message_length={len(user_message)}")
 
-        # Use shutdown context to track in-flight requests
-        with ShutdownContext():
-            # Add user message to conversation
-            self._conversation.add_message(Role.USER, user_message)
+        # Use shutdown context to track in-flight requests for entire execution
+        try:
+            with ShutdownContext():
+                # Add user message to conversation
+                self._conversation.add_message(Role.USER, user_message)
 
-        # Build initial messages
-        system_message = {
-            "role": "system",
-            "content": self._format_system_prompt(),
-        }
-        messages = [system_message] + self._conversation.messages_dict
+                # Build initial messages
+                system_message = {
+                    "role": "system",
+                    "content": self._format_system_prompt(),
+                }
+                messages = [system_message] + self._conversation.messages_dict
 
-        tool_execution_history = []
-        tool_calls_made = 0
+                tool_execution_history = []
+                tool_calls_made = 0
 
-        # Tool execution loop
-        logger.debug(
-            f"Starting tool execution loop: max_iterations={self.max_tool_iterations}, "
-            f"tools_available={len(self.tools) if self.tools else 0}"
-        )
-        for iteration in range(self.max_tool_iterations):
-            logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
-            try:
-                response = await _llm_call_with_retry(
-                    messages=messages,
-                    model=self.model,
-                    tools=self.tools if self.tools else None,
-                    timeout=timeout,
+                # Tool execution loop
+                logger.debug(
+                    f"Starting tool execution loop: max_iterations={self.max_tool_iterations}, "
+                    f"tools_available={len(self.tools) if self.tools else 0}"
                 )
-            except LLMError as e:
-                # Log the error and re-raise with context
-                logger.error(f"LLM call failed on iteration {iteration + 1}/{self.max_tool_iterations}: {e}")
-                # Add error context to the exception
-                error_msg = f"Failed during tool execution loop (iteration {iteration + 1}/{self.max_tool_iterations})"
-                raise type(e)(f"{error_msg}: {e}") from e
-
-            # Check if model wants to call tools
-            if execute_tools and self.tools and response.choices[0].message.tool_calls:
-                tool_calls = response.choices[0].message.tool_calls
-                logger.info(f"Iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
-                tool_calls = response.choices[0].message.tool_calls
-
-                # Add assistant message with tool calls to history
-                messages.append(response.choices[0].message)
-
-                # Execute each tool call
-                for tool_call in tool_calls:
-                    tool_calls_made += 1
-                    tool_name = tool_call.function.name
-
+                for iteration in range(self.max_tool_iterations):
+                    logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
                     try:
-                        tool_args = json.loads(tool_call.function.arguments)
-                    except json.JSONDecodeError as e:
-                        # Handle malformed JSON from model
-                        error_msg = f"Invalid JSON in tool arguments: {str(e)}"
-                        logger.warning(f"Tool {tool_name} - {error_msg}")
-                        tool_execution_history.append(
-                            {
-                                "tool_name": tool_name,
-                                "arguments": tool_call.function.arguments,
-                                "result": error_msg,
-                                "error": True,
-                            }
+                        response = await _llm_call_with_retry(
+                            messages=messages,
+                            model=self.model,
+                            tools=self.tools if self.tools else None,
+                            timeout=timeout,
                         )
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": error_msg,
-                            }
+                    except LLMError as e:
+                        # Log the error and re-raise with context
+                        logger.error(f"LLM call failed on iteration {iteration + 1}/{self.max_tool_iterations}: {e}")
+                        # Add error context to the exception
+                        error_msg = (
+                            f"Failed during tool execution loop (iteration {iteration + 1}/{self.max_tool_iterations})"
                         )
+                        raise type(e)(f"{error_msg}: {e}") from e
+
+                    # Check if model wants to call tools
+                    if execute_tools and self.tools and response.choices[0].message.tool_calls:
+                        tool_calls = response.choices[0].message.tool_calls
+                        logger.info(f"Iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
+                        tool_calls = response.choices[0].message.tool_calls
+
+                        # Add assistant message with tool calls to history
+                        messages.append(response.choices[0].message)
+
+                        # Execute each tool call
+                        for tool_call in tool_calls:
+                            tool_calls_made += 1
+                            tool_name = tool_call.function.name
+
+                            try:
+                                tool_args = json.loads(tool_call.function.arguments)
+                            except json.JSONDecodeError as e:
+                                # Handle malformed JSON from model
+                                error_msg = f"Invalid JSON in tool arguments: {str(e)}"
+                                logger.warning(f"Tool {tool_name} - {error_msg}")
+                                tool_execution_history.append(
+                                    {
+                                        "tool_name": tool_name,
+                                        "arguments": tool_call.function.arguments,
+                                        "result": error_msg,
+                                        "error": True,
+                                    }
+                                )
+                                messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "content": error_msg,
+                                    }
+                                )
+                                continue
+
+                            # Find and execute the tool
+                            tool_func = self._find_tool(tool_name)
+                            if tool_func:
+                                tool_start_time = time.time()
+                                try:
+                                    # Support both sync and async tools
+                                    if asyncio.iscoroutinefunction(tool_func):
+                                        logger.debug(f"Executing async tool: {tool_name}")
+                                        tool_result = await tool_func(**tool_args)
+                                    else:
+                                        logger.debug(f"Executing sync tool: {tool_name}")
+                                        tool_result = tool_func(**tool_args)
+                                    tool_result_str = str(tool_result)
+                                    tool_elapsed = time.time() - tool_start_time
+                                    logger.info(f"Tool {tool_name} executed successfully in {tool_elapsed:.3f}s")
+
+                                    # Record in history
+                                    tool_execution_history.append(
+                                        {
+                                            "tool_name": tool_name,
+                                            "arguments": tool_args,
+                                            "result": tool_result_str,
+                                            "error": False,
+                                        }
+                                    )
+
+                                    # Record tool execution in trace if enabled
+                                    if is_tracing_enabled():
+                                        from gluellm.telemetry import _tracer
+
+                                        if _tracer is not None:
+                                            with _tracer.start_as_current_span(f"tool.{tool_name}") as tool_span:
+                                                set_span_attributes(
+                                                    tool_span,
+                                                    **{
+                                                        "tool.name": tool_name,
+                                                        "tool.arg_count": len(tool_args),
+                                                        "tool.success": True,
+                                                    },
+                                                )
+                                except Exception as e:
+                                    # Tool execution error
+                                    tool_elapsed = time.time() - tool_start_time
+                                    tool_result_str = f"Error executing tool: {type(e).__name__}: {str(e)}"
+                                    logger.warning(
+                                        f"Tool {tool_name} execution failed after {tool_elapsed:.3f}s: {e}",
+                                        exc_info=True,
+                                    )
+
+                                    tool_execution_history.append(
+                                        {
+                                            "tool_name": tool_name,
+                                            "arguments": tool_args,
+                                            "result": tool_result_str,
+                                            "error": True,
+                                        }
+                                    )
+
+                                    # Record tool execution error in trace if enabled
+                                    if is_tracing_enabled():
+                                        from gluellm.telemetry import _tracer
+
+                                        if _tracer is not None:
+                                            with _tracer.start_as_current_span(f"tool.{tool_name}") as tool_span:
+                                                set_span_attributes(
+                                                    tool_span,
+                                                    **{
+                                                        "tool.name": tool_name,
+                                                        "tool.arg_count": len(tool_args),
+                                                        "tool.success": False,
+                                                        "tool.error": str(e),
+                                                    },
+                                                )
+
+                                # Add tool result to messages
+                                messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "content": tool_result_str,
+                                    }
+                                )
+                            else:
+                                # Tool not found
+                                error_msg = f"Tool '{tool_name}' not found in available tools"
+                                logger.warning(error_msg)
+                                tool_execution_history.append(
+                                    {
+                                        "tool_name": tool_name,
+                                        "arguments": tool_args,
+                                        "result": error_msg,
+                                        "error": True,
+                                    }
+                                )
+                                messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "content": error_msg,
+                                    }
+                                )
+
+                        # Continue loop to get next response
                         continue
 
-                    # Find and execute the tool
-                    tool_func = self._find_tool(tool_name)
-                    if tool_func:
-                        tool_start_time = time.time()
-                        try:
-                            # Support both sync and async tools
-                            if asyncio.iscoroutinefunction(tool_func):
-                                logger.debug(f"Executing async tool: {tool_name}")
-                                tool_result = await tool_func(**tool_args)
-                            else:
-                                logger.debug(f"Executing sync tool: {tool_name}")
-                                tool_result = tool_func(**tool_args)
-                            tool_result_str = str(tool_result)
-                            tool_elapsed = time.time() - tool_start_time
-                            logger.info(f"Tool {tool_name} executed successfully in {tool_elapsed:.3f}s")
+                    # No more tool calls, we have final response
+                    final_content = response.choices[0].message.content or ""
+                    logger.info(
+                        f"Tool execution completed: total_tool_calls={tool_calls_made}, "
+                        f"final_response_length={len(final_content)}"
+                    )
 
-                            # Record in history
-                            tool_execution_history.append(
-                                {
-                                    "tool_name": tool_name,
-                                    "arguments": tool_args,
-                                    "result": tool_result_str,
-                                    "error": False,
-                                }
-                            )
+                    # Add assistant response to conversation
+                    self._conversation.add_message(Role.ASSISTANT, final_content)
 
-                            # Record tool execution in trace if enabled
-                            if is_tracing_enabled():
-                                from gluellm.telemetry import _tracer
+                    # Extract token usage if available
+                    tokens_used = None
+                    if hasattr(response, "usage") and response.usage:
+                        usage = response.usage
+                        # Safely extract token counts, ensuring they're integers
+                        prompt_tokens = getattr(usage, "prompt_tokens", None)
+                        completion_tokens = getattr(usage, "completion_tokens", None)
+                        total_tokens = getattr(usage, "total_tokens", None)
+                        tokens_used = {
+                            "prompt": int(prompt_tokens)
+                            if prompt_tokens is not None and isinstance(prompt_tokens, (int, float))
+                            else 0,
+                            "completion": int(completion_tokens)
+                            if completion_tokens is not None and isinstance(completion_tokens, (int, float))
+                            else 0,
+                            "total": int(total_tokens)
+                            if total_tokens is not None and isinstance(total_tokens, (int, float))
+                            else 0,
+                        }
+                        logger.debug(f"Token usage: {tokens_used}")
 
-                                if _tracer is not None:
-                                    with _tracer.start_as_current_span(f"tool.{tool_name}") as tool_span:
-                                        set_span_attributes(
-                                            tool_span,
-                                            **{
-                                                "tool.name": tool_name,
-                                                "tool.arg_count": len(tool_args),
-                                                "tool.success": True,
-                                            },
-                                        )
-                        except Exception as e:
-                            # Tool execution error
-                            tool_elapsed = time.time() - tool_start_time
-                            tool_result_str = f"Error executing tool: {type(e).__name__}: {str(e)}"
-                            logger.warning(
-                                f"Tool {tool_name} execution failed after {tool_elapsed:.3f}s: {e}", exc_info=True
-                            )
+                    return ToolExecutionResult(
+                        final_response=final_content,
+                        tool_calls_made=tool_calls_made,
+                        tool_execution_history=tool_execution_history,
+                        raw_response=response,
+                        tokens_used=tokens_used,
+                    )
 
-                            tool_execution_history.append(
-                                {
-                                    "tool_name": tool_name,
-                                    "arguments": tool_args,
-                                    "result": tool_result_str,
-                                    "error": True,
-                                }
-                            )
+                # Max iterations reached
+                logger.warning(f"Max tool execution iterations ({self.max_tool_iterations}) reached")
+                final_content = "Maximum tool execution iterations reached."
 
-                            # Record tool execution error in trace if enabled
-                            if is_tracing_enabled():
-                                from gluellm.telemetry import _tracer
+                # Extract token usage if available
+                tokens_used = None
+                if hasattr(response, "usage") and response.usage:
+                    usage = response.usage
+                    # Safely extract token counts, ensuring they're integers
+                    prompt_tokens = getattr(usage, "prompt_tokens", None)
+                    completion_tokens = getattr(usage, "completion_tokens", None)
+                    total_tokens = getattr(usage, "total_tokens", None)
+                    tokens_used = {
+                        "prompt": int(prompt_tokens)
+                        if prompt_tokens is not None and isinstance(prompt_tokens, (int, float))
+                        else 0,
+                        "completion": int(completion_tokens)
+                        if completion_tokens is not None and isinstance(completion_tokens, (int, float))
+                        else 0,
+                        "total": int(total_tokens)
+                        if total_tokens is not None and isinstance(total_tokens, (int, float))
+                        else 0,
+                    }
 
-                                if _tracer is not None:
-                                    with _tracer.start_as_current_span(f"tool.{tool_name}") as tool_span:
-                                        set_span_attributes(
-                                            tool_span,
-                                            **{
-                                                "tool.name": tool_name,
-                                                "tool.arg_count": len(tool_args),
-                                                "tool.success": False,
-                                                "tool.error": str(e),
-                                            },
-                                        )
-
-                        # Add tool result to messages
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": tool_result_str,
-                            }
-                        )
-                    else:
-                        # Tool not found
-                        error_msg = f"Tool '{tool_name}' not found in available tools"
-                        logger.warning(error_msg)
-                        tool_execution_history.append(
-                            {
-                                "tool_name": tool_name,
-                                "arguments": tool_args,
-                                "result": error_msg,
-                                "error": True,
-                            }
-                        )
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": error_msg,
-                            }
-                        )
-
-                # Continue loop to get next response
-                continue
-
-            # No more tool calls, we have final response
-            final_content = response.choices[0].message.content or ""
-            logger.info(
-                f"Tool execution completed: total_tool_calls={tool_calls_made}, "
-                f"final_response_length={len(final_content)}"
-            )
-
-            # Add assistant response to conversation
-            self._conversation.add_message(Role.ASSISTANT, final_content)
-
-            # Extract token usage if available
-            tokens_used = None
-            if hasattr(response, "usage") and response.usage:
-                usage = response.usage
-                # Safely extract token counts, ensuring they're integers
-                prompt_tokens = getattr(usage, "prompt_tokens", None)
-                completion_tokens = getattr(usage, "completion_tokens", None)
-                total_tokens = getattr(usage, "total_tokens", None)
-                tokens_used = {
-                    "prompt": int(prompt_tokens)
-                    if prompt_tokens is not None and isinstance(prompt_tokens, (int, float))
-                    else 0,
-                    "completion": int(completion_tokens)
-                    if completion_tokens is not None and isinstance(completion_tokens, (int, float))
-                    else 0,
-                    "total": int(total_tokens)
-                    if total_tokens is not None and isinstance(total_tokens, (int, float))
-                    else 0,
-                }
-                logger.debug(f"Token usage: {tokens_used}")
-
-            return ToolExecutionResult(
-                final_response=final_content,
-                tool_calls_made=tool_calls_made,
-                tool_execution_history=tool_execution_history,
-                raw_response=response,
-                tokens_used=tokens_used,
-            )
-
-        # Max iterations reached
-        logger.warning(f"Max tool execution iterations ({self.max_tool_iterations}) reached")
-        final_content = "Maximum tool execution iterations reached."
-
-        # Extract token usage if available
-        tokens_used = None
-        if hasattr(response, "usage") and response.usage:
-            usage = response.usage
-            # Safely extract token counts, ensuring they're integers
-            prompt_tokens = getattr(usage, "prompt_tokens", None)
-            completion_tokens = getattr(usage, "completion_tokens", None)
-            total_tokens = getattr(usage, "total_tokens", None)
-            tokens_used = {
-                "prompt": int(prompt_tokens)
-                if prompt_tokens is not None and isinstance(prompt_tokens, (int, float))
-                else 0,
-                "completion": int(completion_tokens)
-                if completion_tokens is not None and isinstance(completion_tokens, (int, float))
-                else 0,
-                "total": int(total_tokens)
-                if total_tokens is not None and isinstance(total_tokens, (int, float))
-                else 0,
-            }
-
-        return ToolExecutionResult(
-            final_response=final_content,
-            tool_calls_made=tool_calls_made,
-            tool_execution_history=tool_execution_history,
-            raw_response=response,
-            tokens_used=tokens_used,
-        )
+                return ToolExecutionResult(
+                    final_response=final_content,
+                    tool_calls_made=tool_calls_made,
+                    tool_execution_history=tool_execution_history,
+                    raw_response=response,
+                    tokens_used=tokens_used,
+                )
+        finally:
+            # Clear correlation ID after request completes
+            clear_correlation_id()
 
     async def structured_complete(
         self,
@@ -829,68 +836,74 @@ class GlueLLM:
             f"response_format={response_format.__name__}, message_length={len(user_message)}"
         )
 
-        # Use shutdown context to track in-flight requests
-        with ShutdownContext():
-            # Add user message to conversation
-            self._conversation.add_message(Role.USER, user_message)
-
-        # Build messages
-        system_message = {
-            "role": "system",
-            "content": self._format_system_prompt(),
-        }
-        messages = [system_message] + self._conversation.messages_dict
-
-        # Call with response_format (no tools for structured output)
-        logger.debug(f"Starting structured completion: model={self.model}, response_format={response_format.__name__}")
+        # Use shutdown context to track in-flight requests for entire execution
         try:
-            response = await _llm_call_with_retry(
-                messages=messages,
-                model=self.model,
-                response_format=response_format,
-                timeout=timeout,
-            )
-        except LLMError as e:
-            logger.error(
-                f"Structured completion failed: model={self.model}, "
-                f"response_format={response_format.__name__}, error={e}"
-            )
-            raise
+            with ShutdownContext():
+                # Add user message to conversation
+                self._conversation.add_message(Role.USER, user_message)
 
-        # Parse the response
-        parsed = response.choices[0].message.parsed
-        content = response.choices[0].message.content
-        logger.debug(
-            f"Structured response received: parsed_type={type(parsed)}, content_length={len(content) if content else 0}"
-        )
+                # Build messages
+                system_message = {
+                    "role": "system",
+                    "content": self._format_system_prompt(),
+                }
+                messages = [system_message] + self._conversation.messages_dict
 
-        # Add assistant response to conversation
-        if content:
-            self._conversation.add_message(Role.ASSISTANT, content)
+                # Call with response_format (no tools for structured output)
+                logger.debug(
+                    f"Starting structured completion: model={self.model}, response_format={response_format.__name__}"
+                )
+                try:
+                    response = await _llm_call_with_retry(
+                        messages=messages,
+                        model=self.model,
+                        response_format=response_format,
+                        timeout=timeout,
+                    )
+                except LLMError as e:
+                    logger.error(
+                        f"Structured completion failed: model={self.model}, "
+                        f"response_format={response_format.__name__}, error={e}"
+                    )
+                    raise
 
-        # If parsed is already a Pydantic instance, return it
-        # Otherwise, instantiate the model from the parsed dict/JSON
-        if isinstance(parsed, response_format):
-            logger.debug(f"Returning parsed Pydantic instance: {response_format.__name__}")
-            return parsed
+                # Parse the response
+                parsed = response.choices[0].message.parsed
+                content = response.choices[0].message.content
+                logger.debug(
+                    f"Structured response received: parsed_type={type(parsed)}, content_length={len(content) if content else 0}"
+                )
 
-        # Handle case where parsed is a dict
-        if isinstance(parsed, dict):
-            logger.debug(f"Instantiating {response_format.__name__} from dict")
-            return response_format(**parsed)
+                # Add assistant response to conversation
+                if content:
+                    self._conversation.add_message(Role.ASSISTANT, content)
 
-        # Fallback: try to parse from JSON string in content
-        if content:
-            try:
-                data = json.loads(content)
-                logger.debug(f"Parsed JSON from content, instantiating {response_format.__name__}")
-                return response_format(**data)
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.warning(f"Failed to parse structured response from content: {e}")
+                # If parsed is already a Pydantic instance, return it
+                # Otherwise, instantiate the model from the parsed dict/JSON
+                if isinstance(parsed, response_format):
+                    logger.debug(f"Returning parsed Pydantic instance: {response_format.__name__}")
+                    return parsed
 
-        # Last resort: return parsed as-is and hope for the best
-        logger.warning(f"Returning parsed response as-is (type: {type(parsed)})")
-        return parsed
+                # Handle case where parsed is a dict
+                if isinstance(parsed, dict):
+                    logger.debug(f"Instantiating {response_format.__name__} from dict")
+                    return response_format(**parsed)
+
+                # Fallback: try to parse from JSON string in content
+                if content:
+                    try:
+                        data = json.loads(content)
+                        logger.debug(f"Parsed JSON from content, instantiating {response_format.__name__}")
+                        return response_format(**data)
+                    except (json.JSONDecodeError, TypeError) as e:
+                        logger.warning(f"Failed to parse structured response from content: {e}")
+
+                # Last resort: return parsed as-is and hope for the best
+                logger.warning(f"Returning parsed response as-is (type: {type(parsed)})")
+                return parsed
+        finally:
+            # Clear correlation ID after request completes
+            clear_correlation_id()
 
     def _format_system_prompt(self) -> str:
         """Format system prompt with tools if available."""

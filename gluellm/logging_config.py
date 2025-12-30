@@ -19,6 +19,23 @@ from pythonjsonlogger import json
 from gluellm.context import get_correlation_id
 
 
+class CorrelationIDFilter(logging.Filter):
+    """Filter that adds correlation ID to log records."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """Add correlation_id attribute to log record.
+
+        Args:
+            record: Log record to modify
+
+        Returns:
+            bool: Always True to allow the record through
+        """
+        correlation_id = get_correlation_id()
+        record.correlation_id = correlation_id if correlation_id else "N/A"
+        return True
+
+
 def setup_logging(
     log_level: str = "INFO",
     log_file_level: str = "DEBUG",
@@ -94,13 +111,17 @@ def setup_logging(
     # Configure root logger
     root_logger.setLevel(logging.DEBUG)  # Set to lowest level, handlers will filter
 
-    # Remove existing handlers if forcing reconfiguration
+    # Remove existing handlers and filters if forcing reconfiguration
     if force:
         root_logger.handlers.clear()
+        root_logger.filters.clear()
 
     # Console handler with colorlog
     console_handler = colorlog.StreamHandler(sys.stdout)
     console_handler.setLevel(numeric_level)
+
+    # Add correlation ID filter to console handler BEFORE formatting
+    console_handler.addFilter(CorrelationIDFilter())
 
     # Color scheme for different log levels
     # Add correlation ID to format if available
@@ -130,6 +151,9 @@ def setup_logging(
         encoding="utf-8",
     )
     file_handler.setLevel(numeric_file_level)
+
+    # Add correlation ID filter to file handler BEFORE formatting
+    file_handler.addFilter(CorrelationIDFilter())
 
     # Choose formatter based on JSON setting
     if log_json_format:
@@ -165,7 +189,7 @@ def get_logger(name: str) -> logging.Logger:
 
     This is a convenience function that ensures logging is configured
     before returning a logger instance. The logger automatically includes
-    correlation IDs in log records when available.
+    correlation IDs in log records via filters on handlers.
 
     Args:
         name: Logger name (typically __name__)
@@ -178,17 +202,4 @@ def get_logger(name: str) -> logging.Logger:
     if not root_logger.handlers:
         setup_logging()
 
-    logger = logging.getLogger(name)
-
-    # Add correlation ID filter to include it in log records
-    class CorrelationIDFilter(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            correlation_id = get_correlation_id()
-            record.correlation_id = correlation_id if correlation_id else "N/A"
-            return True
-
-    # Only add filter once per logger
-    if not any(isinstance(f, CorrelationIDFilter) for f in logger.filters):
-        logger.addFilter(CorrelationIDFilter())
-
-    return logger
+    return logging.getLogger(name)

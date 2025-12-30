@@ -6,6 +6,8 @@ PII removal, content validation, safety checks, and formatting.
 
 import re
 
+from pydantic import BaseModel, Field, ValidationError, create_model
+
 from gluellm.models.hook import HookContext
 
 # PII Removal Hooks
@@ -103,6 +105,18 @@ def validate_length_factory(min_len: int | None = None, max_len: int | None = No
         A hook function that validates length
     """
 
+    field_constraints: dict[str, int] = {}
+    if min_len is not None:
+        field_constraints["min_length"] = min_len
+    if max_len is not None:
+        field_constraints["max_length"] = max_len
+
+    content_validation_model = create_model(
+        "HookContentLengthValidationModel",
+        content=(str, Field(..., **field_constraints)),
+        __base__=BaseModel,
+    )
+
     def validate_length(context: HookContext) -> HookContext:
         """Validate content length.
 
@@ -112,11 +126,10 @@ def validate_length_factory(min_len: int | None = None, max_len: int | None = No
         Returns:
             HookContext (raises ValueError if validation fails)
         """
-        length = len(context.content)
-        if min_len is not None and length < min_len:
-            raise ValueError(f"Content too short: {length} < {min_len} characters")
-        if max_len is not None and length > max_len:
-            raise ValueError(f"Content too long: {length} > {max_len} characters")
+        try:
+            content_validation_model(content=context.content)
+        except ValidationError as exc:
+            raise ValueError(exc) from exc
         return context
 
     return validate_length
