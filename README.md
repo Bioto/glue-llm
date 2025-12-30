@@ -3107,6 +3107,29 @@ uv run pre-commit run --all-files
 
 See [pyproject.toml](pyproject.toml) for complete dependency list.
 
+## Known Limitations
+
+### Streaming with Tools
+
+When using `stream_complete()` with tools enabled, the final response after tool execution is **not** streamed token-by-token. Instead, it's returned as a single chunk. This is because we need to check if the model wants to call additional tools before streaming.
+
+**True streaming only occurs when:**
+- No tools are provided (`tools=None` or empty list), OR
+- Tool execution is disabled (`execute_tools=False`)
+
+```python
+# This will stream token-by-token (no tools)
+async for chunk in stream_complete("Tell me a story"):
+    print(chunk.content, end="", flush=True)
+
+# This will NOT stream the final response (tools enabled)
+async for chunk in stream_complete("Get weather", tools=[get_weather]):
+    # Tool execution happens, then final response comes as one chunk
+    print(chunk.content, end="", flush=True)
+```
+
+This is a known architectural limitation and may be improved in future versions.
+
 ## Contributing
 
 1. Follow the existing code style (enforced by `ruff`)

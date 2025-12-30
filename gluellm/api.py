@@ -55,6 +55,7 @@ import logging
 import os
 import time
 from collections.abc import AsyncIterator, Callable
+from contextlib import contextmanager
 from typing import Annotated, Any, TypeVar
 
 from any_llm import acompletion as any_llm_acompletion
@@ -86,6 +87,100 @@ from gluellm.telemetry import (
 
 # Configure logging
 logger = get_logger(__name__)
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+# Mapping of provider names to their API key environment variables
+PROVIDER_ENV_VAR_MAP: dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "xai": "XAI_API_KEY",
+}
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+
+def _extract_token_usage(response: ChatCompletion) -> dict[str, int] | None:
+    """Extract token usage from a ChatCompletion response safely.
+
+    Handles various response formats and ensures token counts are integers.
+
+    Args:
+        response: The ChatCompletion response object from the LLM
+
+    Returns:
+        Dictionary with 'prompt', 'completion', and 'total' token counts,
+        or None if usage information is not available.
+
+    Example:
+        >>> tokens = _extract_token_usage(response)
+        >>> if tokens:
+        ...     print(f"Total tokens: {tokens['total']}")
+    """
+    if not hasattr(response, "usage") or not response.usage:
+        return None
+
+    usage = response.usage
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    total_tokens = getattr(usage, "total_tokens", None)
+
+    return {
+        "prompt": int(prompt_tokens) if isinstance(prompt_tokens, (int, float)) else 0,
+        "completion": int(completion_tokens) if isinstance(completion_tokens, (int, float)) else 0,
+        "total": int(total_tokens) if isinstance(total_tokens, (int, float)) else 0,
+    }
+
+
+@contextmanager
+def _temporary_api_key(model: str, api_key: str | None):
+    """Context manager for temporarily setting an API key in the environment.
+
+    Temporarily sets the appropriate environment variable for the given provider,
+    and restores the original value (or removes it) when the context exits.
+
+    Args:
+        model: Model identifier in format "provider:model_name"
+        api_key: The API key to set temporarily, or None to skip
+
+    Yields:
+        None
+
+    Example:
+        >>> with _temporary_api_key("openai:gpt-4", "sk-test-key"):
+        ...     # OPENAI_API_KEY is set to "sk-test-key"
+        ...     await make_api_call()
+        ... # Original value is restored
+    """
+    if not api_key:
+        yield
+        return
+
+    provider = extract_provider_from_model(model)
+    env_var = PROVIDER_ENV_VAR_MAP.get(provider.lower())
+
+    if not env_var:
+        yield
+        return
+
+    original_value = os.environ.get(env_var)
+    os.environ[env_var] = api_key
+    logger.debug(f"Temporarily set {env_var} for this request")
+
+    try:
+        yield
+    finally:
+        if original_value is None:
+            os.environ.pop(env_var, None)
+        else:
+            os.environ[env_var] = original_value
+        logger.debug(f"Restored {env_var} to original value")
+
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -301,22 +396,8 @@ async def _safe_llm_call(
             if correlation_id:
                 set_span_attributes(span, correlation_id=correlation_id)
 
-            # Temporarily set API key in environment if provided
-            original_env_key = None
-            if api_key:
-                provider = extract_provider_from_model(model)
-                env_var_map = {
-                    "openai": "OPENAI_API_KEY",
-                    "anthropic": "ANTHROPIC_API_KEY",
-                    "xai": "XAI_API_KEY",
-                }
-                env_var = env_var_map.get(provider.lower())
-                if env_var:
-                    original_env_key = os.environ.get(env_var)
-                    os.environ[env_var] = api_key
-                    logger.debug(f"Temporarily set {env_var} for this request")
-
-            try:
+            # Use context manager for temporary API key
+            with _temporary_api_key(model, api_key):
                 # Make LLM call with timeout
                 response = await asyncio.wait_for(
                     any_llm_acompletion(
@@ -328,22 +409,6 @@ async def _safe_llm_call(
                     ),
                     timeout=timeout,
                 )
-            finally:
-                # Restore original environment variable if we changed it
-                if api_key and original_env_key is not None:
-                    provider = extract_provider_from_model(model)
-                    env_var_map = {
-                        "openai": "OPENAI_API_KEY",
-                        "anthropic": "ANTHROPIC_API_KEY",
-                        "xai": "XAI_API_KEY",
-                    }
-                    env_var = env_var_map.get(provider.lower())
-                    if env_var:
-                        if original_env_key is None:
-                            os.environ.pop(env_var, None)
-                        else:
-                            os.environ[env_var] = original_env_key
-                        logger.debug(f"Restored {env_var} to original value")
 
             elapsed_time = time.time() - start_time
 
@@ -352,29 +417,15 @@ async def _safe_llm_call(
             finish_reason = None
             has_tool_calls = False
 
-            if not stream and hasattr(response, "usage") and response.usage:
-                usage = response.usage
-                # Safely extract token counts, ensuring they're integers
-                prompt_tokens = getattr(usage, "prompt_tokens", None)
-                completion_tokens = getattr(usage, "completion_tokens", None)
-                total_tokens = getattr(usage, "total_tokens", None)
-                tokens_used = {
-                    "prompt": int(prompt_tokens)
-                    if prompt_tokens is not None and isinstance(prompt_tokens, (int, float))
-                    else 0,
-                    "completion": int(completion_tokens)
-                    if completion_tokens is not None and isinstance(completion_tokens, (int, float))
-                    else 0,
-                    "total": int(total_tokens)
-                    if total_tokens is not None and isinstance(total_tokens, (int, float))
-                    else 0,
-                }
-                record_token_usage(span, tokens_used)
-                logger.info(
-                    f"LLM call completed: model={model}, latency={elapsed_time:.3f}s, "
-                    f"tokens={tokens_used['total']} (prompt={tokens_used['prompt']}, "
-                    f"completion={tokens_used['completion']})"
-                )
+            if not stream:
+                tokens_used = _extract_token_usage(response)
+                if tokens_used:
+                    record_token_usage(span, tokens_used)
+                    logger.info(
+                        f"LLM call completed: model={model}, latency={elapsed_time:.3f}s, "
+                        f"tokens={tokens_used['total']} (prompt={tokens_used['prompt']}, "
+                        f"completion={tokens_used['completion']})"
+                    )
 
             # Record response metadata
             if not stream and hasattr(response, "choices") and response.choices:
@@ -787,24 +838,8 @@ class GlueLLM:
                     self._conversation.add_message(Role.ASSISTANT, final_content)
 
                     # Extract token usage if available
-                    tokens_used = None
-                    if hasattr(response, "usage") and response.usage:
-                        usage = response.usage
-                        # Safely extract token counts, ensuring they're integers
-                        prompt_tokens = getattr(usage, "prompt_tokens", None)
-                        completion_tokens = getattr(usage, "completion_tokens", None)
-                        total_tokens = getattr(usage, "total_tokens", None)
-                        tokens_used = {
-                            "prompt": int(prompt_tokens)
-                            if prompt_tokens is not None and isinstance(prompt_tokens, (int, float))
-                            else 0,
-                            "completion": int(completion_tokens)
-                            if completion_tokens is not None and isinstance(completion_tokens, (int, float))
-                            else 0,
-                            "total": int(total_tokens)
-                            if total_tokens is not None and isinstance(total_tokens, (int, float))
-                            else 0,
-                        }
+                    tokens_used = _extract_token_usage(response)
+                    if tokens_used:
                         logger.debug(f"Token usage: {tokens_used}")
 
                     return ToolExecutionResult(
@@ -820,24 +855,7 @@ class GlueLLM:
                 final_content = "Maximum tool execution iterations reached."
 
                 # Extract token usage if available
-                tokens_used = None
-                if hasattr(response, "usage") and response.usage:
-                    usage = response.usage
-                    # Safely extract token counts, ensuring they're integers
-                    prompt_tokens = getattr(usage, "prompt_tokens", None)
-                    completion_tokens = getattr(usage, "completion_tokens", None)
-                    total_tokens = getattr(usage, "total_tokens", None)
-                    tokens_used = {
-                        "prompt": int(prompt_tokens)
-                        if prompt_tokens is not None and isinstance(prompt_tokens, (int, float))
-                        else 0,
-                        "completion": int(completion_tokens)
-                        if completion_tokens is not None and isinstance(completion_tokens, (int, float))
-                        else 0,
-                        "total": int(total_tokens)
-                        if total_tokens is not None and isinstance(total_tokens, (int, float))
-                        else 0,
-                    }
+                tokens_used = _extract_token_usage(response)
 
                 return ToolExecutionResult(
                     final_response=final_content,
@@ -995,6 +1013,18 @@ class GlueLLM:
 
         Yields chunks of the response as they arrive. When tools are called,
         streaming pauses and tool execution occurs, then streaming resumes.
+
+        Note:
+            **Streaming Limitation:** When tools are enabled (`execute_tools=True`),
+            the final response after tool execution is NOT streamed token-by-token.
+            Instead, it's returned as a single chunk. This is because we need to
+            check if the model wants to call more tools before streaming.
+
+            True streaming only occurs when:
+            - No tools are provided (`tools=[]` or `tools=None`), OR
+            - Tool execution is disabled (`execute_tools=False`)
+
+            This is a known limitation and may be improved in future versions.
 
         Args:
             user_message: The user's message/request
@@ -1290,6 +1320,13 @@ async def stream_complete(
     Yields chunks of the response as they arrive. Note: tool execution
     interrupts streaming - when tools are called, streaming pauses until
     tool results are processed.
+
+    Note:
+        **Streaming Limitation:** When tools are enabled (`execute_tools=True`),
+        the final response after tool execution is NOT streamed token-by-token.
+        Instead, it's returned as a single chunk. True streaming only occurs
+        when no tools are provided or when `execute_tools=False`.
+        See GlueLLM.stream_complete() for details.
 
     Args:
         user_message: The user's message/request

@@ -5,12 +5,16 @@ to propose solutions and iterate until consensus is reached.
 """
 
 import asyncio
+import re
 from typing import Any
 
 from gluellm.executors._base import Executor
+from gluellm.logging_config import get_logger
 from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import ConsensusConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
+
+logger = get_logger(__name__)
 
 
 class ConsensusWorkflow(Workflow):
@@ -205,7 +209,10 @@ Consider what worked and what didn't in earlier rounds."""
         interactions: list,
         round_num: int,
     ) -> dict[str, list[str]]:
-        """Collect votes from agents on proposals.
+        """Collect votes from ALL agents on proposals.
+
+        Each agent evaluates all proposals and votes for the best one.
+        Agents can abstain if configured to allow abstention.
 
         Args:
             proposals: List of (agent_name, proposal) tuples
@@ -214,34 +221,107 @@ Consider what worked and what didn't in earlier rounds."""
             round_num: Round number
 
         Returns:
-            Dictionary mapping proposal index to list of voting agents
+            Dictionary mapping proposal index to list of voting agent names
         """
-        votes = {str(i): [] for i in range(len(proposals))}
+        if not proposals:
+            return {}
 
-        # Each agent votes (using first agent as voter for simplicity)
-        # In a full implementation, each agent would vote
+        votes: dict[str, list[str]] = {str(i): [] for i in range(len(proposals))}
+        abstentions: list[str] = []
+
+        # Build voting prompt once (same for all agents)
         voting_prompt = self._build_voting_prompt(initial_input, proposals)
-        # Use first proposer as voter
-        voter = self.proposers[0][1]
-        vote_response = await voter.execute(voting_prompt)
 
-        # Parse vote (simplified - assumes format like "I vote for proposal 0" or "0")
-        # Extract number from response
-        import re
+        # Collect votes from all agents in parallel
+        async def _get_agent_vote(agent_name: str, executor: Executor) -> tuple[str, str]:
+            """Execute voting for a single agent."""
+            try:
+                vote_response = await executor.execute(voting_prompt)
+                return (agent_name, vote_response)
+            except Exception as e:
+                logger.warning(f"Agent {agent_name} failed to vote: {e}")
+                return (agent_name, f"Error: {e}")
 
-        vote_numbers = re.findall(r"\d+", vote_response)
-        if vote_numbers:
-            voted_index = int(vote_numbers[0]) % len(proposals)
-            votes[str(voted_index)].append("voter")
+        # Execute voting in parallel
+        vote_tasks = [_get_agent_vote(name, executor) for name, executor in self.proposers]
+        vote_results = await asyncio.gather(*vote_tasks, return_exceptions=True)
 
-        interactions.append(
-            {
-                "round": round_num,
-                "stage": "voting_collection",
-                "voting_prompt": voting_prompt,
-                "vote_response": vote_response,
-            }
-        )
+        # Process each vote
+        for result in vote_results:
+            if isinstance(result, Exception):
+                logger.error(f"Voting task failed: {result}")
+                continue
+
+            agent_name, vote_response = result
+
+            # Parse vote - check for abstention first
+            vote_response_lower = vote_response.lower()
+            if "abstain" in vote_response_lower:
+                if self.config.allow_abstention:
+                    abstentions.append(agent_name)
+                    logger.debug(f"Agent {agent_name} abstained from voting")
+                    interactions.append(
+                        {
+                            "round": round_num,
+                            "agent": agent_name,
+                            "stage": "vote",
+                            "vote": "abstain",
+                            "vote_response": vote_response,
+                        }
+                    )
+                    continue
+                # If abstention not allowed, try to find a number anyway
+                logger.debug(f"Agent {agent_name} tried to abstain but abstention is not allowed")
+
+            # Extract proposal number from response
+            vote_numbers = re.findall(r"\d+", vote_response)
+            if vote_numbers:
+                voted_index = int(vote_numbers[0])
+                # Validate the vote is within range
+                if 0 <= voted_index < len(proposals):
+                    votes[str(voted_index)].append(agent_name)
+                    logger.debug(f"Agent {agent_name} voted for proposal {voted_index}")
+                    interactions.append(
+                        {
+                            "round": round_num,
+                            "agent": agent_name,
+                            "stage": "vote",
+                            "vote": voted_index,
+                            "vote_response": vote_response,
+                        }
+                    )
+                else:
+                    # Invalid vote index, log warning
+                    logger.warning(
+                        f"Agent {agent_name} voted for invalid proposal {voted_index} "
+                        f"(valid range: 0-{len(proposals) - 1})"
+                    )
+                    interactions.append(
+                        {
+                            "round": round_num,
+                            "agent": agent_name,
+                            "stage": "vote",
+                            "vote": "invalid",
+                            "vote_response": vote_response,
+                            "error": f"Invalid proposal index: {voted_index}",
+                        }
+                    )
+            else:
+                # Could not parse vote
+                logger.warning(f"Could not parse vote from agent {agent_name}: {vote_response[:100]}")
+                interactions.append(
+                    {
+                        "round": round_num,
+                        "agent": agent_name,
+                        "stage": "vote",
+                        "vote": "unparseable",
+                        "vote_response": vote_response,
+                    }
+                )
+
+        # Log voting summary
+        total_votes = sum(len(voters) for voters in votes.values())
+        logger.info(f"Round {round_num} voting complete: {total_votes} votes cast, {len(abstentions)} abstentions")
 
         return votes
 
