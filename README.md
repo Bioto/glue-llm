@@ -1,6 +1,26 @@
 # GlueLLM
 
-A high-level Python SDK for Large Language Models with automatic tool execution, structured output support, and multi-agent workflows.
+> **TL;DR:** I got tired of writing the same LLM boilerplate over and over, so I built this. It's opinionated, has sensible defaults (for me, at least), and gets out of your way. If you like it too, awesome! If not, that's cool—there are plenty of other libraries out there.
+
+## What is this?
+
+GlueLLM is a high-level Python SDK that makes working with Large Language Models actually pleasant. Instead of manually managing tool calls, conversations, retries, and all that jazz, you just tell it what you want and it handles the rest.
+
+**The vibe:** This is what I call a "vibe-coded" library—built iteratively based on real-world needs rather than some grand architectural vision. That said, it's currently running in production projects (including my own), so it's battle-tested enough to be useful.
+
+**Why might you like it?**
+- 🎯 **Zero ceremony** - No boilerplate, no manual tool loops, just results
+- 🔄 **Works everywhere** - One API for OpenAI, Anthropic, XAI, and others (thanks to `any-llm-sdk`)
+- 🤖 **Multi-agent workflows** - 15 pre-built patterns when you need to get fancy
+- 🛡️ **Smart defaults** - Automatic retries, proper error handling, and logging that doesn't suck
+- 📊 **Structured output** - Type-safe responses with Pydantic (because we're not animals)
+
+**Why might you not?**
+- This isn't a low-level client—if you need fine-grained control over every API parameter, you might want something else
+- It's opinionated about how LLM interactions should work
+- Documentation is thorough but might reference my sense of humor occasionally
+
+**Want to help?** Found a bug? Have a feature idea? Please [open an issue](https://github.com/yourusername/gluellm/issues)! This is a living project that gets better when people actually use it and tell me what's broken or missing.
 
 ## Features
 
