@@ -11,7 +11,7 @@ GlueLLM is a high-level Python SDK that makes working with Large Language Models
 **Why might you like it?**
 - 🎯 **Zero ceremony** - No boilerplate, no manual tool loops, just results
 - 🔄 **Works everywhere** - One API for OpenAI, Anthropic, XAI, and others (thanks to `any-llm-sdk`)
-- 🤖 **Multi-agent workflows** - 15 pre-built patterns when you need to get fancy
+- 🤖 **Multi-agent workflows** - 16 pre-built patterns when you need to get fancy
 - 🛡️ **Smart defaults** - Automatic retries, proper error handling, and logging that doesn't suck
 - 📊 **Structured output** - Type-safe responses with Pydantic (because we're not animals)
 
@@ -1847,7 +1847,7 @@ custom_agent = Agent(
 
 ## Multi-Agent Workflows
 
-GlueLLM provides 15 powerful workflow patterns for orchestrating multiple agents, from simple single-agent refinement to complex multi-agent coordination patterns.
+GlueLLM provides 16 powerful workflow patterns for orchestrating multiple agents, from simple single-agent refinement to complex multi-agent coordination patterns.
 
 ### Iterative Refinement Workflow
 

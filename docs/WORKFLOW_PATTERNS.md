@@ -1,6 +1,6 @@
 # GlueLLM Workflow Patterns Guide
 
-GlueLLM provides 15 pre-built multi-agent workflow patterns for orchestrating complex LLM interactions. This guide explains when and how to use each pattern.
+GlueLLM provides 16 pre-built multi-agent workflow patterns for orchestrating complex LLM interactions. This guide explains when and how to use each pattern.
 
 ## Table of Contents
 
@@ -13,6 +13,7 @@ GlueLLM provides 15 pre-built multi-agent workflow patterns for orchestrating co
   - [Debate](#debate-workflow)
   - [Consensus](#consensus-workflow)
   - [Round Robin](#round-robin-workflow)
+  - [Chat Room](#chat-room-workflow)
   - [Hierarchical](#hierarchical-workflow)
   - [MapReduce](#mapreduce-workflow)
   - [Chain of Density](#chain-of-density-workflow)
@@ -51,33 +52,26 @@ print(f"Interactions: {result.agent_interactions}")
 
 Use this decision tree to select the appropriate workflow:
 
-```
-Is your task...
-│
-├─ Sequential processing? ──────────────────────► Pipeline
-│
-├─ Needs quality improvement? ──────────────────► Iterative / Reflection
-│
-├─ Requires diverse perspectives?
-│   ├─ Adversarial debate? ─────────────────────► Debate
-│   ├─ Agreement needed? ───────────────────────► Consensus
-│   └─ Equal participation? ────────────────────► Round Robin
-│
-├─ Complex/large input? ────────────────────────► MapReduce / Hierarchical
-│
-├─ Summarization? ──────────────────────────────► Chain of Density
-│
-├─ Teaching/exploration? ───────────────────────► Socratic
-│
-├─ External knowledge needed? ──────────────────► RAG
-│
-├─ Dynamic tool use? ───────────────────────────► ReAct
-│
-├─ Specialized expertise? ──────────────────────► Mixture of Experts
-│
-├─ Safety/ethics critical? ─────────────────────► Constitutional AI
-│
-└─ Complex reasoning? ──────────────────────────► Tree of Thoughts
+```mermaid
+flowchart TD
+    Start{Is your task...}
+
+    Start -->|Sequential processing?| Pipeline[Pipeline]
+    Start -->|Needs quality improvement?| IterativeReflection[Iterative / Reflection]
+    Start -->|Requires diverse perspectives?| Perspectives{Perspective Type}
+    Start -->|Complex/large input?| MapReduceHierarchical[MapReduce / Hierarchical]
+    Start -->|Summarization?| ChainOfDensity[Chain of Density]
+    Start -->|Teaching/exploration?| Socratic[Socratic]
+    Start -->|External knowledge needed?| RAG[RAG]
+    Start -->|Dynamic tool use?| ReAct[ReAct]
+    Start -->|Specialized expertise?| MoE[Mixture of Experts]
+    Start -->|Safety/ethics critical?| Constitutional[Constitutional AI]
+    Start -->|Complex reasoning?| TreeOfThoughts[Tree of Thoughts]
+    Start -->|Natural discussion?| ChatRoom[Chat Room]
+
+    Perspectives -->|Adversarial debate?| Debate[Debate]
+    Perspectives -->|Agreement needed?| Consensus[Consensus]
+    Perspectives -->|Equal participation?| RoundRobin[Round Robin]
 ```
 
 ## Workflow Patterns
@@ -273,6 +267,62 @@ workflow = RoundRobinWorkflow(
 
 result = await workflow.execute("Generate innovative product ideas")
 ```
+
+### Chat Room Workflow
+
+**Purpose:** Multiple agents discuss a topic in natural chat room style with a moderator and collaborative synthesis.
+
+**Use When:**
+- Natural conversational flow is beneficial
+- Multiple perspectives need organic discussion
+- Collaborative refinement of ideas
+- Moderator oversight is valuable
+
+**Example Use Cases:**
+- Design discussions and ideation
+- Multi-stakeholder problem solving
+- Collaborative content creation
+- Team decision exploration
+
+```python
+from gluellm.workflows.chat_room import ChatRoomWorkflow, ChatRoomConfig
+from gluellm.executors import SimpleExecutor
+
+# Create participants
+alice = SimpleExecutor(system_prompt="You are Alice, a creative designer")
+bob = SimpleExecutor(system_prompt="You are Bob, a technical architect")
+charlie = SimpleExecutor(system_prompt="You are Charlie, a product manager")
+
+# Create moderator
+moderator = SimpleExecutor(system_prompt="You are a discussion moderator")
+
+# Create chat room workflow
+workflow = ChatRoomWorkflow(
+    participants=[
+        ("Alice", alice),
+        ("Bob", bob),
+        ("Charlie", charlie),
+    ],
+    moderator=moderator,
+    config=ChatRoomConfig(
+        max_rounds=10,
+        synthesis_rounds=2,
+        allow_moderator_interjection=True,
+    )
+)
+
+result = await workflow.execute("How should we design our new mobile app?")
+```
+
+**How it works:**
+1. **Discussion Phase:** Participants take turns speaking in a natural conversational flow
+2. **Moderator Evaluation:** After each round, moderator decides if discussion should continue
+3. **Synthesis Phase:** Participants collaboratively refine a final answer together
+
+**Config Options:**
+- `max_rounds`: Maximum discussion rounds before forced conclusion
+- `synthesis_rounds`: Number of refinement rounds for the final answer
+- `allow_moderator_interjection`: Whether moderator can provide guidance
 
 ### Hierarchical Workflow
 

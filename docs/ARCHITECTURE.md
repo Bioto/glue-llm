@@ -13,55 +13,55 @@ GlueLLM is an LLM orchestration framework that provides:
 
 ## System Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              User Application                                │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              GlueLLM API Layer                               │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────────┐  │
-│  │    complete()    │  │structured_complete│  │     stream_complete()     │  │
-│  └────────┬────────┘  └────────┬────────┘  └─────────────┬───────────────┘  │
-│           │                    │                         │                   │
-│           └────────────────────┼─────────────────────────┘                   │
-│                                ▼                                             │
-│                    ┌───────────────────────┐                                 │
-│                    │      GlueLLM Class     │                                │
-│                    │   (Conversation State) │                                │
-│                    └───────────┬───────────┘                                 │
-└────────────────────────────────┼─────────────────────────────────────────────┘
-                                 │
-                    ┌────────────┼────────────┐
-                    ▼            ▼            ▼
-          ┌─────────────┐ ┌───────────┐ ┌───────────┐
-          │ Tool Exec   │ │  Hooks    │ │ Telemetry │
-          │    Loop     │ │  System   │ │   Layer   │
-          └──────┬──────┘ └─────┬─────┘ └─────┬─────┘
-                 │              │             │
-                 └──────────────┼─────────────┘
-                                ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Core Infrastructure                                │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐ │
-│  │  Rate Limiter │  │  API Key Pool │  │   Retry      │  │    Error         │ │
-│  │               │  │              │  │   Logic      │  │  Classification  │ │
-│  └──────────────┘  └──────────────┘  └──────────────┘  └──────────────────┘ │
-└────────────────────────────────────────────────────────────────────────────┘
-                                 │
-                                 ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          any-llm SDK Layer                                   │
-│                    (Multi-provider abstraction)                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                 │
-          ┌──────────────────────┼──────────────────────┐
-          ▼                      ▼                      ▼
-    ┌───────────┐          ┌───────────┐          ┌───────────┐
-    │  OpenAI   │          │ Anthropic │          │    xAI    │
-    │    API    │          │    API    │          │    API    │
-    └───────────┘          └───────────┘          └───────────┘
+```mermaid
+graph TB
+    User[User Application]
+
+    subgraph APILayer["GlueLLM API Layer"]
+        complete["complete()"]
+        structured["structured_complete()"]
+        stream["stream_complete()"]
+        GlueLLMClass["GlueLLM Class<br/>(Conversation State)"]
+
+        complete --> GlueLLMClass
+        structured --> GlueLLMClass
+        stream --> GlueLLMClass
+    end
+
+    subgraph Middleware["Core Middleware"]
+        ToolExec["Tool Execution<br/>Loop"]
+        Hooks["Hooks<br/>System"]
+        Telemetry["Telemetry<br/>Layer"]
+    end
+
+    subgraph Infrastructure["Core Infrastructure"]
+        RateLimiter["Rate Limiter"]
+        APIKeyPool["API Key Pool"]
+        RetryLogic["Retry Logic"]
+        ErrorClass["Error Classification"]
+    end
+
+    subgraph SDK["any-llm SDK Layer"]
+        SDKLayer["Multi-provider abstraction"]
+    end
+
+    subgraph Providers["LLM Providers"]
+        OpenAI["OpenAI API"]
+        Anthropic["Anthropic API"]
+        XAI["xAI API"]
+    end
+
+    User --> APILayer
+    GlueLLMClass --> ToolExec
+    GlueLLMClass --> Hooks
+    GlueLLMClass --> Telemetry
+    ToolExec --> Infrastructure
+    Hooks --> Infrastructure
+    Telemetry --> Infrastructure
+    Infrastructure --> SDK
+    SDKLayer --> OpenAI
+    SDKLayer --> Anthropic
+    SDKLayer --> XAI
 ```
 
 ## Core Components
@@ -70,25 +70,21 @@ GlueLLM is an LLM orchestration framework that provides:
 
 The main entry point for all LLM interactions.
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                        GlueLLM Class                          │
-├──────────────────────────────────────────────────────────────┤
-│ Attributes:                                                   │
-│   - model: str                                               │
-│   - system_prompt: str                                       │
-│   - tools: list[Callable]                                    │
-│   - max_tool_iterations: int                                 │
-│   - _conversation: Conversation                              │
-├──────────────────────────────────────────────────────────────┤
-│ Methods:                                                      │
-│   + complete() → ToolExecutionResult                         │
-│   + structured_complete[T]() → T                             │
-│   + stream_complete() → AsyncIterator[StreamingChunk]        │
-│   + reset_conversation()                                     │
-│   - _format_system_prompt()                                  │
-│   - _find_tool()                                             │
-└──────────────────────────────────────────────────────────────┘
+```mermaid
+classDiagram
+    class GlueLLM {
+        -model: str
+        -system_prompt: str
+        -tools: list[Callable]
+        -max_tool_iterations: int
+        -_conversation: Conversation
+        +complete() ToolExecutionResult
+        +structured_complete~T~() T
+        +stream_complete() AsyncIterator[StreamingChunk]
+        +reset_conversation() void
+        -_format_system_prompt() str
+        -_find_tool() Callable
+    }
 ```
 
 **Key Responsibilities:**
@@ -99,328 +95,323 @@ The main entry point for all LLM interactions.
 
 ### 2. Tool Execution Loop
 
-```
-┌─────────────┐
-│   Start     │
-└──────┬──────┘
-       ▼
-┌─────────────────────┐
-│  Build Messages     │
-│  (System + History) │
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│  Call LLM with      │◄───────────────────────┐
-│  Retry Logic        │                        │
-└──────────┬──────────┘                        │
-           ▼                                   │
-    ┌─────────────┐     Yes    ┌─────────────┐ │
-    │ Tool Calls? ├───────────►│ Execute     │ │
-    │             │            │ Tools       │ │
-    └──────┬──────┘            └──────┬──────┘ │
-           │ No                       │        │
-           ▼                          │        │
-    ┌─────────────┐            ┌──────┴──────┐ │
-    │   Return    │            │ Append Tool │ │
-    │   Result    │            │ Results     ├─┘
-    └─────────────┘            └─────────────┘
+```mermaid
+flowchart TD
+    Start([Start]) --> BuildMessages[Build Messages<br/>System + History]
+    BuildMessages --> CallLLM[Call LLM with<br/>Retry Logic]
+    CallLLM --> ToolCalls{Tool Calls?}
+    ToolCalls -->|Yes| ExecuteTools[Execute Tools]
+    ToolCalls -->|No| Return([Return Result])
+    ExecuteTools --> AppendResults[Append Tool Results]
+    AppendResults --> CallLLM
 ```
 
 ### 3. Workflow System
 
-```
-┌───────────────────────────────────────────────────────────────────────┐
-│                         Workflow Base Class                            │
-├───────────────────────────────────────────────────────────────────────┤
-│  + execute(input) → WorkflowResult                                    │
-│  # _execute_internal(input, context) → WorkflowResult  [abstract]     │
-│  # validate_config() → bool                                           │
-│  - _run_pre_hooks()                                                   │
-│  - _run_post_hooks()                                                  │
-└───────────────────────────────────────────────────────────────────────┘
-                                    △
-                                    │ extends
-       ┌────────────────────────────┼────────────────────────────┐
-       │                            │                            │
-┌──────┴──────┐            ┌───────┴───────┐            ┌───────┴───────┐
-│  Pipeline   │            │   Iterative   │            │    Debate     │
-│  Workflow   │            │   Workflow    │            │   Workflow    │
-└─────────────┘            └───────────────┘            └───────────────┘
-       │                            │                            │
-       ▼                            ▼                            ▼
-   Sequential              Refinement with             Adversarial
-   Execution               Critics                     Discussion
+```mermaid
+classDiagram
+    class Workflow {
+        <<abstract>>
+        +execute(input) WorkflowResult
+        #_execute_internal(input, context)* WorkflowResult
+        #validate_config() bool
+        -_run_pre_hooks() void
+        -_run_post_hooks() void
+    }
+
+    class PipelineWorkflow {
+        Sequential Execution
+    }
+
+    class IterativeWorkflow {
+        Refinement with Critics
+    }
+
+    class DebateWorkflow {
+        Adversarial Discussion
+    }
+
+    Workflow <|-- PipelineWorkflow
+    Workflow <|-- IterativeWorkflow
+    Workflow <|-- DebateWorkflow
 ```
 
 ### 4. Executor System
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Executor (Abstract)                     │
-├─────────────────────────────────────────────────────────────┤
-│  + execute(prompt: str) → str                               │
-│  + execute_with_context(prompt, context) → str              │
-└─────────────────────────────────────────────────────────────┘
-                              △
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        │                     │                     │
-┌───────┴───────┐    ┌───────┴───────┐    ┌───────┴───────┐
-│ SimpleExecutor│    │ AgentExecutor │    │ Custom        │
-│               │    │  (with tools) │    │ Executor      │
-└───────────────┘    └───────────────┘    └───────────────┘
+```mermaid
+classDiagram
+    class Executor {
+        <<abstract>>
+        +execute(prompt: str) str
+        +execute_with_context(prompt, context) str
+    }
+
+    class SimpleExecutor {
+        Direct LLM execution
+    }
+
+    class AgentExecutor {
+        Agent with tools
+    }
+
+    class CustomExecutor {
+        User-defined executor
+    }
+
+    Executor <|-- SimpleExecutor
+    Executor <|-- AgentExecutor
+    Executor <|-- CustomExecutor
 ```
 
 ### 5. Hook System
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                           Hook Registry                              │
-├─────────────────────────────────────────────────────────────────────┤
-│  hooks: dict[HookStage, list[HookConfig]]                           │
-│                                                                      │
-│  + add_hook(stage, config)                                          │
-│  + remove_hook(stage, name)                                         │
-│  + get_hooks(stage) → list[HookConfig]                              │
-└─────────────────────────────────────────────────────────────────────┘
-                                │
-                         Uses   │
-                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                           Hook Manager                               │
-├─────────────────────────────────────────────────────────────────────┤
-│  + run_hooks(stage, context) → HookContext                          │
-│  - _execute_hook(hook, context, timeout)                            │
-│  - _handle_hook_error(hook, error, strategy)                        │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+classDiagram
+    class HookRegistry {
+        -hooks: dict[HookStage, list[HookConfig]]
+        +add_hook(stage, config) void
+        +remove_hook(stage, name) void
+        +get_hooks(stage) list[HookConfig]
+    }
 
-Hook Stages:
-  PRE_EXECUTOR  ──► Before LLM call
-  POST_EXECUTOR ──► After LLM response
-  PRE_WORKFLOW  ──► Before workflow starts
-  POST_WORKFLOW ──► After workflow completes
+    class HookManager {
+        +run_hooks(stage, context) HookContext
+        -_execute_hook(hook, context, timeout) any
+        -_handle_hook_error(hook, error, strategy) void
+    }
+
+    class HookStage {
+        <<enumeration>>
+        PRE_EXECUTOR
+        POST_EXECUTOR
+        PRE_WORKFLOW
+        POST_WORKFLOW
+    }
+
+    HookRegistry ..> HookManager : uses
+    HookManager ..> HookStage : uses
+
+    note for HookStage "PRE_EXECUTOR: Before LLM call
+POST_EXECUTOR: After LLM response
+PRE_WORKFLOW: Before workflow starts
+POST_WORKFLOW: After workflow completes"
 ```
 
 ### 6. Telemetry Layer
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Telemetry Module                             │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  ┌─────────────────┐           ┌─────────────────┐                  │
-│  │  OpenTelemetry  │           │     MLflow      │                  │
-│  │     Tracing     │           │    Tracking     │                  │
-│  ├─────────────────┤           ├─────────────────┤                  │
-│  │ • Span creation │           │ • Metrics       │                  │
-│  │ • Context       │           │ • Parameters    │                  │
-│  │   propagation   │           │ • Experiments   │                  │
-│  │ • OTLP export   │           │ • Run tracking  │                  │
-│  └────────┬────────┘           └────────┬────────┘                  │
-│           │                             │                            │
-│           └─────────────┬───────────────┘                            │
-│                         ▼                                            │
-│              ┌─────────────────────┐                                 │
-│              │    trace_llm_call   │                                 │
-│              │  (context manager)  │                                 │
-│              └─────────────────────┘                                 │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph TelemetryModule["Telemetry Module"]
+        subgraph OTel["OpenTelemetry Tracing"]
+            SpanCreation["• Span creation"]
+            ContextProp["• Context propagation"]
+            OTLPExport["• OTLP export"]
+        end
+
+        subgraph MLflow["MLflow Tracking"]
+            Metrics["• Metrics"]
+            Parameters["• Parameters"]
+            Experiments["• Experiments"]
+            RunTracking["• Run tracking"]
+        end
+
+        TraceLLMCall["trace_llm_call<br/>(context manager)"]
+
+        OTel --> TraceLLMCall
+        MLflow --> TraceLLMCall
+    end
 ```
 
 ## Data Flow
 
 ### Request Flow
 
-```
-User Request
-     │
-     ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ 1. VALIDATION & SETUP                                                │
-│    • Set/generate correlation ID                                     │
-│    • Check shutdown state                                            │
-│    • Initialize shutdown context                                     │
-└─────────────────────────────────────────────────────────────────────┘
-     │
-     ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ 2. MESSAGE BUILDING                                                  │
-│    • Format system prompt with tools                                 │
-│    • Add user message to conversation                                │
-│    • Build message list for API call                                 │
-└─────────────────────────────────────────────────────────────────────┘
-     │
-     ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ 3. LLM CALL (with retry)                                            │
-│    • Acquire rate limit                                              │
-│    • Set temporary API key (if pool used)                            │
-│    • Start tracing span                                              │
-│    • Call any-llm SDK                                                │
-│    • Classify any errors                                             │
-│    • Retry on transient failures                                     │
-└─────────────────────────────────────────────────────────────────────┘
-     │
-     ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ 4. TOOL EXECUTION (if needed)                                       │
-│    • Parse tool calls from response                                  │
-│    • Execute each tool (sync or async)                               │
-│    • Append tool results to messages                                 │
-│    • Loop back to LLM call                                           │
-└─────────────────────────────────────────────────────────────────────┘
-     │
-     ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│ 5. RESPONSE PROCESSING                                               │
-│    • Extract token usage                                             │
-│    • Record metrics to MLflow                                        │
-│    • Update conversation history                                     │
-│    • Clear correlation ID                                            │
-└─────────────────────────────────────────────────────────────────────┘
-     │
-     ▼
-ToolExecutionResult
+```mermaid
+flowchart TD
+    Start([User Request])
+
+    subgraph Stage1["1. VALIDATION & SETUP"]
+        V1[Set/generate correlation ID]
+        V2[Check shutdown state]
+        V3[Initialize shutdown context]
+        V1 --> V2 --> V3
+    end
+
+    subgraph Stage2["2. MESSAGE BUILDING"]
+        M1[Format system prompt with tools]
+        M2[Add user message to conversation]
+        M3[Build message list for API call]
+        M1 --> M2 --> M3
+    end
+
+    subgraph Stage3["3. LLM CALL"]
+        L1[Acquire rate limit]
+        L2[Set temporary API key if pool used]
+        L3[Start tracing span]
+        L4[Call any-llm SDK]
+        L5[Classify any errors]
+        L6[Retry on transient failures]
+        L1 --> L2 --> L3 --> L4 --> L5 --> L6
+    end
+
+    subgraph Stage4["4. TOOL EXECUTION"]
+        T1[Parse tool calls from response]
+        T2[Execute each tool sync or async]
+        T3[Append tool results to messages]
+        T1 --> T2 --> T3
+    end
+
+    subgraph Stage5["5. RESPONSE PROCESSING"]
+        R1[Extract token usage]
+        R2[Record metrics to MLflow]
+        R3[Update conversation history]
+        R4[Clear correlation ID]
+        R1 --> R2 --> R3 --> R4
+    end
+
+    Start --> Stage1
+    Stage1 --> Stage2
+    Stage2 --> Stage3
+    Stage3 --> Stage4
+    Stage4 --> Stage5
+    Stage5 --> End([ToolExecutionResult])
+
+    Stage4 -.->|Loop if more tool calls| Stage3
 ```
 
 ### Workflow Execution Flow
 
-```
-Workflow.execute(input)
-         │
-         ▼
-┌────────────────────┐
-│ Run PRE_WORKFLOW   │
-│ Hooks              │
-└─────────┬──────────┘
-          │
-          ▼
-┌────────────────────┐
-│ _execute_internal  │ ◄─── Workflow-specific logic
-│ (abstract method)  │
-└─────────┬──────────┘
-          │
-          ▼
-   ┌──────────────────────────────────────────┐
-   │         Executor Calls                    │
-   │  ┌──────────────┐  ┌──────────────┐      │
-   │  │PRE_EXECUTOR  │  │POST_EXECUTOR │      │
-   │  │   hooks      │  │    hooks     │      │
-   │  └──────┬───────┘  └───────▲──────┘      │
-   │         │                  │             │
-   │         ▼                  │             │
-   │  ┌──────────────────────────┐            │
-   │  │   Executor.execute()     │            │
-   │  │   (LLM call with tools)  │            │
-   │  └──────────────────────────┘            │
-   └──────────────────────────────────────────┘
-          │
-          ▼
-┌────────────────────┐
-│ Run POST_WORKFLOW  │
-│ Hooks              │
-└─────────┬──────────┘
-          │
-          ▼
-    WorkflowResult
+```mermaid
+flowchart TD
+    Start([Workflow.execute input])
+
+    Start --> PreWorkflow["Run PRE_WORKFLOW Hooks"]
+
+    PreWorkflow --> ExecuteInternal["_execute_internal
+    (abstract method)
+    Workflow-specific logic"]
+
+    ExecuteInternal --> ExecutorCalls["Executor Calls"]
+
+    subgraph ExecutorCalls["Executor Calls"]
+        PreExecutor["PRE_EXECUTOR hooks"]
+        Execute["Executor.execute()
+        (LLM call with tools)"]
+        PostExecutor["POST_EXECUTOR hooks"]
+
+        PreExecutor --> Execute
+        Execute --> PostExecutor
+    end
+
+    ExecutorCalls --> PostWorkflow["Run POST_WORKFLOW Hooks"]
+
+    PostWorkflow --> End([WorkflowResult])
 ```
 
 ## Error Handling
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                       Error Classification                           │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│   Raw Exception from any-llm                                         │
-│          │                                                           │
-│          ▼                                                           │
-│   classify_llm_error()                                               │
-│          │                                                           │
-│          ├──► TokenLimitError     (context length exceeded)          │
-│          ├──► RateLimitError      (429, quota exceeded)              │
-│          ├──► APIConnectionError  (network, timeout)                 │
-│          ├──► AuthenticationError (401, 403)                         │
-│          ├──► InvalidRequestError (400, validation)                  │
-│          └──► LLMError            (catch-all)                        │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    RawException["Raw Exception from any-llm"]
 
-Retry Strategy:
-  ┌────────────────────┐
-  │ Retryable Errors:  │  ──► Automatic retry with exponential backoff
-  │ • RateLimitError   │
-  │ • APIConnectionError│
-  └────────────────────┘
+    RawException --> Classify["classify_llm_error()"]
 
-  ┌────────────────────┐
-  │ Non-Retryable:     │  ──► Immediate failure
-  │ • TokenLimitError  │
-  │ • AuthenticationError│
-  │ • InvalidRequestError│
-  └────────────────────┘
+    Classify --> TokenLimit["TokenLimitError
+    (context length exceeded)"]
+    Classify --> RateLimit["RateLimitError
+    (429, quota exceeded)"]
+    Classify --> APIConnection["APIConnectionError
+    (network, timeout)"]
+    Classify --> Authentication["AuthenticationError
+    (401, 403)"]
+    Classify --> InvalidRequest["InvalidRequestError
+    (400, validation)"]
+    Classify --> LLMError["LLMError
+    (catch-all)"]
+
+    subgraph Retryable["Retryable Errors"]
+        RateLimit
+        APIConnection
+    end
+
+    subgraph NonRetryable["Non-Retryable Errors"]
+        TokenLimit
+        Authentication
+        InvalidRequest
+    end
+
+    Retryable --> Retry["Automatic retry with
+    exponential backoff"]
+    NonRetryable --> Fail["Immediate failure"]
 ```
 
 ## Configuration
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     GlueLLMSettings (Pydantic)                       │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  Model Settings                     API Keys                         │
-│  ├── default_model                  ├── openai_api_key              │
-│  ├── default_system_prompt          ├── anthropic_api_key           │
-│  └── max_tool_iterations            └── xai_api_key                 │
-│                                                                      │
-│  Retry Settings                     Timeout Settings                 │
-│  ├── retry_max_attempts             ├── default_request_timeout     │
-│  ├── retry_min_wait                 └── max_request_timeout         │
-│  ├── retry_max_wait                                                  │
-│  └── retry_multiplier               Telemetry Settings               │
-│                                     ├── enable_tracing              │
-│  Rate Limiting                      ├── mlflow_tracking_uri         │
-│  ├── rate_limit_requests_per_second ├── mlflow_experiment_name      │
-│  └── rate_limit_burst_size          └── otel_exporter_endpoint      │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+classDiagram
+    class GlueLLMSettings {
+        <<Pydantic>>
 
-Configuration Sources (priority order):
-  1. Constructor arguments
-  2. Environment variables (GLUELLM_*)
-  3. .env file
-  4. Default values
+        Model Settings
+        +default_model: str
+        +default_system_prompt: str
+        +max_tool_iterations: int
+
+        API Keys
+        +openai_api_key: str
+        +anthropic_api_key: str
+        +xai_api_key: str
+
+        Retry Settings
+        +retry_max_attempts: int
+        +retry_min_wait: float
+        +retry_max_wait: float
+        +retry_multiplier: float
+
+        Timeout Settings
+        +default_request_timeout: float
+        +max_request_timeout: float
+
+        Rate Limiting
+        +rate_limit_requests_per_second: int
+        +rate_limit_burst_size: int
+
+        Telemetry Settings
+        +enable_tracing: bool
+        +mlflow_tracking_uri: str
+        +mlflow_experiment_name: str
+        +otel_exporter_endpoint: str
+    }
+
+    note for GlueLLMSettings "Configuration Sources (priority order):
+    1. Constructor arguments
+    2. Environment variables (GLUELLM_*)
+    3. .env file
+    4. Default values"
 ```
 
 ## Shutdown Handling
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      Graceful Shutdown                               │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│   Signal (SIGTERM/SIGINT)                                            │
-│          │                                                           │
-│          ▼                                                           │
-│   Set shutdown event ─────────────────────────────────────────────── │
-│          │                                                           │
-│          │    New requests check is_shutting_down()                  │
-│          │    └──► Rejected with RuntimeError                        │
-│          │                                                           │
-│          ▼                                                           │
-│   Wait for in-flight requests ──────────────────────────────────────│
-│          │    (with configurable timeout)                            │
-│          │                                                           │
-│          ▼                                                           │
-│   Execute shutdown callbacks ───────────────────────────────────────│
-│          │    • Telemetry cleanup                                    │
-│          │    • MLflow run closing                                   │
-│          │    • Custom callbacks                                     │
-│          │                                                           │
-│          ▼                                                           │
-│   Shutdown complete                                                  │
-│                                                                      │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Signal["Signal (SIGTERM/SIGINT)"]
+
+    Signal --> SetEvent["Set shutdown event"]
+
+    SetEvent --> CheckRequests["New requests check
+    is_shutting_down()"]
+
+    CheckRequests --> Reject["Rejected with RuntimeError"]
+
+    SetEvent --> WaitInflight["Wait for in-flight requests
+    (with configurable timeout)"]
+
+    WaitInflight --> ExecuteCallbacks["Execute shutdown callbacks
+    • Telemetry cleanup
+    • MLflow run closing
+    • Custom callbacks"]
+
+    ExecuteCallbacks --> Complete["Shutdown complete"]
 ```
 
 ## Extension Points
