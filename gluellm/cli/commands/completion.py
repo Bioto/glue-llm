@@ -38,6 +38,7 @@ def test_completion() -> None:
     print_header("Test Completion", f"Model: {settings.default_model}")
 
     def get_weather(location: str, unit: str = "celsius") -> str:
+        """Get the current weather for a location."""
         return f"The weather in {location} is 22 degrees {unit} and sunny."
 
     request_config = RequestConfig(
