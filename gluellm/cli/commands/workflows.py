@@ -461,6 +461,44 @@ def test_rag_workflow(query: str) -> None:
         print_error(f"Test failed: {e}")
 
 
+@click.command("test-chat-room-workflow")
+@click.option("--query", "-q", default="How should we design a new API?", help="Query to discuss")
+@click.option("--rounds", "-r", default=2, type=int, help="Max discussion rounds")
+@click.option("--synthesis-rounds", "-s", default=1, type=int, help="Synthesis refinement rounds")
+def test_chat_room_workflow(query: str, rounds: int, synthesis_rounds: int) -> None:
+    """Test chat room discussion workflow with moderator."""
+    from gluellm.models.workflow import ChatRoomConfig
+    from gluellm.workflows.chat_room import ChatRoomWorkflow
+
+    print_header("Test Chat Room Workflow", f"Max rounds: {rounds}")
+
+    async def run_test():
+        participants = [
+            ("Alice", create_simple_executor("You are Alice, a technical architect focused on scalability.")),
+            ("Bob", create_simple_executor("You are Bob, a UX designer focused on user experience.")),
+            ("Charlie", create_simple_executor("You are Charlie, a security expert focused on safety.")),
+        ]
+        moderator = create_simple_executor(
+            "You are a moderator. Decide if discussion is complete by responding with CONTINUE or CONCLUDE."
+        )
+
+        workflow = ChatRoomWorkflow(
+            participants=participants,
+            moderator=moderator,
+            config=ChatRoomConfig(max_rounds=rounds, synthesis_rounds=synthesis_rounds),
+        )
+        return await workflow.execute(query)
+
+    try:
+        result = run_async(run_test())
+        print_result("Final Answer", result.final_output[:500])
+        console.print(f"  Discussion rounds: {result.metadata.get('discussion_rounds', 0)}")
+        console.print(f"  Moderator concluded: {result.metadata.get('moderator_concluded', False)}")
+        print_success("Chat room workflow test passed")
+    except Exception as e:
+        print_error(f"Test failed: {e}")
+
+
 # Export all commands
 workflows_commands = [
     test_iterative_workflow,
@@ -478,4 +516,5 @@ workflows_commands = [
     test_constitutional_workflow,
     test_tree_of_thoughts_workflow,
     test_rag_workflow,
+    test_chat_room_workflow,
 ]

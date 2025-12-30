@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from gluellm.executors._base import Executor
 from gluellm.models.workflow import (
     ChainOfDensityConfig,
+    ChatRoomConfig,
     ConsensusConfig,
     ConstitutionalConfig,
     CriticConfig,
@@ -24,6 +25,7 @@ from gluellm.models.workflow import (
 )
 from gluellm.workflows._base import WorkflowResult
 from gluellm.workflows.chain_of_density import ChainOfDensityWorkflow
+from gluellm.workflows.chat_room import ChatRoomWorkflow
 from gluellm.workflows.consensus import ConsensusWorkflow
 from gluellm.workflows.constitutional import ConstitutionalWorkflow
 from gluellm.workflows.debate import DebateConfig, DebateWorkflow
@@ -1360,3 +1362,290 @@ async def test_tree_of_thoughts_workflow_validate_config():
 
     workflow.config.branching_factor = 0
     assert workflow.validate_config() is False
+
+
+# Chat Room Workflow Tests
+
+
+@pytest.mark.asyncio
+async def test_chat_room_workflow_basic():
+    """Test basic chat room workflow with discussion and synthesis."""
+    alice = MockExecutor(["Alice's first comment", "Alice's second comment", "Alice drafts answer"])
+    bob = MockExecutor(["Bob's first comment", "Bob's second comment", "Bob refines answer"])
+    charlie = MockExecutor(["Charlie's first comment", "Charlie's second comment"])
+    moderator = MockExecutor(["CONTINUE", "CONCLUDE"])
+
+    workflow = ChatRoomWorkflow(
+        participants=[
+            ("Alice", alice),
+            ("Bob", bob),
+            ("Charlie", charlie),
+        ],
+        moderator=moderator,
+        config=ChatRoomConfig(max_rounds=3, synthesis_rounds=1),
+    )
+
+    result = await workflow.execute("How should we design a new API?")
+
+    # Should have 2 rounds (moderator said CONTINUE then CONCLUDE)
+    assert result.iterations >= 2
+    # Final output should be the refined answer
+    assert "answer" in result.final_output.lower()
+    # Should have discussion interactions + moderator evaluations + synthesis
+    assert len(result.agent_interactions) > 6
+    # Verify metadata
+    assert result.metadata["participants"] == ["Alice", "Bob", "Charlie"]
+    assert result.metadata["discussion_rounds"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_chat_room_workflow_moderator_concludes_immediately():
+    """Test chat room workflow when moderator concludes after first round."""
+    alice = MockExecutor(["Alice's comment", "Alice drafts answer"])
+    bob = MockExecutor(["Bob's comment"])
+    moderator = MockExecutor(["CONCLUDE"])
+
+    workflow = ChatRoomWorkflow(
+        participants=[
+            ("Alice", alice),
+            ("Bob", bob),
+        ],
+        moderator=moderator,
+        config=ChatRoomConfig(max_rounds=5, synthesis_rounds=1),
+    )
+
+    result = await workflow.execute("Simple question?")
+
+    # Should stop after 1 round
+    assert result.iterations == 1
+    # Should have 2 discussion + 1 moderator + 2 synthesis (draft + refine)
+    assert len(result.agent_interactions) >= 4
+    assert result.metadata["moderator_concluded"] is True
+
+
+@pytest.mark.asyncio
+async def test_chat_room_workflow_max_rounds_reached():
+    """Test chat room workflow when max rounds is reached."""
+    alice = MockExecutor(["Comment"] * 10)
+    bob = MockExecutor(["Comment"] * 10)
+    moderator = MockExecutor(["CONTINUE"] * 10)
+
+    workflow = ChatRoomWorkflow(
+        participants=[
+            ("Alice", alice),
+            ("Bob", bob),
+        ],
+        moderator=moderator,
+        config=ChatRoomConfig(max_rounds=3, synthesis_rounds=1),
+    )
+
+    result = await workflow.execute("Question?")
+
+    # Should stop at max_rounds
+    assert result.iterations == 3
+    # Moderator kept saying continue but we hit the limit
+    assert result.metadata["moderator_concluded"] is False
+
+
+@pytest.mark.asyncio
+async def test_chat_room_workflow_multiple_synthesis_rounds():
+    """Test chat room workflow with multiple synthesis refinement rounds."""
+    alice = MockExecutor(["Discussion", "Draft v1", "Refine v2"])
+    bob = MockExecutor(["Discussion", "Refine v1", "Refine v3"])
+    charlie = MockExecutor(["Discussion", "Refine v2", "Refine v4"])
+    moderator = MockExecutor(["CONCLUDE"])
+
+    workflow = ChatRoomWorkflow(
+        participants=[
+            ("Alice", alice),
+            ("Bob", bob),
+            ("Charlie", charlie),
+        ],
+        moderator=moderator,
+        config=ChatRoomConfig(max_rounds=2, synthesis_rounds=2),
+    )
+
+    result = await workflow.execute("Question?")
+
+    # Should have synthesis interactions
+    synthesis_interactions = [i for i in result.agent_interactions if i.get("stage") == "synthesis"]
+    # 1 draft + (2 participants * 2 rounds) = 5 synthesis interactions
+    assert len(synthesis_interactions) == 5
+    # Final output should be the last refinement
+    assert "Refine" in result.final_output
+
+
+@pytest.mark.asyncio
+async def test_chat_room_workflow_moderator_decision_parsing():
+    """Test moderator decision parsing with various responses."""
+    alice = MockExecutor(["Comment"])
+    bob = MockExecutor(["Comment"])
+
+    # Test various moderator responses
+    test_cases = [
+        ("CONTINUE", True),
+        ("continue", True),
+        ("Let's CONTINUE the discussion", True),
+        ("CONCLUDE", False),
+        ("conclude", False),
+        ("The discussion is DONE", False),
+        ("This is COMPLETE", False),
+        ("We are READY to synthesize", False),
+        ("SUFFICIENT information gathered", False),
+    ]
+
+    for moderator_response, should_continue in test_cases:
+        moderator = MockExecutor([moderator_response])
+        workflow = ChatRoomWorkflow(
+            participants=[("Alice", alice), ("Bob", bob)],
+            moderator=moderator,
+            config=ChatRoomConfig(max_rounds=5, synthesis_rounds=1),
+        )
+
+        result = await workflow.execute("Question?")
+
+        # Check if moderator decision was parsed correctly
+        moderator_interactions = [i for i in result.agent_interactions if i.get("stage") == "moderator_evaluation"]
+        if moderator_interactions:
+            assert moderator_interactions[0]["should_continue"] == should_continue
+
+
+@pytest.mark.asyncio
+async def test_chat_room_workflow_discussion_history_context():
+    """Test that participants receive full discussion history."""
+    # Track what prompts participants receive
+    received_prompts = []
+
+    class TrackingExecutor(Executor):
+        def __init__(self, response: str):
+            super().__init__()
+            self.response = response
+
+        async def _execute_internal(self, query: str) -> str:
+            received_prompts.append(query)
+            return self.response
+
+    alice = TrackingExecutor("Alice's comment")
+    bob = TrackingExecutor("Bob's comment")
+    moderator = MockExecutor(["CONCLUDE"])
+
+    workflow = ChatRoomWorkflow(
+        participants=[
+            ("Alice", alice),
+            ("Bob", bob),
+        ],
+        moderator=moderator,
+        config=ChatRoomConfig(max_rounds=2, synthesis_rounds=1),
+    )
+
+    await workflow.execute("Test question?")
+
+    # Alice's second turn should include Bob's first comment in the prompt
+    # Find Alice's second prompt (should be after Bob's first)
+    alice_prompts = [p for p in received_prompts if "Alice" in p]
+    if len(alice_prompts) > 1:
+        second_prompt = alice_prompts[1]
+        assert "Bob" in second_prompt
+        assert "Discussion so far" in second_prompt or "Bob's comment" in second_prompt
+
+
+@pytest.mark.asyncio
+async def test_chat_room_workflow_validate_config():
+    """Test chat room workflow configuration validation."""
+    alice = MockExecutor()
+    bob = MockExecutor()
+    moderator = MockExecutor()
+
+    # Valid configuration
+    workflow = ChatRoomWorkflow(
+        participants=[("Alice", alice), ("Bob", bob)],
+        moderator=moderator,
+        config=ChatRoomConfig(max_rounds=5, synthesis_rounds=1),
+    )
+    assert workflow.validate_config() is True
+
+    # Invalid: only one participant
+    workflow_invalid1 = ChatRoomWorkflow(
+        participants=[("Alice", alice)],
+        moderator=moderator,
+        config=ChatRoomConfig(max_rounds=5, synthesis_rounds=1),
+    )
+    assert workflow_invalid1.validate_config() is False
+
+    # Invalid: no moderator
+    workflow_invalid2 = ChatRoomWorkflow(
+        participants=[("Alice", alice), ("Bob", bob)],
+        moderator=None,
+        config=ChatRoomConfig(max_rounds=5, synthesis_rounds=1),
+    )
+    assert workflow_invalid2.validate_config() is False
+
+    # Invalid: max_rounds = 0
+    workflow_invalid3 = ChatRoomWorkflow(
+        participants=[("Alice", alice), ("Bob", bob)],
+        moderator=moderator,
+    )
+    workflow_invalid3.config.max_rounds = 0
+    assert workflow_invalid3.validate_config() is False
+
+
+@pytest.mark.asyncio
+async def test_chat_room_workflow_config_defaults():
+    """Test chat room workflow configuration defaults."""
+    config = ChatRoomConfig()
+
+    assert config.max_rounds == 10
+    assert config.allow_moderator_interjection is True
+    assert config.synthesis_rounds == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_room_workflow_empty_participants():
+    """Test chat room workflow with empty participants list."""
+    moderator = MockExecutor()
+
+    workflow = ChatRoomWorkflow(
+        participants=[],
+        moderator=moderator,
+        config=ChatRoomConfig(max_rounds=2, synthesis_rounds=1),
+    )
+
+    assert workflow.validate_config() is False
+
+
+@pytest.mark.asyncio
+async def test_chat_room_workflow_synthesis_phase():
+    """Test that synthesis phase properly drafts and refines."""
+    alice = MockExecutor(["Discussion 1", "Initial draft answer"])
+    bob = MockExecutor(["Discussion 1", "Refined answer v1"])
+    charlie = MockExecutor(["Discussion 1", "Refined answer v2"])
+    moderator = MockExecutor(["CONCLUDE"])
+
+    workflow = ChatRoomWorkflow(
+        participants=[
+            ("Alice", alice),
+            ("Bob", bob),
+            ("Charlie", charlie),
+        ],
+        moderator=moderator,
+        config=ChatRoomConfig(max_rounds=2, synthesis_rounds=1),
+    )
+
+    result = await workflow.execute("Question?")
+
+    # Check synthesis interactions
+    synthesis_interactions = [i for i in result.agent_interactions if i.get("stage") == "synthesis"]
+
+    # Should have: 1 draft (Alice) + 2 refines (Bob, Charlie)
+    assert len(synthesis_interactions) == 3
+
+    # First should be draft by Alice
+    assert synthesis_interactions[0]["action"] == "draft"
+    assert synthesis_interactions[0]["participant"] == "Alice"
+
+    # Others should be refine
+    assert synthesis_interactions[1]["action"] == "refine"
+    assert synthesis_interactions[2]["action"] == "refine"
+
+    # Final output should be the last refinement
+    assert result.final_output == "Refined answer v2"
