@@ -120,6 +120,11 @@ def configure_tracing() -> None:
         _tracer = trace.get_tracer("gluellm.api")
         _tracing_enabled = True
 
+        # Register shutdown callback for cleanup
+        from gluellm.shutdown import register_shutdown_callback
+
+        register_shutdown_callback(shutdown_telemetry)
+
         logger.info("OpenTelemetry tracing configured successfully")
 
     except ImportError:
@@ -411,3 +416,108 @@ def is_mlflow_enabled() -> bool:
         bool: True if MLflow is enabled and configured, False otherwise
     """
     return _mlflow_enabled
+
+
+def shutdown_telemetry() -> None:
+    """Shutdown telemetry and cleanup resources.
+
+    This function should be called when the application is shutting down to:
+    1. Close any active MLflow runs (including the default auto-metrics run)
+    2. Flush any pending trace exports
+    3. Reset global state
+
+    Call this during application cleanup or use with atexit:
+
+    Example:
+        >>> import atexit
+        >>> from gluellm.telemetry import configure_tracing, shutdown_telemetry
+        >>>
+        >>> configure_tracing()
+        >>> atexit.register(shutdown_telemetry)
+        >>>
+        >>> # Or manually during cleanup:
+        >>> shutdown_telemetry()
+    """
+    global _tracer, _tracing_enabled, _mlflow_enabled, _mlflow_client, _default_mlflow_run
+
+    logger.debug("Shutting down telemetry...")
+
+    # Close default MLflow run if one was created
+    if _default_mlflow_run is not None:
+        try:
+            import mlflow
+
+            # End the default run if it's still active
+            if mlflow.active_run() is not None and mlflow.active_run().info.run_id == _default_mlflow_run.info.run_id:
+                mlflow.end_run()
+                logger.debug("Closed default MLflow run")
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"Error closing default MLflow run: {e}")
+        finally:
+            _default_mlflow_run = None
+
+    # Flush OpenTelemetry trace provider
+    if _tracing_enabled:
+        try:
+            provider = trace.get_tracer_provider()
+            if hasattr(provider, "force_flush"):
+                provider.force_flush()
+                logger.debug("Flushed OpenTelemetry traces")
+            if hasattr(provider, "shutdown"):
+                provider.shutdown()
+                logger.debug("Shutdown OpenTelemetry tracer provider")
+        except Exception as e:
+            logger.warning(f"Error shutting down OpenTelemetry: {e}")
+
+    # Reset global state
+    _tracer = None
+    _tracing_enabled = False
+    _mlflow_enabled = False
+    _mlflow_client = None
+
+    logger.info("Telemetry shutdown complete")
+
+
+def reset_default_mlflow_run() -> None:
+    """Close the current default MLflow run and allow a new one to be created.
+
+    Useful when you want to start fresh metrics tracking without fully
+    shutting down telemetry.
+
+    Example:
+        >>> # After a batch job completes, reset for the next batch
+        >>> reset_default_mlflow_run()
+    """
+    global _default_mlflow_run
+
+    if _default_mlflow_run is None:
+        return
+
+    try:
+        import mlflow
+
+        if mlflow.active_run() is not None and mlflow.active_run().info.run_id == _default_mlflow_run.info.run_id:
+            mlflow.end_run()
+            logger.debug("Closed and reset default MLflow run")
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.warning(f"Error resetting MLflow run: {e}")
+    finally:
+        _default_mlflow_run = None
+
+
+def get_default_mlflow_run():
+    """Get the current default MLflow run if one exists.
+
+    Returns:
+        The MLflow Run object if a default run is active, None otherwise.
+
+    Example:
+        >>> run = get_default_mlflow_run()
+        >>> if run:
+        ...     print(f"Current run ID: {run.info.run_id}")
+    """
+    return _default_mlflow_run
