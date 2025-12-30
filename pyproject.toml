@@ -58,6 +58,9 @@ Documentation = "https://github.com/yourusername/gluellm#readme"
 Repository = "https://github.com/yourusername/gluellm"
 Issues = "https://github.com/yourusername/gluellm/issues"
 
+[tool.setuptools]
+packages = ["gluellm"]
+
 [project.scripts]
 gluellm = "gluellm.cli:cli"
 
