@@ -39,6 +39,7 @@ GlueLLM is a high-level Python SDK that makes working with Large Language Models
 - 📈 **Token Usage Tracking** - Monitor token consumption and costs
 - 🔍 **OpenTelemetry Tracing** - Distributed tracing with MLflow for observability
 - 🚀 **Local Batch Processing** - Efficient concurrent processing with automatic retry and error handling
+- 🚦 **Smart Rate Limiting** - Transparent rate limiting with API key pool management for batch operations
 
 ## Installation
 
@@ -471,7 +472,9 @@ person = await structured_complete(
 
 ## Batch Processing
 
-Process multiple LLM requests efficiently with controlled concurrency, automatic retry, and comprehensive error handling.
+Process multiple LLM requests efficiently with controlled concurrency, automatic retry, comprehensive error handling, and intelligent API key rotation.
+
+**Note:** For high-volume batch operations, see the [Rate Limiting](#rate-limiting) section to learn about API key pools that automatically manage rate limits across multiple keys.
 
 ### Simple Batch Processing
 
@@ -582,6 +585,13 @@ for result in response.results:
 - Token usage tracking
 - Tool call statistics
 
+**API Key Pool Management:**
+- Automatic rotation across multiple API keys
+- Per-key rate limiting
+- Provider-specific key management
+- Maximizes throughput for high-volume operations
+- See [Rate Limiting](#rate-limiting) for details
+
 ### Batch Processing with Tools
 
 ```python
@@ -647,6 +657,84 @@ if response.total_tokens_used:
     print(f"Total tokens: {response.total_tokens_used['total']}")
 ```
 
+### Batch Processing with Multiple API Keys
+
+For high-volume batch operations, you can provide a pool of API keys that GlueLLM will automatically rotate through, managing rate limits on a per-key basis:
+
+```python
+import asyncio
+from gluellm import batch_complete, BatchRequest, BatchConfig
+from gluellm.models.batch import APIKeyConfig
+
+async def main():
+    # Configure multiple API keys with optional per-key rate limits
+    api_keys = [
+        APIKeyConfig(
+            key="sk-proj-key1...",
+            provider="openai",
+            requests_per_minute=60,  # Optional: custom limit for this key
+            burst=10,                 # Optional: burst capacity for this key
+        ),
+        APIKeyConfig(
+            key="sk-proj-key2...",
+            provider="openai",
+            requests_per_minute=60,
+        ),
+        APIKeyConfig(
+            key="sk-proj-key3...",
+            provider="openai",
+        ),
+        # You can also include keys for different providers
+        APIKeyConfig(
+            key="sk-ant-...",
+            provider="anthropic",
+            requests_per_minute=50,
+        ),
+    ]
+
+    # Create batch requests
+    requests = [
+        BatchRequest(
+            user_message=f"Analyze document {i}",
+            model="openai:gpt-4o-mini",
+        )
+        for i in range(200)
+    ]
+
+    # Process with automatic key rotation
+    response = await batch_complete(
+        requests,
+        config=BatchConfig(
+            max_concurrent=10,
+            api_keys=api_keys,  # Keys automatically rotated based on rate limits
+        ),
+    )
+
+    print(f"Completed: {response.successful_requests}/{response.total_requests}")
+
+asyncio.run(main())
+```
+
+**How it works:**
+- Each API key has its own rate limiter
+- When a key hits its rate limit, GlueLLM automatically switches to the next available key
+- If all keys are rate-limited, the system waits for the next available key
+- Keys are balanced to distribute load evenly
+
+**Benefits:**
+- **Higher Throughput**: Process more requests per minute by combining limits across keys
+- **Automatic Management**: No manual key rotation or rate limit tracking needed
+- **Per-Key Limits**: Set custom rate limits for each key based on your tier
+- **Multi-Provider**: Mix keys from different providers in the same pool
+
+**When to use:**
+- Processing hundreds or thousands of requests
+- Need throughput beyond a single API key's rate limit
+- Want to maximize parallel processing
+- Production workloads requiring high reliability
+
+For more details on rate limiting configuration, see the [Rate Limiting](#rate-limiting) section.
+
 ### Example Use Cases
 
 **1. Content Generation at Scale:**
@@ -684,14 +772,34 @@ requests = [
 ]
 ```
 
-**4. High-Volume Processing:**
+**4. High-Volume Processing with API Key Pool:**
 ```python
-# Process large datasets efficiently
+from gluellm.models.batch import APIKeyConfig
+
+# Define multiple API keys for automatic rotation
+api_keys = [
+    APIKeyConfig(key="sk-key1...", provider="openai", requests_per_minute=60),
+    APIKeyConfig(key="sk-key2...", provider="openai", requests_per_minute=60),
+    APIKeyConfig(key="sk-key3...", provider="openai", requests_per_minute=60),
+]
+
+# Process large datasets efficiently with automatic key rotation
 requests = [BatchRequest(user_message=item) for item in large_dataset]
 config = BatchConfig(
     max_concurrent=10,  # Process 10 at a time
     error_strategy=BatchErrorStrategy.CONTINUE,  # Don't stop on errors
     retry_failed=True,  # Retry failed requests once
+    api_keys=api_keys,  # GlueLLM automatically manages rate limits per key
+)
+response = await batch_complete(requests, config=config)
+```
+
+**5. Single API Key for Batch:**
+```python
+# If you just need one key (falls back to environment variables if not provided)
+config = BatchConfig(
+    max_concurrent=5,
+    error_strategy=BatchErrorStrategy.CONTINUE,
 )
 response = await batch_complete(requests, config=config)
 ```
@@ -724,7 +832,305 @@ response = await batch_complete(requests, config=config)
        print(f"Batch cost: ${cost:.4f}")
    ```
 
+25. **Use API Key Pools for High Throughput**: Rotate multiple keys automatically
+   ```python
+   from gluellm.models.batch import APIKeyConfig
+
+   # Multiple keys = higher total throughput
+   api_keys = [
+       APIKeyConfig(key="sk-key1...", provider="openai", requests_per_minute=60),
+       APIKeyConfig(key="sk-key2...", provider="openai", requests_per_minute=60),
+   ]
+   config = BatchConfig(api_keys=api_keys, max_concurrent=10)
+   ```
+
 For more examples, see `examples/batch_processing.py`.
+
+## Rate Limiting
+
+GlueLLM includes smart, transparent rate limiting powered by `throttled-py` to prevent accidental API abuse and manage request rates efficiently.
+
+### Features
+
+- **Automatic Rate Limiting** - Transparent rate limiting that waits when limits are hit (no manual handling required)
+- **Configurable Limits** - Set global or per-provider rate limits via configuration
+- **Multiple Backends** - In-memory (default) or Redis for distributed rate limiting
+- **API Key Pool Management** - Automatically rotate through multiple API keys with per-key rate limiting
+- **Sliding Window Algorithm** - Smooth rate limiting without sudden drops at window boundaries
+
+### Basic Rate Limiting
+
+Rate limiting is enabled by default and works transparently:
+
+```python
+import asyncio
+from gluellm.api import complete
+
+async def main():
+    # Rate limiting happens automatically
+    for i in range(100):
+        result = await complete(f"Question {i}")
+        print(f"{i}: {result.final_response}")
+        # If rate limit is hit, GlueLLM automatically waits and retries
+
+asyncio.run(main())
+```
+
+### Configuration
+
+Configure rate limiting via environment variables:
+
+```bash
+# Enable/disable rate limiting
+export GLUELLM_RATE_LIMIT_ENABLED=true
+
+# Set limits
+export GLUELLM_RATE_LIMIT_REQUESTS_PER_MINUTE=60    # Default: 60 RPM
+export GLUELLM_RATE_LIMIT_BURST=10                  # Burst capacity (default: 10)
+
+# Choose backend
+export GLUELLM_RATE_LIMIT_BACKEND=memory            # "memory" (default) or "redis"
+
+# Redis backend (optional)
+export GLUELLM_RATE_LIMIT_REDIS_URL=redis://localhost:6379
+```
+
+Or configure programmatically:
+
+```python
+from gluellm.config import settings
+
+# Access current rate limit settings
+print(settings.rate_limit_enabled)              # True
+print(settings.rate_limit_requests_per_minute)  # 60
+print(settings.rate_limit_burst)                # 10
+```
+
+### Disabling Rate Limiting
+
+To disable rate limiting entirely:
+
+```bash
+export GLUELLM_RATE_LIMIT_ENABLED=false
+```
+
+Or in code:
+
+```python
+from gluellm.config import settings
+
+settings.rate_limit_enabled = False
+```
+
+### API Key Pool for Batch Operations
+
+For high-volume batch processing, use an API key pool to automatically rotate through multiple keys with per-key rate limiting:
+
+```python
+import asyncio
+from gluellm import batch_complete, BatchRequest, BatchConfig
+from gluellm.models.batch import APIKeyConfig
+
+async def main():
+    # Define API key pool with per-key rate limits
+    api_keys = [
+        APIKeyConfig(
+            key="sk-key1...",
+            provider="openai",
+            requests_per_minute=60,  # Optional per-key limit
+            burst=10,                 # Optional per-key burst
+        ),
+        APIKeyConfig(
+            key="sk-key2...",
+            provider="openai",
+            requests_per_minute=60,
+        ),
+        APIKeyConfig(
+            key="sk-ant-key1...",
+            provider="anthropic",
+            requests_per_minute=50,
+        ),
+    ]
+
+    # Create batch requests
+    requests = [
+        BatchRequest(user_message=f"Question {i}", model="openai:gpt-4o-mini")
+        for i in range(200)
+    ]
+
+    # Process with API key pool
+    response = await batch_complete(
+        requests,
+        config=BatchConfig(
+            max_concurrent=10,
+            api_keys=api_keys,  # GlueLLM automatically manages key rotation
+        ),
+    )
+
+    print(f"Completed: {response.successful_requests}/{response.total_requests}")
+
+asyncio.run(main())
+```
+
+**How it works:**
+1. GlueLLM maintains separate rate limiters for each API key
+2. When a key hits its rate limit, the system automatically rotates to the next available key
+3. If all keys are rate-limited, the system waits for the next available key
+4. Keys are distributed evenly to balance load
+
+### Advanced: Custom Rate Limiters
+
+For fine-grained control, use the rate limiter API directly:
+
+```python
+from gluellm.rate_limiter import get_rate_limiter, acquire_rate_limit
+
+# Create a custom rate limiter
+rate_limiter = get_rate_limiter(
+    key="my_custom_limiter",
+    requests_per_minute=30,
+    burst=5,
+    backend="memory",
+)
+
+# Manually acquire rate limit permit
+async def rate_limited_operation():
+    await acquire_rate_limit("my_custom_limiter", rate_limiter=rate_limiter)
+    # Your operation here
+    print("Operation executed")
+```
+
+### Redis Backend for Distributed Systems
+
+For distributed applications, use Redis to share rate limits across instances:
+
+```bash
+# Set Redis backend
+export GLUELLM_RATE_LIMIT_BACKEND=redis
+export GLUELLM_RATE_LIMIT_REDIS_URL=redis://localhost:6379
+```
+
+```python
+from gluellm.rate_limiter import get_rate_limiter
+
+# Rate limiter state is shared across all instances
+rate_limiter = get_rate_limiter(
+    key="shared_limiter",
+    requests_per_minute=100,
+    backend="redis",
+    redis_url="redis://localhost:6379",
+)
+```
+
+**Benefits of Redis backend:**
+- Shared rate limits across multiple application instances
+- Persistent rate limit state across restarts
+- Centralized rate limit management
+- Ideal for microservices and distributed systems
+
+### API Key Pool Configuration
+
+The `APIKeyConfig` model allows per-key customization:
+
+```python
+from gluellm.models.batch import APIKeyConfig
+
+# Basic key configuration
+key_config = APIKeyConfig(
+    key="sk-...",
+    provider="openai",
+)
+
+# With custom rate limits
+key_config = APIKeyConfig(
+    key="sk-...",
+    provider="openai",
+    requests_per_minute=100,  # Custom RPM for this key
+    burst=20,                  # Custom burst capacity
+)
+
+# Multiple providers
+key_configs = [
+    APIKeyConfig(key="sk-...", provider="openai", requests_per_minute=60),
+    APIKeyConfig(key="sk-ant-...", provider="anthropic", requests_per_minute=50),
+    APIKeyConfig(key="xai-...", provider="xai", requests_per_minute=40),
+]
+```
+
+### Rate Limiting Strategies
+
+GlueLLM uses the **Sliding Window** algorithm, which provides:
+
+- **Smooth rate limiting** - No sudden resets at window boundaries
+- **Fair distribution** - Requests are evenly distributed over time
+- **Burst handling** - Allows short bursts up to the burst capacity
+- **Accurate limiting** - Precise rate enforcement without over-limiting
+
+### Performance Considerations
+
+1. **Memory Backend**: Fast, suitable for single-instance applications
+   ```python
+   # Default - no setup required
+   export GLUELLM_RATE_LIMIT_BACKEND=memory
+   ```
+
+2. **Redis Backend**: Adds network latency but enables distributed rate limiting
+   ```python
+   # Requires Redis server
+   export GLUELLM_RATE_LIMIT_BACKEND=redis
+   export GLUELLM_RATE_LIMIT_REDIS_URL=redis://localhost:6379
+   ```
+
+3. **API Key Pool**: Maximizes throughput by parallelizing across keys
+   ```python
+   # Use multiple keys for high-volume workloads
+   config = BatchConfig(api_keys=[key1, key2, key3])
+   ```
+
+### Best Practices
+
+1. **Set Conservative Limits**: Start with lower limits and increase as needed
+   ```bash
+   export GLUELLM_RATE_LIMIT_REQUESTS_PER_MINUTE=30
+   ```
+
+2. **Use API Key Pools for Batch**: Distribute load across multiple keys
+   ```python
+   config = BatchConfig(api_keys=multiple_keys, max_concurrent=10)
+   ```
+
+3. **Monitor Rate Limit Hits**: Enable debug logging to track rate limiting
+   ```bash
+   export GLUELLM_LOG_LEVEL=DEBUG
+   ```
+
+4. **Match Provider Limits**: Set limits below your provider's actual limits
+   ```python
+   # If OpenAI allows 3500 RPM, set to 3000 RPM for safety margin
+   APIKeyConfig(provider="openai", requests_per_minute=3000)
+   ```
+
+5. **Use Redis for Production**: For multi-instance deployments, use Redis
+   ```bash
+   export GLUELLM_RATE_LIMIT_BACKEND=redis
+   ```
+
+### Troubleshooting
+
+**Rate limits still being hit:**
+- Check your configured limits against provider limits
+- Reduce `requests_per_minute` or `max_concurrent` settings
+- Add more API keys to your pool
+
+**Slow batch processing:**
+- Rate limiting is working correctly - this prevents API errors
+- Increase `requests_per_minute` if you have higher provider limits
+- Add more API keys to increase throughput
+
+**Redis connection errors:**
+- Verify Redis server is running: `redis-cli ping`
+- Check Redis URL is correct
+- Ensure network connectivity to Redis server
 
 ## Multi-turn Conversations
 
@@ -788,6 +1194,13 @@ export GLUELLM_RETRY_MAX_ATTEMPTS=3
 export GLUELLM_RETRY_MIN_WAIT=2
 export GLUELLM_RETRY_MAX_WAIT=30
 export GLUELLM_RETRY_MULTIPLIER=1
+
+# Rate limiting
+export GLUELLM_RATE_LIMIT_ENABLED=true              # Enable/disable rate limiting
+export GLUELLM_RATE_LIMIT_REQUESTS_PER_MINUTE=60    # Default requests per minute
+export GLUELLM_RATE_LIMIT_BURST=10                  # Burst capacity
+export GLUELLM_RATE_LIMIT_BACKEND=memory            # Backend: "memory" or "redis"
+export GLUELLM_RATE_LIMIT_REDIS_URL=redis://localhost:6379  # Redis URL (if using redis backend)
 
 # Logging
 export GLUELLM_LOG_LEVEL=INFO                    # Console log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
@@ -2588,6 +3001,7 @@ uv run pre-commit run --all-files
   - `pydantic>=2.12.5` - Data validation and structured output
   - `pydantic-settings>=2.12.0` - Configuration management
   - `tenacity>=9.0.0` - Retry logic with exponential backoff
+  - `throttled-py>=3.1.0` - High-performance rate limiting
   - `click>=8.3.1` - CLI framework
   - `rich>=14.2.0` - Terminal formatting
   - `jinja2>=3.1.6` - Prompt templating
