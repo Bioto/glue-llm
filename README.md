@@ -14,6 +14,7 @@ GlueLLM is a high-level Python SDK that makes working with Large Language Models
 - 🤖 **Multi-agent workflows** - 16 pre-built patterns when you need to get fancy
 - 🛡️ **Smart defaults** - Automatic retries, proper error handling, and logging that doesn't suck
 - 📊 **Structured output** - Type-safe responses with Pydantic (because we're not animals)
+- 🔢 **Embeddings support** - Generate embeddings with the same error handling and observability
 
 **Why might you not?**
 - This isn't a low-level client—if you need fine-grained control over every API parameter, you might want something else
@@ -260,7 +261,7 @@ client.reset_conversation()
 For one-off requests without maintaining conversation state:
 
 ```python
-from gluellm.api import complete, structured_complete
+from gluellm.api import complete, structured_complete, embed
 
 # Simple completion
 result = await complete(
@@ -418,6 +419,148 @@ for i, exec_info in enumerate(result.tool_execution_history, 1):
     print(f"  Args: {exec_info['arguments']}")
     print(f"  Result: {exec_info['result']}")
     print(f"  Error: {exec_info.get('error', False)}")
+```
+
+## Embeddings
+
+Generate embeddings for text with automatic error handling, rate limiting, and cost tracking.
+
+### Basic Embedding Generation
+
+```python
+import asyncio
+from gluellm import embed
+
+async def main():
+    # Single text
+    result = await embed("Hello, world!")
+    print(f"Dimension: {result.dimension}")  # e.g., 1536 for text-embedding-3-small
+    print(f"Tokens: {result.tokens_used}")
+    print(f"Cost: ${result.estimated_cost_usd:.6f}")
+
+    # Access the embedding vector
+    embedding_vector = result.embeddings[0]
+    print(f"First 5 values: {embedding_vector[:5]}")
+
+asyncio.run(main())
+```
+
+### Batch Embeddings
+
+```python
+import asyncio
+from gluellm import embed
+
+async def main():
+    # Multiple texts at once
+    texts = ["Hello", "World", "Python programming"]
+    result = await embed(texts)
+
+    print(f"Generated {result.count} embeddings")
+    print(f"Each has {result.dimension} dimensions")
+
+    # Access individual embeddings
+    for i, text in enumerate(texts):
+        embedding = result.get_embedding(i)
+        print(f"{text}: {embedding[:3]}...")  # First 3 dimensions
+
+asyncio.run(main())
+```
+
+### Using GlueLLM Client
+
+```python
+import asyncio
+from gluellm import GlueLLM
+
+async def main():
+    # Create client with custom embedding model
+    client = GlueLLM(
+        embedding_model="openai/text-embedding-3-large",  # Optional
+    )
+
+    # Generate embeddings
+    result = await client.embed("Your text here")
+    print(f"Dimension: {result.dimension}")
+
+    # Use same client for completions
+    completion = await client.complete("Summarize this")
+    print(completion.final_response)
+
+asyncio.run(main())
+```
+
+### EmbeddingResult Model
+
+The `EmbeddingResult` provides convenient access to embedding data:
+
+```python
+from gluellm import embed
+
+result = await embed("Hello")
+
+# Properties
+result.embeddings      # List of embedding vectors
+result.model           # Model used (e.g., "openai/text-embedding-3-small")
+result.tokens_used     # Total tokens consumed
+result.estimated_cost_usd  # Estimated cost in USD
+result.dimension       # Dimension of embedding vectors
+result.count           # Number of embeddings
+
+# Methods
+embedding = result.get_embedding(0)  # Get embedding by index
+```
+
+### Custom Embedding Model
+
+```python
+from gluellm import embed
+
+# Use a different embedding model
+result = await embed(
+    "Your text",
+    model="openai/text-embedding-3-large",  # 3072 dimensions
+)
+
+print(f"Dimension: {result.dimension}")  # 3072
+```
+
+### Configuration
+
+Set default embedding model via environment variable:
+
+```bash
+export GLUELLM_DEFAULT_EMBEDDING_MODEL=openai/text-embedding-3-small
+```
+
+Or in code:
+
+```python
+from gluellm.config import settings
+
+print(settings.default_embedding_model)  # "openai/text-embedding-3-small"
+```
+
+### Supported Embedding Models
+
+Currently supported embedding models:
+- `openai/text-embedding-3-small` (1536 dimensions, $0.02/1M tokens)
+- `openai/text-embedding-3-large` (3072 dimensions, $0.13/1M tokens)
+- `openai/text-embedding-ada-002` (1536 dimensions, $0.10/1M tokens)
+
+### Error Handling
+
+Embeddings use the same error handling as completions:
+
+```python
+from gluellm import embed, RateLimitError, TokenLimitError
+
+try:
+    result = await embed("Your text")
+except RateLimitError:
+    print("Rate limit hit - will retry automatically")
+except TokenLimitError:
+    print("Text too long - reduce input size")
 ```
 
 ## Structured Output
@@ -1184,6 +1327,7 @@ All settings can be configured via environment variables with the `GLUELLM_` pre
 ```bash
 # Model settings
 export GLUELLM_DEFAULT_MODEL=openai:gpt-4o-mini
+export GLUELLM_DEFAULT_EMBEDDING_MODEL=openai/text-embedding-3-small
 export GLUELLM_DEFAULT_SYSTEM_PROMPT="You are a helpful assistant."
 
 # Tool execution

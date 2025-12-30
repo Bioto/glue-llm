@@ -79,6 +79,20 @@ XAI_PRICING: dict[str, ModelPricing] = {
     "grok-vision-beta": ModelPricing(5.00, 15.00),
 }
 
+# OpenAI Embedding Pricing (as of December 2024)
+# https://openai.com/pricing
+# Prices are per 1M tokens (input only, embeddings don't have output tokens)
+OPENAI_EMBEDDING_PRICING: dict[str, float] = {
+    "text-embedding-3-small": 0.02,
+    "text-embedding-3-large": 0.13,
+    "text-embedding-ada-002": 0.10,
+}
+
+# Combined embedding pricing lookup by provider
+EMBEDDING_PRICING_BY_PROVIDER: dict[str, dict[str, float]] = {
+    "openai": OPENAI_EMBEDDING_PRICING,
+}
+
 # Combined pricing lookup by provider
 PRICING_BY_PROVIDER: dict[str, dict[str, ModelPricing]] = {
     "openai": OPENAI_PRICING,
@@ -179,3 +193,61 @@ def list_available_models(provider: str | None = None) -> list[str]:
     for prov, pricing in PRICING_BY_PROVIDER.items():
         models.extend(f"{prov}:{model}" for model in pricing)
     return models
+
+
+def get_embedding_pricing(provider: str, model_name: str) -> float | None:
+    """Get pricing for a specific embedding model.
+
+    Args:
+        provider: Provider name (openai, anthropic, xai)
+        model_name: Model name without provider prefix
+
+    Returns:
+        Price per 1M tokens in USD if found, None otherwise
+
+    Example:
+        >>> price = get_embedding_pricing("openai", "text-embedding-3-small")
+        >>> if price:
+        ...     print(f"Price: ${price}/1M tokens")
+    """
+    provider_pricing = EMBEDDING_PRICING_BY_PROVIDER.get(provider.lower())
+    if not provider_pricing:
+        return None
+
+    # Try exact match first
+    if model_name in provider_pricing:
+        return provider_pricing[model_name]
+
+    # Try partial match for versioned models
+    for known_model, price in provider_pricing.items():
+        if model_name.startswith(known_model) or known_model.startswith(model_name):
+            return price
+
+    return None
+
+
+def calculate_embedding_cost(
+    provider: str,
+    model_name: str,
+    input_tokens: int,
+) -> float | None:
+    """Calculate the cost of an embedding call.
+
+    Args:
+        provider: Provider name (openai, anthropic, xai)
+        model_name: Model name without provider prefix
+        input_tokens: Number of input tokens
+
+    Returns:
+        Cost in USD, or None if pricing is not available
+
+    Example:
+        >>> cost = calculate_embedding_cost("openai", "text-embedding-3-small", 1000)
+        >>> print(f"Cost: ${cost:.6f}")
+    """
+    price_per_million = get_embedding_pricing(provider, model_name)
+    if price_per_million is None:
+        return None
+
+    # Calculate cost (convert from per-million to per-token)
+    return (input_tokens / 1_000_000) * price_per_million

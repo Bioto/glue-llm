@@ -56,7 +56,10 @@ import os
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import contextmanager
-from typing import Annotated, Any, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, TypeVar
+
+if TYPE_CHECKING:
+    from gluellm.models.embedding import EmbeddingResult
 
 from any_llm import acompletion as any_llm_acompletion
 from any_llm.types.completion import ChatCompletion
@@ -780,6 +783,7 @@ class GlueLLM:
     def __init__(
         self,
         model: str | None = None,
+        embedding_model: str | None = None,
         system_prompt: str | None = None,
         tools: list[Callable] | None = None,
         max_tool_iterations: int | None = None,
@@ -788,11 +792,13 @@ class GlueLLM:
 
         Args:
             model: Model identifier in format "provider:model_name" (defaults to settings.default_model)
+            embedding_model: Embedding model identifier in format "provider/model_name" (defaults to settings.default_embedding_model)
             system_prompt: System prompt content (defaults to settings.default_system_prompt)
             tools: List of callable functions to use as tools
             max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
         """
         self.model = model or settings.default_model
+        self.embedding_model = embedding_model or settings.default_embedding_model
         self.system_prompt = system_prompt or settings.default_system_prompt
         self.tools = tools or []
         self.max_tool_iterations = max_tool_iterations or settings.max_tool_iterations
@@ -1458,6 +1464,60 @@ class GlueLLM:
         """Reset the conversation history."""
         self._conversation = Conversation()
 
+    async def embed(
+        self,
+        texts: str | list[str],
+        model: str | None = None,
+        correlation_id: str | None = None,
+        timeout: float | None = None,
+        api_key: str | None = None,
+    ) -> "EmbeddingResult":
+        """Generate embeddings for the given text(s).
+
+        Args:
+            texts: Single text string or list of text strings to embed
+            model: Model identifier (defaults to self.embedding_model)
+            correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
+            timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+            api_key: Optional API key override (for key pool usage)
+
+        Returns:
+            EmbeddingResult with embeddings, model, token usage, and cost
+
+        Raises:
+            TokenLimitError: If token limit is exceeded
+            RateLimitError: If rate limit persists after retries
+            APIConnectionError: If connection fails after retries
+            AuthenticationError: If authentication fails
+            InvalidRequestError: If request parameters are invalid
+            asyncio.TimeoutError: If request exceeds timeout
+            RuntimeError: If shutdown is in progress
+
+        Example:
+            >>> import asyncio
+            >>> from gluellm import GlueLLM
+            >>>
+            >>> async def main():
+            ...     client = GlueLLM()
+            ...     result = await client.complete("Hello")
+            ...     embedding = await client.embed("Hello")
+            ...     print(f"Embedding dimension: {embedding.dimension}")
+            >>>
+            >>> asyncio.run(main())
+        """
+        from gluellm.embeddings import embed as embed_func
+
+        # Use instance embedding model if no override provided
+        model = model or self.embedding_model
+
+        return await embed_func(
+            texts=texts,
+            model=model,
+            correlation_id=correlation_id,
+            timeout=timeout,
+            api_key=api_key,
+        )
+
 
 # Convenience functions for one-off requests
 
@@ -1525,6 +1585,43 @@ async def structured_complete(
     )
     return await client.structured_complete(
         user_message, response_format, correlation_id=correlation_id, timeout=timeout
+    )
+
+
+async def embed(
+    texts: str | list[str],
+    model: str | None = None,
+    correlation_id: str | None = None,
+    timeout: float | None = None,
+) -> "EmbeddingResult":
+    """Quick embedding generation.
+
+    Args:
+        texts: Single text string or list of text strings to embed
+        model: Model identifier (defaults to settings.default_embedding_model)
+        correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
+        timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+
+    Returns:
+        EmbeddingResult with embeddings, model, token usage, and cost
+
+    Example:
+        >>> import asyncio
+        >>> from gluellm.api import embed
+        >>>
+        >>> async def main():
+        ...     result = await embed("Hello, world!")
+        ...     print(f"Embedding dimension: {result.dimension}")
+        >>>
+        >>> asyncio.run(main())
+    """
+    from gluellm.embeddings import embed as embed_func
+
+    return await embed_func(
+        texts=texts,
+        model=model,
+        correlation_id=correlation_id,
+        timeout=timeout,
     )
 
 

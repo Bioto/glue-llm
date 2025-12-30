@@ -58,6 +58,7 @@ class GlueLLMSettings(BaseSettings):
 
     # Default model settings
     default_model: str = "openai:gpt-5-nano-2025-08-07"
+    default_embedding_model: str = "openai/text-embedding-3-small"
     default_system_prompt: str = "You are a helpful assistant."
 
     # Tool execution settings
