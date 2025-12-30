@@ -2542,6 +2542,8 @@ GlueLLM includes a comprehensive CLI for testing and demonstrations.
 
 After installation, use the `gluellm` command:
 
+#### Basic Test Commands
+
 ```bash
 # Test basic completion
 gluellm test-completion
@@ -2549,12 +2551,71 @@ gluellm test-completion
 # Test tool calling
 gluellm test-tool-call
 
+# Test streaming responses
+gluellm test-streaming
+gluellm test-streaming -m "Tell me a joke"
+
+# Test structured output with Pydantic
+gluellm test-structured-output
+gluellm test-structured-output -d "Paris, France has 2 million people"
+
+# Test multi-turn conversations
+gluellm test-multi-turn-conversation
+gluellm test-multi-turn-conversation -t 5
+
 # Run all interactive demos
 gluellm demo
 
 # Run example scripts
 gluellm examples
+```
 
+#### Advanced Feature Tests
+
+```bash
+# Test batch processing
+gluellm test-batch-processing
+gluellm test-batch-processing -c 10 -n 5
+
+# Test hooks system
+gluellm test-hooks
+
+# Test correlation ID tracking
+gluellm test-correlation-ids
+
+# Test API key pool
+gluellm test-api-key-pool
+gluellm test-api-key-pool -k 3
+
+# Test OpenTelemetry integration
+gluellm test-telemetry
+```
+
+#### Performance & Reliability Tests
+
+```bash
+# Test error handling
+gluellm test-error-handling
+
+# Test rate limiting
+gluellm test-rate-limiting
+gluellm test-rate-limiting -r 10
+
+# Test timeout handling
+gluellm test-timeout
+gluellm test-timeout -t 10.0
+
+# Test tool registration without execution
+gluellm test-tool-without-execution
+
+# Test different models/providers
+gluellm test-different-models
+gluellm test-different-models -m openai:gpt-4o -m anthropic:claude-3-sonnet
+```
+
+#### Test Suite Commands
+
+```bash
 # Run test suite
 gluellm run-tests
 gluellm run-tests --verbose
@@ -2577,6 +2638,44 @@ gluellm test-pipeline-workflow -i "Topic: Python" -s 3
 # Test debate workflow
 gluellm test-debate-workflow
 gluellm test-debate-workflow -t "Is remote work better?" -r 3 --no-judge
+
+# Test reflection workflow
+gluellm test-reflection-workflow
+gluellm test-reflection-workflow -i "Write about AI" -r 3
+
+# Test chain of density workflow
+gluellm test-chain-of-density-workflow
+
+# Test Socratic workflow
+gluellm test-socratic-workflow
+gluellm test-socratic-workflow -t "What is Python?" -e 5
+
+# Test RAG workflow
+gluellm test-rag-workflow
+
+# Test round-robin workflow
+gluellm test-round-robin-workflow
+
+# Test consensus workflow
+gluellm test-consensus-workflow
+
+# Test hierarchical workflow
+gluellm test-hierarchical-workflow
+
+# Test MapReduce workflow
+gluellm test-map-reduce-workflow
+
+# Test ReAct workflow
+gluellm test-react-workflow
+
+# Test Mixture of Experts workflow
+gluellm test-mixture-of-experts-workflow
+
+# Test Constitutional workflow
+gluellm test-constitutional-workflow
+
+# Test Tree of Thoughts workflow
+gluellm test-tree-of-thoughts-workflow
 ```
 
 **Legacy Usage:** If the `gluellm` command is not available, you can use `python -m gluellm.cli` or `python source/cli.py` (deprecated).
