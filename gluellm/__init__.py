@@ -81,6 +81,7 @@ from gluellm.api import (
     TokenLimitError,
     ToolExecutionResult,
     complete,
+    embed,
     get_session_summary,
     reset_session_tracker,
     stream_complete,
@@ -102,6 +103,7 @@ from gluellm.models.batch import (
 )
 from gluellm.models.config import RequestConfig
 from gluellm.models.conversation import Conversation, Message, Role
+from gluellm.models.embedding import EmbeddingResult
 from gluellm.models.prompt import Prompt, SystemPrompt
 from gluellm.observability.logging_config import setup_logging
 from gluellm.rate_limiting.api_key_pool import APIKeyPool
@@ -154,9 +156,11 @@ __all__ = [
     # High-level API
     "GlueLLM",
     "complete",
+    "embed",
     "stream_complete",
     "structured_complete",
     "ToolExecutionResult",
+    "EmbeddingResult",
     "StreamingChunk",
     # Session Tracking
     "get_session_summary",
@@ -187,6 +191,7 @@ __all__ = [
     "Role",
     "SystemPrompt",
     "Prompt",
+    "EmbeddingResult",
     # Configuration
     "GlueLLMSettings",
     "settings",

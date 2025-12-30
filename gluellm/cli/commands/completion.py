@@ -149,10 +149,67 @@ def test_multi_turn_conversation(turns: int) -> None:
         print_error(f"Conversation failed: {e}")
 
 
+@click.command("test-embedding")
+@click.option("--text", "-t", default="Hello, world!", help="Text to embed")
+@click.option(
+    "--model", "-m", default=None, help="Embedding model to use (defaults to settings.default_embedding_model)"
+)
+@click.option("--batch", "-b", is_flag=True, help="Treat input as comma-separated batch")
+def test_embedding(text: str, model: str | None, batch: bool) -> None:
+    """Test embedding generation functionality."""
+    from gluellm import embed
+    from gluellm.config import settings
+
+    print_header("Test Embedding Generation")
+
+    # Determine model
+    embedding_model = model or settings.default_embedding_model
+    print_step(1, 3, f"Model: {embedding_model}")
+
+    # Parse inputs
+    if batch:
+        texts = [t.strip() for t in text.split(",")]
+        print_step(2, 3, f"Generating embeddings for {len(texts)} texts")
+    else:
+        texts = text
+        print_step(2, 3, f"Generating embedding for: {text[:50]}...")
+
+    async def run_embedding():
+        return await embed(texts=texts, model=embedding_model)
+
+    try:
+        result = run_async(run_embedding())
+
+        console.print("\n[bold]Results:[/bold]")
+        console.print(f"  Model: {result.model}")
+        console.print(f"  Embeddings: {result.count}")
+        console.print(f"  Dimension: {result.dimension}")
+        console.print(f"  Tokens used: {result.tokens_used:,}")
+        if result.estimated_cost_usd is not None:
+            console.print(f"  Estimated cost: ${result.estimated_cost_usd:.6f}")
+        else:
+            console.print("  Estimated cost: N/A (pricing not available)")
+
+        if isinstance(texts, list):
+            console.print("\n[bold]Sample embeddings (first 5 dimensions):[/bold]")
+            for i, emb in enumerate(result.embeddings[:3]):  # Show first 3
+                sample = emb[:5]
+                console.print(f"  [{i}]: {sample}...")
+        else:
+            sample = result.embeddings[0][:5]
+            console.print("\n[bold]Sample embedding (first 5 dimensions):[/bold]")
+            console.print(f"  {sample}...")
+
+        print_success("Embedding test passed")
+    except Exception as e:
+        print_error(f"Embedding failed: {e}")
+
+
 # Export all commands
 completion_commands = [
     test_completion,
     test_streaming,
     test_structured_output,
     test_multi_turn_conversation,
+    test_embedding,
 ]
