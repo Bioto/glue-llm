@@ -576,11 +576,14 @@ class GlueLLM:
                         )
                         raise type(e)(f"{error_msg}: {e}") from e
 
+                    # Validate response has choices
+                    if not response.choices:
+                        raise InvalidRequestError("Empty response from LLM provider")
+
                     # Check if model wants to call tools
                     if execute_tools and self.tools and response.choices[0].message.tool_calls:
                         tool_calls = response.choices[0].message.tool_calls
                         logger.info(f"Iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
-                        tool_calls = response.choices[0].message.tool_calls
 
                         # Add assistant message with tool calls to history
                         messages.append(response.choices[0].message)
@@ -717,6 +720,10 @@ class GlueLLM:
 
                         # Continue loop to get next response
                         continue
+
+                    # Validate response has choices
+                    if not response.choices:
+                        raise InvalidRequestError("Empty response from LLM provider")
 
                     # No more tool calls, we have final response
                     final_content = response.choices[0].message.content or ""
@@ -867,6 +874,10 @@ class GlueLLM:
                     )
                     raise
 
+                # Validate response has choices
+                if not response.choices:
+                    raise InvalidRequestError("Empty response from LLM provider")
+
                 # Parse the response
                 parsed = response.choices[0].message.parsed
                 content = response.choices[0].message.content
@@ -994,6 +1005,10 @@ class GlueLLM:
                 error_msg = f"Failed during tool execution loop (iteration {iteration + 1}/{self.max_tool_iterations})"
                 raise type(e)(f"{error_msg}: {e}") from e
 
+            # Validate response has choices
+            if not response.choices:
+                raise InvalidRequestError("Empty response from LLM provider")
+
             # Check if model wants to call tools
             if execute_tools and self.tools and response.choices[0].message.tool_calls:
                 tool_calls = response.choices[0].message.tool_calls
@@ -1105,6 +1120,10 @@ class GlueLLM:
 
                 # Continue loop to get next response (may stream this time)
                 continue
+
+            # Validate response has choices
+            if not response.choices:
+                raise InvalidRequestError("Empty response from LLM provider")
 
             # No more tool calls, stream the final response
             final_content = response.choices[0].message.content or ""

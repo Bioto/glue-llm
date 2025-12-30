@@ -138,7 +138,7 @@ class AgentExecutor(Executor):
             model=self.agent.model,
             system_prompt=self.agent.system_prompt.content if self.agent.system_prompt else None,
             tools=self.agent.tools,
-            max_tool_iterations=getattr(self.agent, "max_tool_iterations", None),
+            max_tool_iterations=self.agent.max_tool_iterations,
         )
         result = await client.complete(query)
         return result.final_response

@@ -67,3 +67,4 @@ class Agent:
         self.system_prompt = system_prompt
         self.tools = tools
         self.model = model or settings.default_model
+        self.max_tool_iterations = max_tool_iterations

@@ -170,61 +170,68 @@ class BatchProcessor:
 
             logger.debug(f"Processing request {request_id}: {request.user_message[:50]}...")
 
-            try:
-                # Create client with request-specific or default settings
-                client = GlueLLM(
-                    model=self.model,
-                    system_prompt=request.system_prompt or self.system_prompt,
-                    tools=request.tools if request.tools is not None else self.tools,
-                    max_tool_iterations=request.max_tool_iterations or self.max_tool_iterations,
-                )
+            # Retry logic: attempt once, retry once if enabled
+            max_attempts = 2 if self.config.retry_failed else 1
+            last_exception = None
 
-                # Execute the request
-                result = await client.complete(
-                    user_message=request.user_message,
-                    execute_tools=request.execute_tools,
-                    correlation_id=request_id,
-                    timeout=request.timeout,
-                )
+            for attempt in range(max_attempts):
+                try:
+                    # Create client with request-specific or default settings
+                    client = GlueLLM(
+                        model=self.model,
+                        system_prompt=request.system_prompt or self.system_prompt,
+                        tools=request.tools if request.tools is not None else self.tools,
+                        max_tool_iterations=request.max_tool_iterations or self.max_tool_iterations,
+                    )
 
-                elapsed_time = time.time() - start_time
+                    # Execute the request
+                    result = await client.complete(
+                        user_message=request.user_message,
+                        execute_tools=request.execute_tools,
+                        correlation_id=request_id,
+                        timeout=request.timeout,
+                    )
 
-                logger.debug(
-                    f"Request {request_id} succeeded: elapsed={elapsed_time:.3f}s, tool_calls={result.tool_calls_made}"
-                )
+                    elapsed_time = time.time() - start_time
 
-                return BatchResult(
-                    id=request_id,
-                    success=True,
-                    response=result.final_response,
-                    tool_calls_made=result.tool_calls_made,
-                    tool_execution_history=result.tool_execution_history,
-                    tokens_used=result.tokens_used,
-                    metadata=request.metadata,
-                    elapsed_time=elapsed_time,
-                )
+                    logger.debug(
+                        f"Request {request_id} succeeded: elapsed={elapsed_time:.3f}s, tool_calls={result.tool_calls_made}"
+                    )
 
-            except Exception as e:
-                elapsed_time = time.time() - start_time
-                error_type = type(e).__name__
-                error_msg = str(e)
+                    return BatchResult(
+                        id=request_id,
+                        success=True,
+                        response=result.final_response,
+                        tool_calls_made=result.tool_calls_made,
+                        tool_execution_history=result.tool_execution_history,
+                        tokens_used=result.tokens_used,
+                        metadata=request.metadata,
+                        elapsed_time=elapsed_time,
+                    )
 
-                logger.error(f"Request {request_id} failed after {elapsed_time:.3f}s: {error_type}: {error_msg}")
+                except Exception as e:
+                    last_exception = e
+                    elapsed_time = time.time() - start_time
+                    error_type = type(e).__name__
+                    error_msg = str(e)
 
-                # If retry is enabled and this is first attempt, retry once
-                if self.config.retry_failed and not request.metadata.get("_retried"):
-                    logger.info(f"Retrying failed request {request_id}")
-                    request.metadata["_retried"] = True
-                    return await self._process_single(request, semaphore)
+                    if attempt < max_attempts - 1:
+                        logger.info(f"Request {request_id} failed (attempt {attempt + 1}/{max_attempts}), retrying...")
+                    else:
+                        logger.error(
+                            f"Request {request_id} failed after {elapsed_time:.3f}s: {error_type}: {error_msg}"
+                        )
 
-                return BatchResult(
-                    id=request_id,
-                    success=False,
-                    error=error_msg,
-                    error_type=error_type,
-                    metadata=request.metadata,
-                    elapsed_time=elapsed_time,
-                )
+            # All attempts failed
+            elapsed_time = time.time() - start_time
+            return BatchResult(
+                id=request_id,
+                success=False,
+                error=str(last_exception) if last_exception else "Unknown error",
+                error_type=type(last_exception).__name__ if last_exception else "UnknownError",
+                metadata=request.metadata,
+                elapsed_time=elapsed_time,
+            )
 
     def _exception_to_result(self, request: BatchRequest, exc: Exception) -> BatchResult:
         """Convert an exception to a BatchResult.
