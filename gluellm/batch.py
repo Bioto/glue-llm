@@ -13,8 +13,6 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from gluellm.api import GlueLLM
-from gluellm.api_key_pool import APIKeyPool, extract_provider_from_model
-from gluellm.logging_config import get_logger
 from gluellm.models.batch import (
     APIKeyConfig,
     BatchConfig,
@@ -23,6 +21,8 @@ from gluellm.models.batch import (
     BatchResponse,
     BatchResult,
 )
+from gluellm.observability.logging_config import get_logger
+from gluellm.rate_limiting.api_key_pool import APIKeyPool, extract_provider_from_model
 
 logger = get_logger(__name__)
 
@@ -73,7 +73,7 @@ class BatchProcessor:
         # Initialize API key pool if keys are provided
         self.key_pool: APIKeyPool | None = None
         if self.config.api_keys:
-            from gluellm.api_key_pool import APIKeyConfig as PoolAPIKeyConfig
+            from gluellm.rate_limiting.api_key_pool import APIKeyConfig as PoolAPIKeyConfig
 
             key_configs = [
                 PoolAPIKeyConfig.from_batch_config(k) if isinstance(k, APIKeyConfig) else k

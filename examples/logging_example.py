@@ -15,8 +15,8 @@ from pathlib import Path
 
 from gluellm import complete
 from gluellm.config import reload_settings, settings
-from gluellm.logging_config import setup_logging
-from gluellm.logging_utils import log_async_function_call, log_operation, log_timing
+from gluellm.observability.logging_config import setup_logging
+from gluellm.observability.logging_utils import log_async_function_call, log_operation, log_timing
 
 
 async def example_basic_logging():

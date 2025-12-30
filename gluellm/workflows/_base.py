@@ -11,8 +11,8 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from gluellm.hooks.manager import GLOBAL_HOOK_REGISTRY, HookManager
-from gluellm.logging_config import get_logger
 from gluellm.models.hook import HookRegistry, HookStage
+from gluellm.observability.logging_config import get_logger
 
 logger = get_logger(__name__)
 

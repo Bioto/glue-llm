@@ -10,8 +10,8 @@ from typing import Any
 
 from gluellm.hooks import manager as hooks_manager
 from gluellm.hooks.manager import HookManager
-from gluellm.logging_config import get_logger
 from gluellm.models.hook import HookRegistry, HookStage
+from gluellm.observability.logging_config import get_logger
 
 logger = get_logger(__name__)
 

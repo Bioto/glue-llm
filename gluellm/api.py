@@ -70,13 +70,14 @@ from tenacity import (
     wait_exponential,
 )
 
-from gluellm.api_key_pool import extract_provider_from_model
 from gluellm.config import settings
-from gluellm.context import clear_correlation_id, get_correlation_id, set_correlation_id
-from gluellm.logging_config import get_logger
+from gluellm.costing.pricing_data import calculate_cost
 from gluellm.models.conversation import Conversation, Role
-from gluellm.rate_limiter import acquire_rate_limit
-from gluellm.shutdown import ShutdownContext, is_shutting_down
+from gluellm.observability.logging_config import get_logger
+from gluellm.rate_limiting.api_key_pool import extract_provider_from_model
+from gluellm.rate_limiting.rate_limiter import acquire_rate_limit
+from gluellm.runtime.context import clear_correlation_id, get_correlation_id, set_correlation_id
+from gluellm.runtime.shutdown import ShutdownContext, is_shutting_down, register_shutdown_callback
 from gluellm.telemetry import (
     is_tracing_enabled,
     log_llm_metrics,
@@ -98,6 +99,181 @@ PROVIDER_ENV_VAR_MAP: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "xai": "XAI_API_KEY",
 }
+
+
+# ============================================================================
+# Session Cost Tracker
+# ============================================================================
+
+
+class _SessionCostTracker:
+    """Tracks token usage and costs for the current session.
+
+    This is a lightweight in-memory tracker that accumulates usage across
+    all API calls and can print a summary on exit.
+    """
+
+    def __init__(self):
+        self._total_prompt_tokens: int = 0
+        self._total_completion_tokens: int = 0
+        self._total_cost_usd: float = 0.0
+        self._request_count: int = 0
+        self._cost_by_model: dict[str, float] = {}
+        self._tokens_by_model: dict[str, dict[str, int]] = {}
+        self._shutdown_registered: bool = False
+
+    def record_usage(
+        self,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cost_usd: float | None,
+    ) -> None:
+        """Record usage from an API call."""
+        if not settings.track_costs:
+            return
+
+        self._total_prompt_tokens += prompt_tokens
+        self._total_completion_tokens += completion_tokens
+        self._request_count += 1
+
+        if cost_usd is not None:
+            self._total_cost_usd += cost_usd
+            self._cost_by_model[model] = self._cost_by_model.get(model, 0.0) + cost_usd
+
+        if model not in self._tokens_by_model:
+            self._tokens_by_model[model] = {"prompt": 0, "completion": 0}
+        self._tokens_by_model[model]["prompt"] += prompt_tokens
+        self._tokens_by_model[model]["completion"] += completion_tokens
+
+        # Register shutdown callback on first usage
+        if not self._shutdown_registered and settings.print_session_summary_on_exit:
+            register_shutdown_callback(self._print_summary)
+            self._shutdown_registered = True
+
+    def _print_summary(self) -> None:
+        """Print session summary on exit."""
+        if self._request_count == 0:
+            return
+
+        total_tokens = self._total_prompt_tokens + self._total_completion_tokens
+
+        logger.info("=" * 60)
+        logger.info("GlueLLM Session Summary")
+        logger.info("=" * 60)
+        logger.info(f"Total Requests: {self._request_count}")
+        logger.info(f"Total Tokens: {total_tokens:,}")
+        logger.info(f"  - Prompt: {self._total_prompt_tokens:,}")
+        logger.info(f"  - Completion: {self._total_completion_tokens:,}")
+        logger.info(f"Estimated Total Cost: ${self._total_cost_usd:.6f}")
+        logger.info("-" * 60)
+
+        if self._cost_by_model:
+            logger.info("Breakdown by Model:")
+            for model, cost in sorted(self._cost_by_model.items(), key=lambda x: -x[1]):
+                tokens = self._tokens_by_model.get(model, {})
+                model_tokens = tokens.get("prompt", 0) + tokens.get("completion", 0)
+                logger.info(f"  {model}: ${cost:.6f} ({model_tokens:,} tokens)")
+
+        logger.info("=" * 60)
+
+    def get_summary(self) -> dict[str, Any]:
+        """Get session summary as a dictionary."""
+        return {
+            "request_count": self._request_count,
+            "total_prompt_tokens": self._total_prompt_tokens,
+            "total_completion_tokens": self._total_completion_tokens,
+            "total_tokens": self._total_prompt_tokens + self._total_completion_tokens,
+            "total_cost_usd": self._total_cost_usd,
+            "cost_by_model": self._cost_by_model.copy(),
+            "tokens_by_model": {k: v.copy() for k, v in self._tokens_by_model.items()},
+        }
+
+    def reset(self) -> dict[str, Any]:
+        """Reset the tracker and return the final summary."""
+        summary = self.get_summary()
+        self._total_prompt_tokens = 0
+        self._total_completion_tokens = 0
+        self._total_cost_usd = 0.0
+        self._request_count = 0
+        self._cost_by_model.clear()
+        self._tokens_by_model.clear()
+        return summary
+
+
+# Global session tracker instance
+_session_tracker = _SessionCostTracker()
+
+
+def get_session_summary() -> dict[str, Any]:
+    """Get the current session cost/token summary.
+
+    Returns:
+        Dictionary with session statistics including total tokens, cost, and breakdowns.
+
+    Example:
+        >>> summary = get_session_summary()
+        >>> print(f"Total cost: ${summary['total_cost_usd']:.4f}")
+    """
+    return _session_tracker.get_summary()
+
+
+def reset_session_tracker() -> dict[str, Any]:
+    """Reset the session tracker and return the final summary.
+
+    Returns:
+        Dictionary with the final session statistics before reset.
+    """
+    return _session_tracker.reset()
+
+
+def _calculate_and_record_cost(
+    model: str,
+    tokens_used: dict[str, int] | None,
+    correlation_id: str | None = None,
+) -> float | None:
+    """Calculate cost from token usage and record to session tracker.
+
+    Args:
+        model: Model identifier (e.g., "openai:gpt-4o-mini")
+        tokens_used: Token usage dictionary with 'prompt', 'completion', 'total'
+        correlation_id: Optional correlation ID for logging
+
+    Returns:
+        Estimated cost in USD, or None if cost cannot be calculated
+    """
+    if not tokens_used:
+        return None
+
+    prompt_tokens = tokens_used.get("prompt", 0)
+    completion_tokens = tokens_used.get("completion", 0)
+
+    # Calculate cost
+    provider = extract_provider_from_model(model)
+    model_name = model.split(":", 1)[1] if ":" in model else model
+
+    cost = calculate_cost(
+        provider=provider,
+        model_name=model_name,
+        input_tokens=prompt_tokens,
+        output_tokens=completion_tokens,
+    )
+
+    # Record to session tracker
+    _session_tracker.record_usage(
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        cost_usd=cost,
+    )
+
+    if cost is not None:
+        logger.debug(
+            f"Cost calculated: ${cost:.6f} for {prompt_tokens}+{completion_tokens} tokens "
+            f"(model={model}, correlation_id={correlation_id})"
+        )
+
+    return cost
 
 
 # ============================================================================
@@ -420,11 +596,24 @@ async def _safe_llm_call(
             if not stream:
                 tokens_used = _extract_token_usage(response)
                 if tokens_used:
-                    record_token_usage(span, tokens_used)
+                    # Calculate cost for this LLM call
+                    provider = extract_provider_from_model(model)
+                    model_name = model.split(":", 1)[1] if ":" in model else model
+                    call_cost = calculate_cost(
+                        provider=provider,
+                        model_name=model_name,
+                        input_tokens=tokens_used.get("prompt", 0),
+                        output_tokens=tokens_used.get("completion", 0),
+                    )
+
+                    # Record tokens and cost to span
+                    record_token_usage(span, tokens_used, cost_usd=call_cost)
+
+                    cost_str = f", cost=${call_cost:.6f}" if call_cost else ""
                     logger.info(
                         f"LLM call completed: model={model}, latency={elapsed_time:.3f}s, "
                         f"tokens={tokens_used['total']} (prompt={tokens_used['prompt']}, "
-                        f"completion={tokens_used['completion']})"
+                        f"completion={tokens_used['completion']}){cost_str}"
                     )
 
             # Record response metadata
@@ -558,6 +747,20 @@ class ToolExecutionResult(BaseModel):
         dict[str, int] | None,
         Field(
             description="Token usage information with 'prompt', 'completion', and 'total' keys",
+            default=None,
+        ),
+    ]
+    estimated_cost_usd: Annotated[
+        float | None,
+        Field(
+            description="Estimated cost in USD based on token usage and model pricing",
+            default=None,
+        ),
+    ]
+    model: Annotated[
+        str | None,
+        Field(
+            description="The model used for this completion",
             default=None,
         ),
     ]
@@ -842,12 +1045,21 @@ class GlueLLM:
                     if tokens_used:
                         logger.debug(f"Token usage: {tokens_used}")
 
+                    # Calculate cost and record to session tracker
+                    estimated_cost = _calculate_and_record_cost(
+                        model=self.model,
+                        tokens_used=tokens_used,
+                        correlation_id=correlation_id,
+                    )
+
                     return ToolExecutionResult(
                         final_response=final_content,
                         tool_calls_made=tool_calls_made,
                         tool_execution_history=tool_execution_history,
                         raw_response=response,
                         tokens_used=tokens_used,
+                        estimated_cost_usd=estimated_cost,
+                        model=self.model,
                     )
 
                 # Max iterations reached
@@ -857,12 +1069,21 @@ class GlueLLM:
                 # Extract token usage if available
                 tokens_used = _extract_token_usage(response)
 
+                # Calculate cost and record to session tracker
+                estimated_cost = _calculate_and_record_cost(
+                    model=self.model,
+                    tokens_used=tokens_used,
+                    correlation_id=correlation_id,
+                )
+
                 return ToolExecutionResult(
                     final_response=final_content,
                     tool_calls_made=tool_calls_made,
                     tool_execution_history=tool_execution_history,
                     raw_response=response,
                     tokens_used=tokens_used,
+                    estimated_cost_usd=estimated_cost,
+                    model=self.model,
                 )
         finally:
             # Clear correlation ID after request completes

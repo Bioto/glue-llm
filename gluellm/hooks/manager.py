@@ -9,8 +9,8 @@ import inspect
 import time
 from typing import Any
 
-from gluellm.logging_config import get_logger
 from gluellm.models.hook import HookConfig, HookContext, HookErrorStrategy, HookRegistry, HookStage
+from gluellm.observability.logging_config import get_logger
 
 logger = get_logger(__name__)
 

@@ -124,7 +124,7 @@ def test_rate_limiting(requests: int) -> None:
     """Test rate limiting functionality."""
     import time
 
-    from gluellm.rate_limiter import acquire_rate_limit
+    from gluellm.rate_limiting.rate_limiter import acquire_rate_limit
 
     print_header("Test Rate Limiting", f"Requests: {requests}")
 
@@ -171,7 +171,7 @@ def test_timeout(timeout: float) -> None:
 @click.option("--keys", "-k", default=2, type=int, help="Number of API keys to simulate")
 def test_api_key_pool(keys: int) -> None:
     """Test API key pooling functionality."""
-    from gluellm.api_key_pool import APIKeyPool
+    from gluellm.rate_limiting.api_key_pool import APIKeyPool
 
     print_header("Test API Key Pool", f"Keys: {keys}")
 

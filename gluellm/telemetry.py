@@ -39,7 +39,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.trace import Status, StatusCode
 
 from gluellm.config import settings
-from gluellm.logging_config import get_logger
+from gluellm.observability.logging_config import get_logger
 
 logger = get_logger(__name__)
 
@@ -121,7 +121,7 @@ def configure_tracing() -> None:
         _tracing_enabled = True
 
         # Register shutdown callback for cleanup
-        from gluellm.shutdown import register_shutdown_callback
+        from gluellm.runtime.shutdown import register_shutdown_callback
 
         register_shutdown_callback(shutdown_telemetry)
 
@@ -239,24 +239,45 @@ def set_span_attributes(span: Any, **attributes: Any) -> None:
             logger.debug(f"Failed to set span attribute {key}: {e}")
 
 
-def record_token_usage(span: Any, usage: dict[str, int]) -> None:
-    """Record token usage information on a span.
+def record_token_usage(span: Any, usage: dict[str, int], cost_usd: float | None = None) -> None:
+    """Record token usage and cost information on a span.
 
     Args:
         span: OpenTelemetry span object
         usage: Dictionary with token counts (prompt, completion, total)
+        cost_usd: Optional estimated cost in USD
     """
     if not _tracing_enabled:
         return
 
-    set_span_attributes(
-        span,
-        **{
-            "llm.tokens.prompt": usage.get("prompt", 0),
-            "llm.tokens.completion": usage.get("completion", 0),
-            "llm.tokens.total": usage.get("total", 0),
-        },
-    )
+    attributes = {
+        "llm.tokens.prompt": usage.get("prompt", 0),
+        "llm.tokens.completion": usage.get("completion", 0),
+        "llm.tokens.total": usage.get("total", 0),
+    }
+
+    if cost_usd is not None:
+        attributes["llm.cost.usd"] = cost_usd
+
+    set_span_attributes(span, **attributes)
+
+
+def record_cost(span: Any, cost_usd: float, model: str | None = None) -> None:
+    """Record cost information on a span.
+
+    Args:
+        span: OpenTelemetry span object
+        cost_usd: Estimated cost in USD
+        model: Optional model identifier for context
+    """
+    if not _tracing_enabled:
+        return
+
+    attributes = {"llm.cost.usd": cost_usd}
+    if model:
+        attributes["llm.cost.model"] = model
+
+    set_span_attributes(span, **attributes)
 
 
 def record_tool_execution(span: Any, tool_name: str, arguments: dict, result: str, error: bool = False) -> None:

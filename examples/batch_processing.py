@@ -14,7 +14,7 @@ from gluellm import (
     batch_complete,
     batch_complete_simple,
 )
-from gluellm.logging_config import setup_logging
+from gluellm.observability.logging_config import setup_logging
 
 
 async def example_1_simple_batch():

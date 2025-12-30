@@ -100,6 +100,10 @@ class GlueLLMSettings(BaseSettings):
     rate_limit_backend: Literal["memory", "redis"] = "memory"
     rate_limit_redis_url: str | None = None
 
+    # Cost tracking settings
+    track_costs: bool = True  # Enable cost tracking and include in responses
+    print_session_summary_on_exit: bool = True  # Print token/cost summary when program exits
+
 
 # Global settings instance
 settings = GlueLLMSettings()
