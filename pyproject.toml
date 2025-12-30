@@ -50,6 +50,7 @@ dependencies = [
     "pytest>=9.0.2",
     "rich>=14.2.0",
     "tenacity>=9.0.0",
+    "throttled-py>=3.1.0",
 ]
 
 [project.urls]

@@ -29,7 +29,7 @@ Example:
 """
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -92,6 +92,13 @@ class GlueLLMSettings(BaseSettings):
     mlflow_tracking_uri: str | None = None
     mlflow_experiment_name: str = "gluellm"
     otel_exporter_endpoint: str | None = None
+
+    # Rate limiting settings
+    rate_limit_enabled: bool = True
+    rate_limit_requests_per_minute: Annotated[int, Field(gt=0)] = 60
+    rate_limit_burst: Annotated[int, Field(gt=0)] = 10
+    rate_limit_backend: Literal["memory", "redis"] = "memory"
+    rate_limit_redis_url: str | None = None
 
 
 # Global settings instance

@@ -49,8 +49,10 @@ Example:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import time
 from collections.abc import AsyncIterator, Callable
 from typing import Annotated, Any, TypeVar
@@ -67,10 +69,12 @@ from tenacity import (
     wait_exponential,
 )
 
+from gluellm.api_key_pool import extract_provider_from_model
 from gluellm.config import settings
 from gluellm.context import clear_correlation_id, get_correlation_id, set_correlation_id
 from gluellm.logging_config import get_logger
 from gluellm.models.conversation import Conversation, Role
+from gluellm.rate_limiter import acquire_rate_limit
 from gluellm.shutdown import ShutdownContext, is_shutting_down
 from gluellm.telemetry import (
     is_tracing_enabled,
@@ -242,6 +246,7 @@ async def _safe_llm_call(
     response_format: type[BaseModel] | None = None,
     stream: bool = False,
     timeout: float | None = None,
+    api_key: str | None = None,
 ) -> ChatCompletion | AsyncIterator[ChatCompletion]:
     """Make an LLM call with error classification and tracing.
 
@@ -256,6 +261,7 @@ async def _safe_llm_call(
         response_format: Optional Pydantic model for structured output
         stream: Whether to stream the response
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        api_key: Optional API key override (for key pool usage)
 
     Returns:
         ChatCompletion if stream=False, AsyncIterator[ChatCompletion] if stream=True
@@ -266,6 +272,13 @@ async def _safe_llm_call(
     correlation_id = get_correlation_id()
     timeout = timeout or settings.default_request_timeout
     timeout = min(timeout, settings.max_request_timeout)  # Enforce max timeout
+
+    # Apply rate limiting before making the call
+    provider = extract_provider_from_model(model)
+    rate_limit_key = (
+        f"global:{provider}" if not api_key else f"api_key:{hashlib.sha256(api_key.encode()).hexdigest()[:8]}"
+    )
+    await acquire_rate_limit(rate_limit_key)
 
     start_time = time.time()
     logger.debug(
@@ -288,17 +301,49 @@ async def _safe_llm_call(
             if correlation_id:
                 set_span_attributes(span, correlation_id=correlation_id)
 
-            # Make LLM call with timeout
-            response = await asyncio.wait_for(
-                any_llm_acompletion(
-                    messages=messages,
-                    model=model,
-                    tools=tools if tools else None,
-                    response_format=response_format,
-                    stream=stream,
-                ),
-                timeout=timeout,
-            )
+            # Temporarily set API key in environment if provided
+            original_env_key = None
+            if api_key:
+                provider = extract_provider_from_model(model)
+                env_var_map = {
+                    "openai": "OPENAI_API_KEY",
+                    "anthropic": "ANTHROPIC_API_KEY",
+                    "xai": "XAI_API_KEY",
+                }
+                env_var = env_var_map.get(provider.lower())
+                if env_var:
+                    original_env_key = os.environ.get(env_var)
+                    os.environ[env_var] = api_key
+                    logger.debug(f"Temporarily set {env_var} for this request")
+
+            try:
+                # Make LLM call with timeout
+                response = await asyncio.wait_for(
+                    any_llm_acompletion(
+                        messages=messages,
+                        model=model,
+                        tools=tools if tools else None,
+                        response_format=response_format,
+                        stream=stream,
+                    ),
+                    timeout=timeout,
+                )
+            finally:
+                # Restore original environment variable if we changed it
+                if api_key and original_env_key is not None:
+                    provider = extract_provider_from_model(model)
+                    env_var_map = {
+                        "openai": "OPENAI_API_KEY",
+                        "anthropic": "ANTHROPIC_API_KEY",
+                        "xai": "XAI_API_KEY",
+                    }
+                    env_var = env_var_map.get(provider.lower())
+                    if env_var:
+                        if original_env_key is None:
+                            os.environ.pop(env_var, None)
+                        else:
+                            os.environ[env_var] = original_env_key
+                        logger.debug(f"Restored {env_var} to original value")
 
             elapsed_time = time.time() - start_time
 
@@ -417,6 +462,7 @@ async def _llm_call_with_retry(
     tools: list[Callable] | None = None,
     response_format: type[BaseModel] | None = None,
     timeout: float | None = None,
+    api_key: str | None = None,
 ) -> ChatCompletion:
     """Make an LLM call with automatic retry on transient errors.
 
@@ -436,6 +482,7 @@ async def _llm_call_with_retry(
         tools: Optional list of tools
         response_format: Optional Pydantic model for structured output
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        api_key: Optional API key override (for key pool usage)
     """
     return await _safe_llm_call(
         messages=messages,
@@ -443,6 +490,7 @@ async def _llm_call_with_retry(
         tools=tools,
         response_format=response_format,
         timeout=timeout,
+        api_key=api_key,
     )
 
 
@@ -502,6 +550,7 @@ class GlueLLM:
         execute_tools: bool = True,
         correlation_id: str | None = None,
         timeout: float | None = None,
+        api_key: str | None = None,
     ) -> ToolExecutionResult:
         """Complete a request with automatic tool execution loop.
 
@@ -510,6 +559,7 @@ class GlueLLM:
             execute_tools: Whether to automatically execute tools and loop
             correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
             timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+            api_key: Optional API key override (for key pool usage)
 
         Returns:
             ToolExecutionResult with final response and execution history
@@ -566,6 +616,7 @@ class GlueLLM:
                             model=self.model,
                             tools=self.tools if self.tools else None,
                             timeout=timeout,
+                            api_key=api_key,
                         )
                     except LLMError as e:
                         # Log the error and re-raise with context
@@ -805,6 +856,7 @@ class GlueLLM:
         response_format: type[T],
         correlation_id: str | None = None,
         timeout: float | None = None,
+        api_key: str | None = None,
     ) -> T:
         """Complete a request and return structured output.
 
@@ -813,6 +865,7 @@ class GlueLLM:
             response_format: Pydantic model class for structured output
             correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
             timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+            api_key: Optional API key override (for key pool usage)
 
         Returns:
             Instance of response_format with parsed data
@@ -866,6 +919,7 @@ class GlueLLM:
                         model=self.model,
                         response_format=response_format,
                         timeout=timeout,
+                        api_key=api_key,
                     )
                 except LLMError as e:
                     logger.error(
