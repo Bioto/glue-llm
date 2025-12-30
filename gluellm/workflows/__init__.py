@@ -5,8 +5,10 @@ agents in various patterns like iterative refinement, pipelines, debates,
 and many other advanced patterns.
 """
 
+from gluellm.models.workflow import ChatRoomConfig
 from gluellm.workflows._base import Workflow, WorkflowResult
 from gluellm.workflows.chain_of_density import ChainOfDensityWorkflow
+from gluellm.workflows.chat_room import ChatRoomWorkflow
 from gluellm.workflows.consensus import ConsensusWorkflow
 from gluellm.workflows.constitutional import ConstitutionalWorkflow
 from gluellm.workflows.debate import DebateConfig, DebateWorkflow
@@ -43,4 +45,6 @@ __all__ = [
     "MixtureOfExpertsWorkflow",
     "ConstitutionalWorkflow",
     "TreeOfThoughtsWorkflow",
+    "ChatRoomWorkflow",
+    "ChatRoomConfig",
 ]

@@ -310,6 +310,24 @@ class RAGConfig(BaseModel):
     fallback_on_no_context: bool = Field(default=True, description="Whether to fallback if no context is retrieved")
 
 
+class ChatRoomConfig(BaseModel):
+    """Configuration for chat room workflow.
+
+    Attributes:
+        max_rounds: Maximum number of discussion rounds (safety limit)
+        allow_moderator_interjection: Whether moderator can guide discussion with comments
+        synthesis_rounds: Number of refinement passes for collaborative final answer
+    """
+
+    max_rounds: int = Field(default=10, description="Maximum number of discussion rounds (safety limit)", gt=0)
+    allow_moderator_interjection: bool = Field(
+        default=True, description="Whether moderator can guide discussion with comments"
+    )
+    synthesis_rounds: int = Field(
+        default=1, description="Number of refinement passes for collaborative final answer", gt=0
+    )
+
+
 # Rebuild models after Executor is available to resolve forward references
 def _rebuild_models():
     """Rebuild Pydantic models to resolve forward references."""
