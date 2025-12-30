@@ -3,9 +3,12 @@
 import asyncio
 import importlib.util
 
+import pytest
+
 from gluellm.telemetry import configure_tracing, is_mlflow_enabled, log_llm_metrics, mlflow_run_context
 
 
+@pytest.mark.asyncio
 async def test_mlflow_integration():
     """Test MLflow metrics integration end-to-end."""
     print("=" * 60)
