@@ -12,12 +12,13 @@ A high-level Python SDK for Large Language Models with automatic tool execution,
 - 🔌 **Provider Agnostic** - Built on `any-llm-sdk` for multi-provider support
 - ⚡ **Automatic Retry with Exponential Backoff** - Smart retry logic for rate limits and connection issues
 - 🛡️ **Comprehensive Error Handling** - Catch and classify errors from any LLM provider
-- 📝 **Enhanced Logging** - Track retry attempts and tool execution errors
+- 📝 **Enhanced Logging** - Track retry attempts and tool execution errors with correlation IDs
 - ⚙️ **Flexible Configuration** - Environment-based settings with pydantic-settings
 - 🤖 **Multi-Agent Workflows** - Orchestrate multiple agents in iterative, pipeline, and debate patterns
 - 🌊 **Streaming Support** - Real-time response streaming for better UX
 - 📈 **Token Usage Tracking** - Monitor token consumption and costs
 - 🔍 **OpenTelemetry Tracing** - Distributed tracing with MLflow for observability
+- 🚀 **Local Batch Processing** - Efficient concurrent processing with automatic retry and error handling
 
 ## Installation
 
@@ -447,6 +448,263 @@ person = await structured_complete(
     response_format=Person,
 )
 ```
+
+## Batch Processing
+
+Process multiple LLM requests efficiently with controlled concurrency, automatic retry, and comprehensive error handling.
+
+### Simple Batch Processing
+
+Process a list of messages with automatic concurrency control:
+
+```python
+import asyncio
+from gluellm import batch_complete_simple, BatchConfig
+
+async def main():
+    messages = [
+        "What is 2+2?",
+        "What is the capital of France?",
+        "Explain quantum computing in one sentence.",
+    ]
+
+    # Process with concurrency limit of 3
+    responses = await batch_complete_simple(
+        messages,
+        config=BatchConfig(max_concurrent=3),
+    )
+
+    for msg, resp in zip(messages, responses, strict=True):
+        print(f"Q: {msg}")
+        print(f"A: {resp}\n")
+
+asyncio.run(main())
+```
+
+### Advanced Batch Processing
+
+Use `BatchRequest` for fine-grained control over each request:
+
+```python
+from gluellm import batch_complete, BatchRequest, BatchConfig, BatchErrorStrategy
+
+requests = [
+    BatchRequest(
+        id="math-1",
+        user_message="Calculate 15 * 24",
+        metadata={"category": "math"},
+    ),
+    BatchRequest(
+        id="geography-1",
+        user_message="What is the capital of Japan?",
+        timeout=30.0,
+        metadata={"category": "geography"},
+    ),
+    BatchRequest(
+        id="code-1",
+        user_message="Write a Python function to reverse a string",
+        model="openai:gpt-4o",  # Per-request model override
+        tools=[my_tool],  # Per-request tools
+        metadata={"category": "coding"},
+    ),
+]
+
+response = await batch_complete(
+    requests,
+    config=BatchConfig(
+        max_concurrent=5,
+        error_strategy=BatchErrorStrategy.CONTINUE,  # Continue on errors
+        retry_failed=True,  # Automatically retry failed requests
+    ),
+)
+
+# Access results
+print(f"Completed: {response.successful_requests}/{response.total_requests}")
+print(f"Failed: {response.failed_requests}")
+print(f"Total time: {response.total_elapsed_time:.2f}s")
+
+for result in response.results:
+    if result.success:
+        print(f"{result.id}: {result.response}")
+    else:
+        print(f"{result.id}: Error - {result.error}")
+```
+
+### Batch Processing Features
+
+**Concurrency Control:**
+- Limit concurrent requests to avoid rate limits
+- Automatic queuing and execution management
+- Configurable via `max_concurrent` parameter
+
+**Error Handling Strategies:**
+- `FAIL_FAST`: Stop on first error
+- `CONTINUE`: Process all requests despite errors
+- `COLLECT`: Gather all errors and raise at end
+
+**Automatic Retry:**
+- Optional retry of failed requests
+- Preserves request metadata including retry status
+- Configurable retry behavior
+
+**Per-Request Configuration:**
+- Custom timeout per request
+- Model override per request
+- Tools override per request
+- Custom system prompt per request
+- Request-specific metadata
+
+**Response Tracking:**
+- Individual request IDs for correlation
+- Success/failure status per request
+- Detailed error messages
+- Elapsed time per request
+- Token usage tracking
+- Tool call statistics
+
+### Batch Processing with Tools
+
+```python
+def calculate(expression: str) -> str:
+    """Evaluate a mathematical expression."""
+    return str(eval(expression))
+
+requests = [
+    BatchRequest(
+        user_message="Calculate 25 * 4",
+        tools=[calculate],
+        execute_tools=True,
+    ),
+    BatchRequest(
+        user_message="What is 100 divided by 5?",
+        tools=[calculate],
+        execute_tools=True,
+    ),
+]
+
+response = await batch_complete(requests)
+```
+
+### Error Handling in Batches
+
+```python
+from gluellm import BatchErrorStrategy
+
+# Stop on first error
+config = BatchConfig(error_strategy=BatchErrorStrategy.FAIL_FAST)
+
+# Continue processing all requests
+config = BatchConfig(error_strategy=BatchErrorStrategy.CONTINUE)
+
+# Process all then raise exception with all errors
+config = BatchConfig(error_strategy=BatchErrorStrategy.COLLECT)
+
+response = await batch_complete(requests, config=config)
+
+# Check for failures
+if response.failed_requests > 0:
+    for result in response.results:
+        if not result.success:
+            print(f"Request {result.id} failed: {result.error}")
+```
+
+### Batch Response
+
+The `BatchResponse` object provides comprehensive batch operation statistics:
+
+```python
+class BatchResponse:
+    results: list[BatchResult]              # All individual results
+    total_requests: int                      # Total requests processed
+    successful_requests: int                 # Number of successful requests
+    failed_requests: int                     # Number of failed requests
+    total_elapsed_time: float               # Total batch processing time
+    total_tokens_used: dict[str, int] | None # Aggregated token usage
+
+# Access statistics
+print(f"Success rate: {response.successful_requests / response.total_requests * 100:.1f}%")
+if response.total_tokens_used:
+    print(f"Total tokens: {response.total_tokens_used['total']}")
+```
+
+### Example Use Cases
+
+**1. Content Generation at Scale:**
+```python
+# Generate multiple article variations
+topics = ["AI", "Blockchain", "Quantum Computing"]
+requests = [
+    BatchRequest(user_message=f"Write a brief introduction about {topic}")
+    for topic in topics
+]
+```
+
+**2. Data Extraction:**
+```python
+# Extract structured data from multiple sources
+documents = load_documents()
+requests = [
+    BatchRequest(
+        user_message=f"Extract key entities from: {doc}",
+        metadata={"document_id": doc.id},
+    )
+    for doc in documents
+]
+```
+
+**3. A/B Testing:**
+```python
+# Test different models on same prompts
+models = ["openai:gpt-4o-mini", "anthropic:claude-3-5-sonnet-20241022"]
+prompts = ["Question 1", "Question 2"]
+requests = [
+    BatchRequest(user_message=prompt, model=model, id=f"{model}-{i}")
+    for model in models
+    for i, prompt in enumerate(prompts)
+]
+```
+
+**4. High-Volume Processing:**
+```python
+# Process large datasets efficiently
+requests = [BatchRequest(user_message=item) for item in large_dataset]
+config = BatchConfig(
+    max_concurrent=10,  # Process 10 at a time
+    error_strategy=BatchErrorStrategy.CONTINUE,  # Don't stop on errors
+    retry_failed=True,  # Retry failed requests once
+)
+response = await batch_complete(requests, config=config)
+```
+
+### Performance Tips
+
+1. **Tune Concurrency**: Balance speed vs rate limits
+   ```python
+   # Conservative (avoid rate limits)
+   config = BatchConfig(max_concurrent=3)
+
+   # Aggressive (faster, may hit rate limits)
+   config = BatchConfig(max_concurrent=10)
+   ```
+
+2. **Use Request IDs**: Track requests for logging and debugging
+   ```python
+   BatchRequest(id=f"request-{uuid.uuid4()}", ...)
+   ```
+
+3. **Set Timeouts**: Prevent slow requests from blocking
+   ```python
+   BatchRequest(timeout=30.0, ...)  # 30 second timeout
+   ```
+
+4. **Monitor Token Usage**: Track costs across batch
+   ```python
+   if response.total_tokens_used:
+       cost = calculate_cost(response.total_tokens_used)
+       print(f"Batch cost: ${cost:.4f}")
+   ```
+
+For more examples, see `examples/batch_processing.py`.
 
 ## Multi-turn Conversations
 
