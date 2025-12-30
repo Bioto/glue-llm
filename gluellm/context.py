@@ -6,6 +6,7 @@ distributed tracing and logging across async operations.
 
 import contextvars
 import uuid
+from contextlib import contextmanager
 from typing import Any
 
 # Context variable for storing request correlation ID
@@ -79,6 +80,7 @@ def clear_request_metadata() -> None:
     _request_metadata.set(None)
 
 
+@contextmanager
 def with_correlation_id(correlation_id: str | None = None):
     """Context manager for setting correlation ID in a scope.
 
@@ -86,8 +88,8 @@ def with_correlation_id(correlation_id: str | None = None):
         correlation_id: Optional correlation ID (defaults to generating a new UUID)
 
     Example:
-        >>> async with with_correlation_id("req-123"):
-        ...     result = await some_operation()
+        >>> with with_correlation_id("req-123"):
+        ...     result = some_operation()
     """
     if correlation_id is None:
         correlation_id = str(uuid.uuid4())
