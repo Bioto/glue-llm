@@ -20,7 +20,7 @@ GlueLLM is a high-level Python SDK that makes working with Large Language Models
 - It's opinionated about how LLM interactions should work
 - Documentation is thorough but might reference my sense of humor occasionally
 
-**Want to help?** Found a bug? Have a feature idea? Please [open an issue](https://github.com/yourusername/gluellm/issues)! This is a living project that gets better when people actually use it and tell me what's broken or missing.
+**Want to help?** Found a bug? Have a feature idea? Please [open an issue](https://github.com/Bioto/glue-llm/issues)! This is a living project that gets better when people actually use it and tell me what's broken or missing.
 
 ## Features
 
