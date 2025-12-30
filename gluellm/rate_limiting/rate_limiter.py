@@ -12,7 +12,7 @@ from throttled.exceptions import LimitedError
 from throttled.store import MemoryStore, RedisStore
 
 from gluellm.config import settings
-from gluellm.logging_config import get_logger
+from gluellm.observability.logging_config import get_logger
 
 logger = get_logger(__name__)
 

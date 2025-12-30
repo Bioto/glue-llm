@@ -16,7 +16,8 @@ from pathlib import Path
 import colorlog
 from pythonjsonlogger import json
 
-from gluellm.context import get_correlation_id
+# Import directly from module to avoid circular import via runtime/__init__.py
+from gluellm.runtime.context import get_correlation_id
 
 
 class CorrelationIDFilter(logging.Filter):
@@ -96,7 +97,7 @@ def setup_logging(
     # Determine log directory
     if log_dir is None:
         # Default to 'logs' directory in project root
-        project_root = Path(__file__).parent.parent
+        project_root = Path(__file__).parent.parent.parent
         log_dir = project_root / "logs"
     else:
         log_dir = Path(log_dir)

@@ -53,62 +53,74 @@ def demo() -> None:
     """Run interactive demos of core features."""
     from pydantic import BaseModel
 
-    from gluellm.api import complete, structured_complete
-
-    print_header("GlueLLM Demo", "Interactive demonstration of core features")
-
-    # Demo 1: Simple completion
-    print_step(1, 3, "Simple Completion")
-
-    async def demo_completion():
-        result = await complete("What is the capital of France? Answer briefly.")
-        return result.final_response
-
-    try:
-        response = run_async(demo_completion())
-        console.print(f"  Response: {response}")
-        print_success("Simple completion works!")
-    except Exception as e:
-        print_error(f"Demo failed: {e}")
-
-    # Demo 2: Tool calling
-    print_step(2, 3, "Tool Calling")
+    from gluellm.api import complete, get_session_summary, structured_complete
 
     def get_time(timezone: str = "UTC") -> str:
+        """Get the current time in a specified timezone.
+
+        Args:
+            timezone: The timezone to get the time for (default: UTC)
+
+        Returns:
+            Current time as a formatted string
+        """
         from datetime import datetime
 
         return f"Current time in {timezone}: {datetime.now().strftime('%H:%M:%S')}"
-
-    async def demo_tools():
-        return await complete("What time is it?", tools=[get_time])
-
-    try:
-        result = run_async(demo_tools())
-        console.print(f"  Response: {result.final_response}")
-        console.print(f"  Tool calls: {result.tool_calls_made}")
-        print_success("Tool calling works!")
-    except Exception as e:
-        print_error(f"Demo failed: {e}")
-
-    # Demo 3: Structured output
-    print_step(3, 3, "Structured Output")
 
     class Color(BaseModel):
         name: str
         hex_code: str
 
-    async def demo_structured():
-        return await structured_complete(
-            "Give me the color red",
-            response_format=Color,
-        )
+    async def run_all_demos():
+        """Run all demos in a single async context to avoid event loop issues."""
+        print_header("GlueLLM Demo", "Interactive demonstration of core features")
 
-    try:
-        color = run_async(demo_structured())
-        console.print(f"  Color: {color.name} ({color.hex_code})")
-        print_success("Structured output works!")
-    except Exception as e:
-        print_error(f"Demo failed: {e}")
+        # Demo 1: Simple completion
+        print_step(1, 3, "Simple Completion")
+        try:
+            result = await complete("What is the capital of France? Answer briefly.")
+            console.print(f"  Response: {result.final_response}")
+            if result.estimated_cost_usd:
+                console.print(f"  Cost: ${result.estimated_cost_usd:.6f}")
+            print_success("Simple completion works!")
+        except Exception as e:
+            print_error(f"Demo failed: {e}")
+
+        # Demo 2: Tool calling
+        print_step(2, 3, "Tool Calling")
+        try:
+            result = await complete("What time is it?", tools=[get_time])
+            console.print(f"  Response: {result.final_response}")
+            console.print(f"  Tool calls: {result.tool_calls_made}")
+            if result.estimated_cost_usd:
+                console.print(f"  Cost: ${result.estimated_cost_usd:.6f}")
+            print_success("Tool calling works!")
+        except Exception as e:
+            print_error(f"Demo failed: {e}")
+
+        # Demo 3: Structured output
+        print_step(3, 3, "Structured Output")
+        try:
+            color = await structured_complete(
+                "Give me the color red",
+                response_format=Color,
+            )
+            console.print(f"  Color: {color.name} ({color.hex_code})")
+            print_success("Structured output works!")
+        except Exception as e:
+            print_error(f"Demo failed: {e}")
+
+        # Print session summary
+        summary = get_session_summary()
+        if summary["request_count"] > 0:
+            console.print()
+            console.print("[bold]Session Summary:[/bold]")
+            console.print(f"  Total requests: {summary['request_count']}")
+            console.print(f"  Total tokens: {summary['total_tokens']:,}")
+            console.print(f"  Total cost: ${summary['total_cost_usd']:.6f}")
+
+    run_async(run_all_demos())
 
     print_success("Demo completed!")
 

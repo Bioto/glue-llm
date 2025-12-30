@@ -11,7 +11,7 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any, TypeVar
 
-from gluellm.logging_config import get_logger
+from gluellm.observability.logging_config import get_logger
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -115,8 +115,10 @@ def log_async_function_call(
 
 
 @contextmanager
-def log_timing(operation_name: str, logger: logging.Logger | None = None, log_level: int = logging.DEBUG):
+def timed_operation(operation_name: str, logger: logging.Logger | None = None, log_level: int = logging.DEBUG):
     """Context manager for timing operations with logging.
+
+    Alias: log_timing (for backwards compatibility)
 
     Args:
         operation_name: Name of the operation being timed
@@ -124,7 +126,7 @@ def log_timing(operation_name: str, logger: logging.Logger | None = None, log_le
         log_level: Log level to use (default: DEBUG)
 
     Example:
-        >>> with log_timing("database_query"):
+        >>> with timed_operation("database_query"):
         ...     result = db.query(...)
     """
     func_logger = logger or get_logger(__name__)
@@ -135,6 +137,10 @@ def log_timing(operation_name: str, logger: logging.Logger | None = None, log_le
     finally:
         elapsed = time.time() - start_time
         func_logger.log(log_level, f"Completed {operation_name} in {elapsed:.3f}s")
+
+
+# Backwards compatibility alias
+log_timing = timed_operation
 
 
 @contextmanager

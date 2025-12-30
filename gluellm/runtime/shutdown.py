@@ -9,7 +9,7 @@ import signal
 import threading
 from collections.abc import Awaitable, Callable
 
-from gluellm.logging_config import get_logger
+from gluellm.observability.logging_config import get_logger
 
 logger = get_logger(__name__)
 

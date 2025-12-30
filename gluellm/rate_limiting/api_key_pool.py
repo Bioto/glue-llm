@@ -9,9 +9,9 @@ import os
 from collections import defaultdict
 
 from gluellm.config import settings
-from gluellm.logging_config import get_logger
 from gluellm.models.batch import APIKeyConfig as BatchAPIKeyConfig
-from gluellm.rate_limiter import acquire_rate_limit, get_rate_limiter
+from gluellm.observability.logging_config import get_logger
+from gluellm.rate_limiting.rate_limiter import acquire_rate_limit, get_rate_limiter
 
 logger = get_logger(__name__)
 

@@ -9,9 +9,9 @@ import re
 from typing import Any
 
 from gluellm.executors._base import Executor
-from gluellm.logging_config import get_logger
 from gluellm.models.hook import HookRegistry
 from gluellm.models.workflow import ConsensusConfig
+from gluellm.observability.logging_config import get_logger
 from gluellm.workflows._base import Workflow, WorkflowResult
 
 logger = get_logger(__name__)

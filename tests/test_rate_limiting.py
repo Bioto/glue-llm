@@ -6,10 +6,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gluellm.api_key_pool import APIKeyConfig, APIKeyPool, extract_provider_from_model, get_api_key_env_var
 from gluellm.config import GlueLLMSettings
 from gluellm.models.batch import APIKeyConfig as BatchAPIKeyConfig
-from gluellm.rate_limiter import acquire_rate_limit, clear_rate_limiter_cache, get_rate_limiter
+from gluellm.rate_limiting.api_key_pool import (
+    APIKeyConfig,
+    APIKeyPool,
+    extract_provider_from_model,
+    get_api_key_env_var,
+)
+from gluellm.rate_limiting.rate_limiter import acquire_rate_limit, clear_rate_limiter_cache, get_rate_limiter
 
 
 class TestExtractProviderFromModel:
@@ -218,7 +223,7 @@ class TestRateLimiter:
     @pytest.mark.asyncio
     async def test_acquire_rate_limit_disabled(self):
         """Test that rate limiting is skipped when disabled."""
-        with patch("gluellm.rate_limiter.settings") as mock_settings:
+        with patch("gluellm.rate_limiting.rate_limiter.settings") as mock_settings:
             mock_settings.rate_limit_enabled = False
             # Should return immediately without blocking
             start = time.time()
@@ -230,7 +235,7 @@ class TestRateLimiter:
     async def test_acquire_rate_limit_allows_request(self):
         """Test that rate limiting allows requests within limit."""
         clear_rate_limiter_cache()
-        with patch("gluellm.rate_limiter.settings") as mock_settings:
+        with patch("gluellm.rate_limiting.rate_limiter.settings") as mock_settings:
             mock_settings.rate_limit_enabled = True
             mock_settings.rate_limit_requests_per_minute = 100
             mock_settings.rate_limit_burst = 10
@@ -247,7 +252,7 @@ class TestRateLimiter:
     async def test_acquire_rate_limit_waits_when_limited(self):
         """Test that rate limiting waits when limit is hit."""
         clear_rate_limiter_cache()
-        with patch("gluellm.rate_limiter.settings") as mock_settings:
+        with patch("gluellm.rate_limiting.rate_limiter.settings") as mock_settings:
             mock_settings.rate_limit_enabled = True
             mock_settings.rate_limit_requests_per_minute = 1  # Very low limit
             mock_settings.rate_limit_burst = 1

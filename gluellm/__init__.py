@@ -81,27 +81,17 @@ from gluellm.api import (
     TokenLimitError,
     ToolExecutionResult,
     complete,
+    get_session_summary,
+    reset_session_tracker,
     stream_complete,
     structured_complete,
 )
-from gluellm.api_key_pool import APIKeyPool
 from gluellm.batch import (
     BatchProcessor,
     batch_complete,
     batch_complete_simple,
 )
 from gluellm.config import GlueLLMSettings, get_settings, reload_settings, settings
-from gluellm.context import (
-    clear_correlation_id,
-    clear_request_metadata,
-    get_context_dict,
-    get_correlation_id,
-    get_request_metadata,
-    set_correlation_id,
-    set_request_metadata,
-    with_correlation_id,
-)
-from gluellm.logging_config import setup_logging
 from gluellm.models.batch import (
     APIKeyConfig,
     BatchConfig,
@@ -113,7 +103,19 @@ from gluellm.models.batch import (
 from gluellm.models.config import RequestConfig
 from gluellm.models.conversation import Conversation, Message, Role
 from gluellm.models.prompt import Prompt, SystemPrompt
-from gluellm.shutdown import (
+from gluellm.observability.logging_config import setup_logging
+from gluellm.rate_limiting.api_key_pool import APIKeyPool
+from gluellm.runtime.context import (
+    clear_correlation_id,
+    clear_request_metadata,
+    get_context_dict,
+    get_correlation_id,
+    get_request_metadata,
+    set_correlation_id,
+    set_request_metadata,
+    with_correlation_id,
+)
+from gluellm.runtime.shutdown import (
     ShutdownContext,
     execute_shutdown_callbacks,
     get_in_flight_count,
@@ -156,6 +158,9 @@ __all__ = [
     "structured_complete",
     "ToolExecutionResult",
     "StreamingChunk",
+    # Session Tracking
+    "get_session_summary",
+    "reset_session_tracker",
     # Batch Processing
     "BatchProcessor",
     "batch_complete",

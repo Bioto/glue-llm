@@ -10,7 +10,7 @@ Features:
     - Export cost reports
 
 Example:
-    >>> from gluellm.cost_tracker import CostTracker, get_global_tracker
+    >>> from gluellm.costing import CostTracker, get_global_tracker
     >>>
     >>> # Use global tracker
     >>> tracker = get_global_tracker()
@@ -33,9 +33,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from gluellm.api_key_pool import extract_provider_from_model
-from gluellm.logging_config import get_logger
-from gluellm.pricing_data import calculate_cost
+from gluellm.costing.pricing_data import calculate_cost
+from gluellm.observability.logging_config import get_logger
+from gluellm.rate_limiting.api_key_pool import extract_provider_from_model
 
 logger = get_logger(__name__)
 
@@ -427,6 +427,13 @@ def get_global_tracker() -> CostTracker:
             _global_tracker = CostTracker()
             logger.debug("Created global cost tracker")
         return _global_tracker
+
+
+def reset_global_tracker() -> None:
+    """Reset the global cost tracker instance."""
+    global _global_tracker
+    with _global_tracker_lock:
+        _global_tracker = None
 
 
 def configure_global_tracker(
