@@ -1372,7 +1372,7 @@ async def test_chat_room_workflow_basic():
     """Test basic chat room workflow with discussion and synthesis."""
     alice = MockExecutor(["Alice's first comment", "Alice's second comment", "Alice drafts answer"])
     bob = MockExecutor(["Bob's first comment", "Bob's second comment", "Bob refines answer"])
-    charlie = MockExecutor(["Charlie's first comment", "Charlie's second comment"])
+    charlie = MockExecutor(["Charlie's first comment", "Charlie's second comment", "Charlie refines final answer"])
     moderator = MockExecutor(["CONTINUE", "CONCLUDE"])
 
     workflow = ChatRoomWorkflow(
