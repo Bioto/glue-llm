@@ -115,16 +115,21 @@ class ChatRoomWorkflow(Workflow):
                 logger.info(f"Moderator concluded discussion after round {round_num + 1}")
                 break
 
+        # Track discussion rounds before synthesis
+        discussion_rounds = len(
+            {i.get("round", 0) for i in interactions if i.get("round") and i.get("stage") != "synthesis"}
+        )
+
         # Collaborative synthesis phase: agents work together to create final answer
         final_answer = await self._collaborative_synthesis(initial_input, discussion_history, interactions)
 
         return WorkflowResult(
             final_output=final_answer,
-            iterations=len([i for i in interactions if i.get("round")]),
+            iterations=discussion_rounds,
             agent_interactions=interactions,
             metadata={
                 "participants": [name for name, _ in self.participants],
-                "discussion_rounds": len({i.get("round", 0) for i in interactions if "round" in i}),
+                "discussion_rounds": discussion_rounds,
                 "moderator_concluded": not should_continue if "should_continue" in locals() else False,
             },
         )
@@ -271,7 +276,6 @@ Your draft answer:"""
         interactions.append(
             {
                 "stage": "synthesis",
-                "round": 1,
                 "participant": self.participants[0][0],
                 "action": "draft",
                 "output": current_answer,
@@ -279,7 +283,7 @@ Your draft answer:"""
         )
 
         # Subsequent participants refine the answer
-        for synthesis_round in range(self.config.synthesis_rounds):
+        for _synthesis_round in range(self.config.synthesis_rounds):
             for _idx, (participant_name, executor) in enumerate(self.participants[1:], start=1):
                 refine_prompt = f"""User Query: {initial_input}
 
@@ -301,7 +305,6 @@ Your refined answer:"""
                 interactions.append(
                     {
                         "stage": "synthesis",
-                        "round": synthesis_round + 1,
                         "participant": participant_name,
                         "action": "refine",
                         "input": current_answer,
