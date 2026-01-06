@@ -144,7 +144,7 @@ Please revise the content based on this feedback."""
                 break
 
         return WorkflowResult(
-            final_output=current_output or "",
+            final_output=current_output.final_response or "",
             iterations=iteration + 1,
             agent_interactions=interactions,
             metadata={
