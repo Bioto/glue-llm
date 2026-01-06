@@ -5,7 +5,7 @@ from typing import Annotated
 import pytest
 from pydantic import BaseModel, Field
 
-from gluellm.api import GlueLLM, ToolExecutionResult, complete, structured_complete
+from gluellm.api import ExecutionResult, GlueLLM, complete, structured_complete
 
 # Mark all tests as async
 pytestmark = pytest.mark.asyncio
@@ -53,7 +53,7 @@ class TestBasicCompletion:
             system_prompt="You are a friendly assistant. Always respond with 'Hello!'",
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         assert isinstance(result.final_response, str)
         assert len(result.final_response) > 0
         assert result.tool_calls_made == 0
@@ -68,7 +68,7 @@ class TestBasicCompletion:
 
         result = await client.complete("What is 2+2?")
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         assert isinstance(result.final_response, str)
         assert result.tool_calls_made == 0
 
@@ -79,7 +79,7 @@ class TestBasicCompletion:
             model="openai:gpt-4o-mini",
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         assert isinstance(result.final_response, str)
 
 
@@ -160,7 +160,7 @@ class TestToolExecution:
             tools=[dummy_tool],
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         assert result.tool_calls_made >= 1
         assert len(result.tool_execution_history) >= 1
         assert result.tool_execution_history[0]["tool_name"] == "dummy_tool"
@@ -173,7 +173,7 @@ class TestToolExecution:
             tools=[dummy_tool],
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         assert result.tool_calls_made >= 2
         assert len(result.tool_execution_history) >= 2
 
@@ -185,7 +185,7 @@ class TestToolExecution:
             tools=[math_tool],
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         assert result.tool_calls_made >= 1
 
         # Check tool was called with correct params
@@ -204,7 +204,7 @@ class TestToolExecution:
             execute_tools=False,  # Disable execution
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         # Tools should not be executed when disabled
         assert result.tool_calls_made == 0
 
@@ -218,7 +218,7 @@ class TestToolExecution:
             max_tool_iterations=2,  # Very low limit
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         # Should complete without hanging
         assert result.tool_calls_made <= 2
 
@@ -235,11 +235,11 @@ class TestConversationState:
 
         # First message
         result1 = await client.complete("My name is Alice")
-        assert isinstance(result1, ToolExecutionResult)
+        assert isinstance(result1, ExecutionResult)
 
         # Second message referencing first
         result2 = await client.complete("What is my name?")
-        assert isinstance(result2, ToolExecutionResult)
+        assert isinstance(result2, ExecutionResult)
         # The response should reference Alice (though we can't assert exact text)
         assert len(result2.final_response) > 0
 
@@ -307,7 +307,7 @@ class TestMultipleTools:
             tools=[tool_a, tool_b],
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         assert result.tool_calls_made >= 1
         # Should have used tool_a
         assert any(h["tool_name"] == "tool_a" for h in result.tool_execution_history)
@@ -337,7 +337,7 @@ class TestMultipleTools:
             tools=[get_weather, get_time],
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         # Should use both tools
         tool_names = {h["tool_name"] for h in result.tool_execution_history}
         # At minimum one tool should be called
@@ -376,7 +376,7 @@ class TestErrorHandling:
             tools=[error_tool],
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         # Should handle error gracefully
         if result.tool_execution_history:
             # Error should be captured in result
@@ -588,7 +588,7 @@ class TestToolResultSerialization:
             tools=[int_tool],
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         if result.tool_execution_history:
             # Integer result should be converted to string
             assert isinstance(result.tool_execution_history[0]["result"], str)
@@ -607,7 +607,7 @@ class TestToolResultSerialization:
             tools=[list_tool],
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         if result.tool_execution_history:
             # List result should be converted to string
             assert isinstance(result.tool_execution_history[0]["result"], str)
@@ -626,7 +626,7 @@ class TestToolResultSerialization:
             tools=[dict_tool],
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         if result.tool_execution_history:
             # Dict result should be converted to string
             assert isinstance(result.tool_execution_history[0]["result"], str)
@@ -648,7 +648,7 @@ class TestToolResultSerialization:
             tools=[none_tool],
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         if result.tool_execution_history:
             # None result should be converted to string
             assert isinstance(result.tool_execution_history[0]["result"], str)
@@ -669,7 +669,7 @@ class TestToolResultSerialization:
             max_tool_iterations=1,  # Limit iterations for this test
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         if result.tool_execution_history:
             # Large result should still be serialized
             assert isinstance(result.tool_execution_history[0]["result"], str)
@@ -688,7 +688,7 @@ class TestToolResultSerialization:
             tools=[special_char_tool],
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         if result.tool_execution_history:
             # Special characters should be preserved in string conversion
             assert isinstance(result.tool_execution_history[0]["result"], str)
@@ -707,7 +707,7 @@ class TestToolResultSerialization:
             tools=[unicode_tool],
         )
 
-        assert isinstance(result, ToolExecutionResult)
+        assert isinstance(result, ExecutionResult)
         if result.tool_execution_history:
             # Unicode should be preserved
             assert isinstance(result.tool_execution_history[0]["result"], str)

@@ -7,7 +7,7 @@ including simple and agent-based execution strategies.
 from collections.abc import Callable
 from typing import Optional
 
-from gluellm.api import GlueLLM
+from gluellm.api import ExecutionResult, GlueLLM
 from gluellm.config import settings
 from gluellm.models.agent import Agent
 
@@ -64,14 +64,14 @@ class SimpleExecutor(Executor):
         self.tools = tools
         self.max_tool_iterations = max_tool_iterations
 
-    async def _execute_internal(self, query: str) -> str:
+    async def _execute_internal(self, query: str) -> ExecutionResult:
         """Execute a query using the configured LLM.
 
         Args:
             query: The query string to process
 
         Returns:
-            str: The LLM's final response
+            ExecutionResult: The result of the execution
         """
         client = GlueLLM(
             model=self.model,
@@ -79,8 +79,7 @@ class SimpleExecutor(Executor):
             tools=self.tools,
             max_tool_iterations=self.max_tool_iterations,
         )
-        result = await client.complete(query)
-        return result.final_response
+        return await client.complete(query)
 
 
 class AgentExecutor(Executor):
@@ -125,7 +124,7 @@ class AgentExecutor(Executor):
         super().__init__(hook_registry=hook_registry)
         self.agent = agent
 
-    async def _execute_internal(self, query: str) -> str:
+    async def _execute_internal(self, query: str) -> ExecutionResult:
         """Execute a query using the agent's configuration.
 
         Args:
@@ -140,8 +139,7 @@ class AgentExecutor(Executor):
             tools=self.agent.tools,
             max_tool_iterations=self.agent.max_tool_iterations,
         )
-        result = await client.complete(query)
-        return result.final_response
+        return await client.complete(query)
 
 
 __all__ = [

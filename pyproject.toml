@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gluellm"
-version = "1.0.0"
+version = "1.0.2"
 description = "A high-level Python SDK for Large Language Models with automatic tool execution, structured output support, and multi-agent workflows"
 readme = "README.md"
 license = {text = "MIT"}
@@ -60,8 +60,10 @@ Documentation = "https://github.com/Bioto/glue-llm#readme"
 Repository = "https://github.com/Bioto/glue-llm"
 Issues = "https://github.com/Bioto/glue-llm/issues"
 
-[tool.setuptools]
-packages = ["gluellm"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gluellm*"]
+namespaces = false
 
 [project.scripts]
 gluellm = "gluellm.cli:cli"

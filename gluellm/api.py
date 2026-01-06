@@ -737,7 +737,7 @@ async def _llm_call_with_retry(
     )
 
 
-class ToolExecutionResult(BaseModel):
+class ExecutionResult(BaseModel):
     """Result of a tool execution loop."""
 
     final_response: Annotated[str, Field(description="The final text response from the model")]
@@ -811,7 +811,7 @@ class GlueLLM:
         correlation_id: str | None = None,
         timeout: float | None = None,
         api_key: str | None = None,
-    ) -> ToolExecutionResult:
+    ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
 
         Args:
@@ -1058,7 +1058,7 @@ class GlueLLM:
                         correlation_id=correlation_id,
                     )
 
-                    return ToolExecutionResult(
+                    return ExecutionResult(
                         final_response=final_content,
                         tool_calls_made=tool_calls_made,
                         tool_execution_history=tool_execution_history,
@@ -1082,7 +1082,7 @@ class GlueLLM:
                     correlation_id=correlation_id,
                 )
 
-                return ToolExecutionResult(
+                return ExecutionResult(
                     final_response=final_content,
                     tool_calls_made=tool_calls_made,
                     tool_execution_history=tool_execution_history,
@@ -1531,7 +1531,7 @@ async def complete(
     max_tool_iterations: int | None = None,
     correlation_id: str | None = None,
     timeout: float | None = None,
-) -> ToolExecutionResult:
+) -> ExecutionResult:
     """Quick completion with automatic tool execution.
 
     Args:
