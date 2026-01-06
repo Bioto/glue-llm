@@ -70,6 +70,7 @@ def setup_logging(
         force: Force reconfiguration even if logging is already configured
 
     Environment Variables:
+        GLUELLM_DISABLE_LOGGING: Disable all GlueLLM logging setup (set to 'true' or '1')
         GLUELLM_LOG_LEVEL: Override console log level
         GLUELLM_LOG_FILE_LEVEL: Override file log level
         GLUELLM_LOG_DIR: Override log directory
@@ -80,10 +81,17 @@ def setup_logging(
         GLUELLM_CONSOLE_OUTPUT: Enable console output (set to 'true' or '1')
 
     Note:
-        When using GlueLLM as a library, leave console_output=False to let
-        the parent application control console logging. Only enable for
-        standalone usage or debugging.
+        When using GlueLLM as a library, you have two options:
+        1. Set GLUELLM_DISABLE_LOGGING=true to completely disable GlueLLM's logging setup
+           and use your application's logging configuration
+        2. Leave console_output=False (default) to only log to files
+
+        For standalone usage or debugging, enable console_output=True.
     """
+    # Check if logging is disabled via environment variable
+    if os.getenv("GLUELLM_DISABLE_LOGGING", "false").lower() in ("true", "1", "yes"):
+        return
+
     # Check if logging is already configured
     root_logger = logging.getLogger()
     if root_logger.handlers and not force:
@@ -206,15 +214,24 @@ def get_logger(name: str) -> logging.Logger:
     before returning a logger instance. The logger automatically includes
     correlation IDs in log records via filters on handlers.
 
+    If GLUELLM_DISABLE_LOGGING=true is set, this will NOT configure logging
+    and will return a standard logger that uses the parent application's
+    logging configuration.
+
     Args:
         name: Logger name (typically __name__)
 
     Returns:
         logging.Logger: Configured logger instance with correlation ID support
+
+    Environment Variables:
+        GLUELLM_DISABLE_LOGGING: Skip automatic logging setup (set to 'true' or '1')
     """
-    # Ensure logging is configured
-    root_logger = logging.getLogger()
-    if not root_logger.handlers:
-        setup_logging()
+    # Check if automatic logging setup is disabled
+    if os.getenv("GLUELLM_DISABLE_LOGGING", "false").lower() not in ("true", "1", "yes"):
+        # Only auto-configure if not explicitly disabled
+        root_logger = logging.getLogger()
+        if not root_logger.handlers:
+            setup_logging()
 
     return logging.getLogger(name)
