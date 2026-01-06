@@ -278,7 +278,7 @@ async def example_6_retry_failed():
 async def main():
     """Run all examples."""
     # Setup logging with force=True to ensure filter is applied to all loggers
-    setup_logging(force=True)
+    setup_logging(console_output=True, force=True)  # Enable console for demonstration
 
     print("\n" + "=" * 60)
     print("GlueLLM Batch Processing Examples")

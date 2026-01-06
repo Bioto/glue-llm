@@ -13,7 +13,7 @@ Available Settings:
     - Tool Execution: max_tool_iterations
     - Retry Behavior: retry_max_attempts, retry_min_wait, retry_max_wait, retry_multiplier
     - Request Timeout: default_request_timeout, max_request_timeout
-    - Logging: log_level, log_file_level, log_dir, log_file_name, log_json_format, log_max_bytes, log_backup_count
+    - Logging: log_level, log_file_level, log_dir, log_file_name, log_json_format, log_max_bytes, log_backup_count, log_console_output
     - API Keys: openai_api_key, anthropic_api_key, xai_api_key
     - Tracing: enable_tracing, mlflow_tracking_uri, mlflow_experiment_name, otel_exporter_endpoint
 
@@ -82,6 +82,7 @@ class GlueLLMSettings(BaseSettings):
     log_json_format: bool = False
     log_max_bytes: int = 10485760  # 10MB
     log_backup_count: int = 5
+    log_console_output: bool = False  # Disabled by default for library usage
 
     # Optional API keys (can also be set via provider-specific env vars)
     openai_api_key: str | None = None

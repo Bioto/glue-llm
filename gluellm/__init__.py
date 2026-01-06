@@ -145,6 +145,7 @@ def _initialize_logging() -> None:
             log_json_format=settings.log_json_format,
             log_max_bytes=settings.log_max_bytes,
             log_backup_count=settings.log_backup_count,
+            console_output=settings.log_console_output,
         )
         _setup_logging_called = True
 

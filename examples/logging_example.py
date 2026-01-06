@@ -89,6 +89,7 @@ async def example_json_logging():
             log_level=settings.log_level,
             log_file_level=settings.log_file_level,
             log_json_format=True,
+            console_output=True,  # Enable console for demonstration
             force=True,
         )
 
@@ -112,6 +113,7 @@ async def example_json_logging():
             log_level=settings.log_level,
             log_file_level=settings.log_file_level,
             log_json_format=original_json_format,
+            console_output=True,  # Enable console for demonstration
             force=True,
         )
 
