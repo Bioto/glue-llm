@@ -122,18 +122,18 @@ Please revise the content based on this feedback."""
                     "iteration": iteration + 1,
                     "agent": "producer",
                     "input": producer_input,
-                    "output": current_output,
+                    "output": current_output.final_response,
                 }
             )
 
             # Execute critics in parallel
-            critique = await self._execute_critics_parallel(current_output, iteration + 1, interactions)
+            critique = await self._execute_critics_parallel(current_output.final_response, iteration + 1, interactions)
 
             # Check convergence criteria
             should_stop = False
             if self.config.quality_evaluator and self.config.min_quality_score is not None:
                 try:
-                    score = self.config.quality_evaluator(current_output, critique)
+                    score = self.config.quality_evaluator(current_output.final_response, critique)
                     if score >= self.config.min_quality_score:
                         should_stop = True
                 except Exception:
