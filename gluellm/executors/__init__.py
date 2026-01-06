@@ -5,13 +5,17 @@ including simple and agent-based execution strategies.
 """
 
 from collections.abc import Callable
-from typing import Optional
+from typing import Optional, TypeVar
+
+from pydantic import BaseModel
 
 from gluellm.api import ExecutionResult, GlueLLM
 from gluellm.config import settings
 from gluellm.models.agent import Agent
 
 from ._base import Executor
+
+T = TypeVar("T", bound=Executor)
 
 
 class SimpleExecutor(Executor):
@@ -140,6 +144,25 @@ class AgentExecutor(Executor):
             max_tool_iterations=self.agent.max_tool_iterations,
         )
         return await client.complete(query)
+
+
+class AgentStructuredExecutor(Executor):
+    """Executor that uses a configured Agent for query processing and returns structured output."""
+
+    def __init__(self, agent: Agent, response_format: type[T], hook_registry=None):
+        super().__init__(hook_registry=hook_registry)
+        self.agent = agent
+        self.response_format = response_format
+
+    async def _execute_internal(self, query: str) -> ExecutionResult:
+        """Execute a query using the agent's configuration and return structured output."""
+        client = GlueLLM(
+            model=self.agent.model,
+            system_prompt=self.agent.system_prompt.content if self.agent.system_prompt else None,
+            tools=self.agent.tools,
+            max_tool_iterations=self.agent.max_tool_iterations,
+        )
+        return await client.structured_complete(query, self.response_format)
 
 
 __all__ = [
