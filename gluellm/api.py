@@ -81,6 +81,7 @@ from gluellm.rate_limiting.api_key_pool import extract_provider_from_model
 from gluellm.rate_limiting.rate_limiter import acquire_rate_limit
 from gluellm.runtime.context import clear_correlation_id, get_correlation_id, set_correlation_id
 from gluellm.runtime.shutdown import ShutdownContext, is_shutting_down, register_shutdown_callback
+from gluellm.schema import create_openai_response_format
 from gluellm.telemetry import (
     is_tracing_enabled,
     log_llm_metrics,
@@ -555,6 +556,19 @@ async def _safe_llm_call(
     )
     await acquire_rate_limit(rate_limit_key)
 
+    # Normalize Pydantic model schema for OpenAI compatibility
+    # This fixes issues with union types, additionalProperties, etc. that cause
+    # "True is not of type 'array'" and similar schema validation errors
+    normalized_response_format: dict[str, Any] | None = None
+    if response_format is not None:
+        try:
+            normalized_response_format = create_openai_response_format(response_format)
+            logger.debug(f"Normalized schema for {response_format.__name__}")
+        except Exception as e:
+            # Fall back to passing the Pydantic model directly if normalization fails
+            logger.warning(f"Schema normalization failed for {response_format.__name__}: {e}")
+            normalized_response_format = None
+
     start_time = time.time()
     logger.debug(
         f"Making LLM call: model={model}, stream={stream}, has_tools={bool(tools)}, "
@@ -579,12 +593,13 @@ async def _safe_llm_call(
             # Use context manager for temporary API key
             with _temporary_api_key(model, api_key):
                 # Make LLM call with timeout
+                # Use normalized schema if available, otherwise fall back to Pydantic model
                 response = await asyncio.wait_for(
                     any_llm_acompletion(
                         messages=messages,
                         model=model,
                         tools=tools if tools else None,
-                        response_format=response_format,
+                        response_format=normalized_response_format if normalized_response_format else response_format,
                         stream=stream,
                     ),
                     timeout=timeout,
