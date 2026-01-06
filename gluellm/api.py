@@ -807,6 +807,7 @@ class GlueLLM:
     async def complete(
         self,
         user_message: str,
+        model: str | None = None,
         execute_tools: bool = True,
         correlation_id: str | None = None,
         timeout: float | None = None,
@@ -873,7 +874,7 @@ class GlueLLM:
                     try:
                         response = await _llm_call_with_retry(
                             messages=messages,
-                            model=self.model,
+                            model=model or self.model,
                             tools=self.tools if self.tools else None,
                             timeout=timeout,
                             api_key=api_key,
@@ -1053,7 +1054,7 @@ class GlueLLM:
 
                     # Calculate cost and record to session tracker
                     estimated_cost = _calculate_and_record_cost(
-                        model=self.model,
+                        model=model or self.model,
                         tokens_used=tokens_used,
                         correlation_id=correlation_id,
                     )
@@ -1099,6 +1100,7 @@ class GlueLLM:
         self,
         user_message: str,
         response_format: type[T],
+        model: str | None = None,
         correlation_id: str | None = None,
         timeout: float | None = None,
         api_key: str | None = None,
@@ -1156,19 +1158,19 @@ class GlueLLM:
 
                 # Call with response_format (no tools for structured output)
                 logger.debug(
-                    f"Starting structured completion: model={self.model}, response_format={response_format.__name__}"
+                    f"Starting structured completion: model={model or self.model}, response_format={response_format.__name__}"
                 )
                 try:
                     response = await _llm_call_with_retry(
                         messages=messages,
-                        model=self.model,
+                        model=model or self.model,
                         response_format=response_format,
                         timeout=timeout,
                         api_key=api_key,
                     )
                 except LLMError as e:
                     logger.error(
-                        f"Structured completion failed: model={self.model}, "
+                        f"Structured completion failed: model={model or self.model}, "
                         f"response_format={response_format.__name__}, error={e}"
                     )
                     raise
@@ -1235,6 +1237,7 @@ class GlueLLM:
         self,
         user_message: str,
         execute_tools: bool = True,
+        model: str | None = None,
     ) -> AsyncIterator[StreamingChunk]:
         """Stream completion with automatic tool execution.
 
@@ -1308,7 +1311,7 @@ class GlueLLM:
                 # With tools: get full response first to check for tool calls
                 response = await _llm_call_with_retry(
                     messages=messages,
-                    model=self.model,
+                    model=model or self.model,
                     tools=self.tools if self.tools else None,
                 )
             except LLMError as e:
