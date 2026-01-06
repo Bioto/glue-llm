@@ -780,6 +780,14 @@ class ExecutionResult(BaseModel):
         ),
     ]
 
+    def __len__(self) -> int:
+        """Return the length of the final response or tool execution history."""
+        if hasattr(self, "final_response") and self.final_response:
+            return len(str(self.final_response))
+        if hasattr(self, "tool_execution_history") and self.tool_execution_history:
+            return len(self.tool_execution_history)
+        return 0
+
 
 class StreamingChunk(BaseModel):
     """A chunk of streaming response."""
