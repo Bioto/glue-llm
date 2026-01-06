@@ -78,17 +78,20 @@ async def example_structured_output():
     print("Example 3: Structured Output")
     print("=" * 60)
 
-    person = await structured_complete(
+    result = await structured_complete(
         user_message="Extract information about: John Smith is a 35 year old software engineer living in Seattle.",
         response_format=PersonInfo,
         system_prompt="You are a data extraction assistant. Extract structured information from the text.",
     )
 
+    person = result.structured_output
     print(f"Name: {person.name}")
     print(f"Age: {person.age}")
     print(f"Occupation: {person.occupation}")
     print(f"City: {person.city}")
     print(f"\nFull object: {person}")
+    print(f"Tokens used: {result.tokens_used}")
+    print(f"Cost: ${result.estimated_cost_usd:.6f}" if result.estimated_cost_usd else "Cost: N/A")
     print()
 
 

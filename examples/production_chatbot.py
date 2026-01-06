@@ -148,7 +148,8 @@ async def chatbot_example():
     """
 
     try:
-        ticket = await ticket_client.structured_complete(ticket_message, response_format=SupportTicket)
+        result = await ticket_client.structured_complete(ticket_message, response_format=SupportTicket)
+        ticket = result.structured_output
         print("\nExtracted Ticket:")
         print(f"  Customer ID: {ticket.customer_id}")
         print(f"  Issue Type: {ticket.issue_type}")
