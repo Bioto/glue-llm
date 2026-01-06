@@ -16,21 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `console_output` parameter for `setup_logging()` to control console handler
 - New `log_console_output` configuration setting and `GLUELLM_LOG_CONSOLE_OUTPUT` environment variable
 - **New `GLUELLM_DISABLE_LOGGING` environment variable** to completely disable GlueLLM's logging setup for full application control
+- **Tool support for structured completions**: `structured_complete()` and `GlueLLM.structured_complete()` now accept `tools`, `execute_tools`, and `max_tool_iterations` parameters, allowing the LLM to call tools to gather information before returning structured output
 
 ### Changed
 - **BREAKING**: Console logging is now disabled by default in `setup_logging()` to avoid conflicts when GlueLLM is used as a library. Set `console_output=True` or `GLUELLM_LOG_CONSOLE_OUTPUT=true` to enable console output.
 - Logging now respects parent application's logging configuration by default
 - `get_logger()` now checks `GLUELLM_DISABLE_LOGGING` before auto-configuring logging
-
-### Deprecated
-
-### Removed
-
-### Fixed
-
-### Security
-
-## [0.1.0] - 2024-01-XX
 
 ### Added
 - Initial release of GlueLLM
@@ -42,6 +33,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive CLI with demo commands
 - Error classification and automatic retry with exponential backoff
 - Configuration management with pydantic-settings
-
-[Unreleased]: https://github.com/yourusername/gluellm/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/yourusername/gluellm/releases/tag/v0.1.0
