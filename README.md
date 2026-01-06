@@ -279,6 +279,9 @@ person = await structured_complete(
     response_format=PersonInfo,
     model="openai:gpt-4o-mini",          # Optional
     system_prompt="Extract data.",       # Optional
+    tools=[lookup_tool],                 # Optional - can call tools before returning structured output
+    execute_tools=True,                  # Optional, default True
+    max_tool_iterations=10,              # Optional
 )
 ```
 
@@ -612,6 +615,77 @@ person = await structured_complete(
     response_format=Person,
 )
 ```
+
+### Structured Output with Tools
+
+The LLM can call tools to gather information before returning structured output. This is powerful for scenarios where you need to fetch data, perform calculations, or verify information before generating the final structured response.
+
+```python
+from pydantic import BaseModel, Field
+from typing import Annotated
+
+class WeatherReport(BaseModel):
+    location: Annotated[str, Field(description="City name")]
+    temperature: Annotated[float, Field(description="Temperature in Celsius")]
+    conditions: Annotated[str, Field(description="Weather conditions")]
+    recommendation: Annotated[str, Field(description="Activity recommendation")]
+
+def get_weather(city: str) -> dict:
+    """Fetch current weather for a city."""
+    # In production, this would call a real weather API
+    return {"temp": 18, "conditions": "sunny"}
+
+# LLM will call get_weather tool, then return structured output
+report = await structured_complete(
+    user_message="Get the weather for San Francisco and provide a report with recommendations",
+    response_format=WeatherReport,
+    tools=[get_weather],
+)
+
+print(f"🌡️  {report.location}: {report.temperature}°C, {report.conditions}")
+print(f"💡 {report.recommendation}")
+print(f"🔧 Tools called: {report.tool_calls_made}")
+```
+
+**How it works:**
+1. The LLM receives your request and the structured output format
+2. If tools are needed, the LLM calls them to gather information
+3. Tool results are fed back to the LLM (automatic iteration)
+4. Once the LLM has sufficient information, it returns the structured output
+5. You get type-safe, validated data plus execution metadata
+
+**Example with multiple tool calls:**
+
+```python
+class Analysis(BaseModel):
+    summary: str
+    data_points: list[dict]
+    conclusion: str
+
+def query_database(table: str, filter: str) -> list[dict]:
+    """Query a database table."""
+    # Mock implementation
+    return [{"id": 1, "value": 42}, {"id": 2, "value": 73}]
+
+def calculate_stats(data: list[dict]) -> dict:
+    """Calculate statistics on data."""
+    values = [d["value"] for d in data]
+    return {"mean": sum(values) / len(values), "count": len(values)}
+
+# LLM will orchestrate multiple tool calls as needed
+analysis = await structured_complete(
+    user_message="Analyze the sales data from Q4 and provide insights",
+    response_format=Analysis,
+    tools=[query_database, calculate_stats],
+    max_tool_iterations=10,  # Allow multiple rounds of tool calls
+)
+```
+
+**Use cases:**
+- **Data extraction**: Fetch data from APIs/databases before structuring
+- **Validation**: Verify information using external sources
+- **Calculation**: Perform computations before generating reports
+- **Multi-step reasoning**: Gather evidence before drawing conclusions
 
 ## Batch Processing
 

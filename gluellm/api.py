@@ -1121,15 +1121,24 @@ class GlueLLM:
         user_message: str,
         response_format: type[T],
         model: str | None = None,
+        tools: list[Callable] | None = None,
+        execute_tools: bool = True,
         correlation_id: str | None = None,
         timeout: float | None = None,
         api_key: str | None = None,
     ) -> ExecutionResult:
         """Complete a request and return structured output.
 
+        The LLM can optionally use tools to gather information before returning
+        the final structured output. Tools will be executed in a loop until the
+        LLM returns the structured response.
+
         Args:
             user_message: The user's message/request
             response_format: Pydantic model class for structured output
+            model: Model identifier override (defaults to instance model)
+            tools: List of callable functions to use as tools (defaults to instance tools)
+            execute_tools: Whether to automatically execute tools and loop
             correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
             timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
             api_key: Optional API key override (for key pool usage)
@@ -1163,47 +1172,250 @@ class GlueLLM:
             f"response_format={response_format.__name__}, message_length={len(user_message)}"
         )
 
+        # Determine which tools to use: parameter overrides instance tools
+        tools_to_use = tools if tools is not None else self.tools
+
         # Use shutdown context to track in-flight requests for entire execution
         try:
             with ShutdownContext():
                 # Add user message to conversation
                 self._conversation.add_message(Role.USER, user_message)
 
-                # Build messages
+                # Build initial messages
                 system_message = {
                     "role": "system",
                     "content": self._format_system_prompt(),
                 }
                 messages = [system_message] + self._conversation.messages_dict
 
-                # Call with response_format (no tools for structured output)
-                logger.debug(
-                    f"Starting structured completion: model={model or self.model}, response_format={response_format.__name__}"
-                )
+                tool_execution_history = []
+                tool_calls_made = 0
+                total_tokens_used = None
+                total_cost = 0.0
+
+                # Helper to track token usage and cost
+                def _track_usage(resp):
+                    nonlocal total_tokens_used, total_cost
+                    iteration_tokens = _extract_token_usage(resp)
+                    if iteration_tokens:
+                        if total_tokens_used is None:
+                            total_tokens_used = iteration_tokens.copy()
+                        else:
+                            total_tokens_used["prompt_tokens"] = total_tokens_used.get(
+                                "prompt_tokens", 0
+                            ) + iteration_tokens.get("prompt_tokens", 0)
+                            total_tokens_used["completion_tokens"] = total_tokens_used.get(
+                                "completion_tokens", 0
+                            ) + iteration_tokens.get("completion_tokens", 0)
+                            total_tokens_used["total_tokens"] = total_tokens_used.get(
+                                "total_tokens", 0
+                            ) + iteration_tokens.get("total_tokens", 0)
+                    iteration_cost = _calculate_and_record_cost(
+                        model=model or self.model,
+                        tokens_used=iteration_tokens,
+                        correlation_id=correlation_id,
+                    )
+                    total_cost += iteration_cost
+
+                # PHASE 1: Tool execution loop (if tools are provided and execute_tools is True)
+                if tools_to_use and execute_tools:
+                    logger.debug(
+                        f"Starting tool execution phase: max_iterations={self.max_tool_iterations}, "
+                        f"tools_available={len(tools_to_use)}"
+                    )
+                    for iteration in range(self.max_tool_iterations):
+                        logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
+
+                        try:
+                            response = await _llm_call_with_retry(
+                                messages=messages,
+                                model=model or self.model,
+                                tools=tools_to_use,
+                                # No response_format during tool phase
+                                timeout=timeout,
+                                api_key=api_key,
+                            )
+                        except LLMError as e:
+                            logger.error(f"LLM call failed on iteration {iteration + 1}: {e}")
+                            raise type(e)(f"Failed during tool execution (iteration {iteration + 1}): {e}") from e
+
+                        _track_usage(response)
+
+                        if not response.choices:
+                            raise InvalidRequestError("Empty response from LLM provider")
+
+                        # Check if model wants to call tools
+                        if response.choices[0].message.tool_calls:
+                            tool_calls = response.choices[0].message.tool_calls
+                            logger.info(f"Iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
+
+                            # Add assistant message with tool calls to history
+                            messages.append(response.choices[0].message)
+
+                            # Execute each tool call
+                            for tool_call in tool_calls:
+                                tool_calls_made += 1
+                                tool_name = tool_call.function.name
+
+                                try:
+                                    tool_args = json.loads(tool_call.function.arguments)
+                                except json.JSONDecodeError as e:
+                                    error_msg = f"Invalid JSON in tool arguments: {str(e)}"
+                                    logger.warning(f"Tool {tool_name} - {error_msg}")
+                                    tool_execution_history.append(
+                                        {
+                                            "tool_name": tool_name,
+                                            "arguments": tool_call.function.arguments,
+                                            "result": error_msg,
+                                            "error": True,
+                                        }
+                                    )
+                                    messages.append(
+                                        {
+                                            "role": "tool",
+                                            "tool_call_id": tool_call.id,
+                                            "content": error_msg,
+                                        }
+                                    )
+                                    continue
+
+                                # Find and execute the tool
+                                tool_func = self._find_tool(tool_name, tools_to_use)
+                                if tool_func:
+                                    tool_start_time = time.time()
+                                    try:
+                                        if asyncio.iscoroutinefunction(tool_func):
+                                            logger.debug(f"Executing async tool: {tool_name}")
+                                            tool_result = await tool_func(**tool_args)
+                                        else:
+                                            logger.debug(f"Executing sync tool: {tool_name}")
+                                            tool_result = tool_func(**tool_args)
+                                        tool_result_str = str(tool_result)
+                                        tool_elapsed = time.time() - tool_start_time
+                                        logger.info(f"Tool {tool_name} executed successfully in {tool_elapsed:.3f}s")
+
+                                        tool_execution_history.append(
+                                            {
+                                                "tool_name": tool_name,
+                                                "arguments": tool_args,
+                                                "result": tool_result_str,
+                                                "error": False,
+                                            }
+                                        )
+
+                                        if is_tracing_enabled():
+                                            from gluellm.telemetry import _tracer
+
+                                            if _tracer is not None:
+                                                with _tracer.start_as_current_span(f"tool.{tool_name}") as tool_span:
+                                                    set_span_attributes(
+                                                        tool_span,
+                                                        **{
+                                                            "tool.name": tool_name,
+                                                            "tool.arg_count": len(tool_args),
+                                                            "tool.success": True,
+                                                        },
+                                                    )
+                                    except Exception as e:
+                                        tool_elapsed = time.time() - tool_start_time
+                                        tool_result_str = f"Error executing tool: {type(e).__name__}: {str(e)}"
+                                        logger.warning(
+                                            f"Tool {tool_name} execution failed after {tool_elapsed:.3f}s: {e}",
+                                            exc_info=True,
+                                        )
+
+                                        tool_execution_history.append(
+                                            {
+                                                "tool_name": tool_name,
+                                                "arguments": tool_args,
+                                                "result": tool_result_str,
+                                                "error": True,
+                                            }
+                                        )
+
+                                        if is_tracing_enabled():
+                                            from gluellm.telemetry import _tracer
+
+                                            if _tracer is not None:
+                                                with _tracer.start_as_current_span(f"tool.{tool_name}") as tool_span:
+                                                    set_span_attributes(
+                                                        tool_span,
+                                                        **{
+                                                            "tool.name": tool_name,
+                                                            "tool.arg_count": len(tool_args),
+                                                            "tool.success": False,
+                                                            "tool.error": str(e),
+                                                        },
+                                                    )
+
+                                    messages.append(
+                                        {
+                                            "role": "tool",
+                                            "tool_call_id": tool_call.id,
+                                            "content": tool_result_str,
+                                        }
+                                    )
+                                else:
+                                    error_msg = f"Tool '{tool_name}' not found"
+                                    logger.warning(error_msg)
+                                    tool_execution_history.append(
+                                        {
+                                            "tool_name": tool_name,
+                                            "arguments": tool_args,
+                                            "result": error_msg,
+                                            "error": True,
+                                        }
+                                    )
+                                    messages.append(
+                                        {
+                                            "role": "tool",
+                                            "tool_call_id": tool_call.id,
+                                            "content": error_msg,
+                                        }
+                                    )
+                            # Continue to next iteration
+                        else:
+                            # LLM didn't call any tools - it has enough info, break out of tool loop
+                            logger.debug(f"LLM finished with tools after {iteration + 1} iteration(s)")
+                            # Add the assistant's response to messages so structured output call has context
+                            if response.choices[0].message.content:
+                                messages.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": response.choices[0].message.content,
+                                    }
+                                )
+                            break
+                    else:
+                        # Exhausted all iterations with tool calls - still need structured output
+                        logger.debug(f"Reached max tool iterations ({self.max_tool_iterations})")
+
+                # PHASE 2: Final structured output call
+                logger.debug(f"Requesting structured output: response_format={response_format.__name__}")
                 try:
                     response = await _llm_call_with_retry(
                         messages=messages,
                         model=model or self.model,
                         response_format=response_format,
+                        # No tools during structured output phase
                         timeout=timeout,
                         api_key=api_key,
                     )
                 except LLMError as e:
-                    logger.error(
-                        f"Structured completion failed: model={model or self.model}, "
-                        f"response_format={response_format.__name__}, error={e}"
-                    )
-                    raise
+                    logger.error(f"Structured output call failed: {e}")
+                    raise type(e)(f"Failed during structured output request: {e}") from e
 
-                # Validate response has choices
+                _track_usage(response)
+
                 if not response.choices:
                     raise InvalidRequestError("Empty response from LLM provider")
 
                 # Parse the response
-                parsed = response.choices[0].message.parsed
+                parsed = getattr(response.choices[0].message, "parsed", None)
                 content = response.choices[0].message.content
                 logger.debug(
-                    f"Structured response received: parsed_type={type(parsed)}, content_length={len(content) if content else 0}"
+                    f"Structured response received: parsed_type={type(parsed)}, "
+                    f"content_length={len(content) if content else 0}"
                 )
 
                 # Add assistant response to conversation
@@ -1228,29 +1440,18 @@ class GlueLLM:
                         logger.warning(f"Failed to parse structured response from content: {e}")
                         structured_output = parsed
                 else:
-                    # Last resort: use parsed as-is
                     logger.warning(f"Using parsed response as-is (type: {type(parsed)})")
                     structured_output = parsed
 
-                # Extract token usage
-                tokens_used = _extract_token_usage(response)
-                if tokens_used:
-                    logger.debug(f"Token usage: {tokens_used}")
-
-                # Calculate cost and record to session tracker
-                estimated_cost = _calculate_and_record_cost(
-                    model=model or self.model,
-                    tokens_used=tokens_used,
-                    correlation_id=correlation_id,
-                )
+                logger.info(f"Structured completion finished: tool_calls={tool_calls_made}, cost=${total_cost:.6f}")
 
                 return ExecutionResult(
                     final_response=content or "",
-                    tool_calls_made=0,
-                    tool_execution_history=[],
+                    tool_calls_made=tool_calls_made,
+                    tool_execution_history=tool_execution_history,
                     raw_response=response,
-                    tokens_used=tokens_used,
-                    estimated_cost_usd=estimated_cost,
+                    tokens_used=total_tokens_used,
+                    estimated_cost_usd=total_cost,
                     model=model or self.model,
                     structured_output=structured_output,
                 )
@@ -1267,9 +1468,18 @@ class GlueLLM:
             tools=self.tools,
         ).strip()
 
-    def _find_tool(self, tool_name: str) -> Callable | None:
-        """Find a tool by name."""
-        for tool in self.tools:
+    def _find_tool(self, tool_name: str, tools: list[Callable] | None = None) -> Callable | None:
+        """Find a tool by name.
+
+        Args:
+            tool_name: Name of the tool to find
+            tools: Optional list of tools to search (defaults to self.tools)
+
+        Returns:
+            The tool function if found, None otherwise
+        """
+        tools_to_search = tools if tools is not None else self.tools
+        for tool in tools_to_search:
             if tool.__name__ == tool_name:
                 return tool
         return None
@@ -1607,16 +1817,26 @@ async def structured_complete(
     response_format: type[T],
     model: str | None = None,
     system_prompt: str | None = None,
+    tools: list[Callable] | None = None,
+    execute_tools: bool = True,
+    max_tool_iterations: int | None = None,
     correlation_id: str | None = None,
     timeout: float | None = None,
 ) -> ExecutionResult:
-    """Quick structured completion.
+    """Quick structured completion with optional tool support.
+
+    The LLM can optionally use tools to gather information before returning
+    the final structured output. Tools will be executed in a loop until the
+    LLM returns the structured response.
 
     Args:
         user_message: The user's message/request
         response_format: Pydantic model class for structured output
         model: Model identifier in format "provider:model_name" (defaults to settings.default_model)
         system_prompt: System prompt content (defaults to settings.default_system_prompt)
+        tools: List of callable functions to use as tools
+        execute_tools: Whether to automatically execute tools and loop
+        max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
 
@@ -1632,13 +1852,27 @@ async def structured_complete(
         ...     number: int
         ...     reasoning: str
         >>>
+        >>> def get_calculator_result(a: int, b: int) -> int:
+        ...     '''Add two numbers together.'''
+        ...     return a + b
+        >>>
         >>> async def main():
+        ...     # Example 1: Without tools
         ...     result = await structured_complete(
         ...         "What is 2+2?",
         ...         response_format=Answer
         ...     )
         ...     print(f"Answer: {result.structured_output.number}")
         ...     print(f"Reasoning: {result.structured_output.reasoning}")
+        ...
+        ...     # Example 2: With tools - LLM can gather data before returning structured output
+        ...     result = await structured_complete(
+        ...         "Calculate 2+2 using the calculator tool and explain your answer",
+        ...         response_format=Answer,
+        ...         tools=[get_calculator_result]
+        ...     )
+        ...     print(f"Answer: {result.structured_output.number}")
+        ...     print(f"Tools used: {result.tool_calls_made}")
         ...     print(f"Cost: ${result.estimated_cost_usd:.6f}")
         >>>
         >>> asyncio.run(main())
@@ -1646,9 +1880,16 @@ async def structured_complete(
     client = GlueLLM(
         model=model,
         system_prompt=system_prompt,
+        tools=tools,
+        max_tool_iterations=max_tool_iterations,
     )
     return await client.structured_complete(
-        user_message, response_format, correlation_id=correlation_id, timeout=timeout
+        user_message,
+        response_format,
+        tools=tools,
+        execute_tools=execute_tools,
+        correlation_id=correlation_id,
+        timeout=timeout,
     )
 
 

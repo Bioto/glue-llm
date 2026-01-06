@@ -154,6 +154,60 @@ class TestStructuredOutput:
         assert isinstance(result.structured_output.name, str)
         assert isinstance(result.structured_output.hex_code, str)
 
+    async def test_structured_output_with_tools(self):
+        """Test structured output with tool execution."""
+
+        class WeatherInfo(BaseModel):
+            city: Annotated[str, Field(description="City name")]
+            temperature: Annotated[int, Field(description="Temperature in Celsius")]
+            summary: Annotated[str, Field(description="Weather summary")]
+
+        def get_temperature(city: str) -> int:
+            """Get temperature for a city."""
+            # Mock data for testing
+            temps = {"Paris": 18, "Tokyo": 25, "London": 15}
+            return temps.get(city, 20)
+
+        result = await structured_complete(
+            user_message="Get the temperature for Paris and provide a weather summary",
+            response_format=WeatherInfo,
+            tools=[get_temperature],
+            system_prompt="Use the get_temperature tool to get weather data.",
+        )
+
+        assert isinstance(result, ExecutionResult)
+        assert result.structured_output is not None
+        assert isinstance(result.structured_output, WeatherInfo)
+        assert isinstance(result.structured_output.city, str)
+        assert isinstance(result.structured_output.temperature, int)
+        assert isinstance(result.structured_output.summary, str)
+        # Verify that tools were actually called
+        assert result.tool_calls_made >= 1
+        assert len(result.tool_execution_history) >= 1
+
+    async def test_structured_output_with_multiple_tool_calls(self):
+        """Test structured output with multiple tool calls."""
+
+        class MathResult(BaseModel):
+            calculation: Annotated[str, Field(description="The calculation performed")]
+            result: Annotated[int, Field(description="The result")]
+            explanation: Annotated[str, Field(description="Explanation of steps")]
+
+        result = await structured_complete(
+            user_message="Calculate 5 + 3 and 10 * 2 using the math_tool, then provide a summary",
+            response_format=MathResult,
+            tools=[math_tool],
+            system_prompt="Use math_tool to perform calculations.",
+        )
+
+        assert isinstance(result, ExecutionResult)
+        assert result.structured_output is not None
+        assert isinstance(result.structured_output, MathResult)
+        assert isinstance(result.structured_output.calculation, str)
+        assert isinstance(result.structured_output.result, int)
+        # Should have called the tool at least once
+        assert result.tool_calls_made >= 1
+
 
 class TestToolExecution:
     """Test automatic tool execution."""
