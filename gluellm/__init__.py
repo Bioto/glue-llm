@@ -72,6 +72,7 @@ Exceptions:
 from gluellm.api import (
     APIConnectionError,
     AuthenticationError,
+    ExecutionResult,
     GlueLLM,
     InvalidRequestError,
     # Exceptions
@@ -79,7 +80,6 @@ from gluellm.api import (
     RateLimitError,
     StreamingChunk,
     TokenLimitError,
-    ToolExecutionResult,
     complete,
     embed,
     get_session_summary,
@@ -159,7 +159,7 @@ __all__ = [
     "embed",
     "stream_complete",
     "structured_complete",
-    "ToolExecutionResult",
+    "ExecutionResult",
     "EmbeddingResult",
     "StreamingChunk",
     # Session Tracking

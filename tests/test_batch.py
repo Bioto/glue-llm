@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from gluellm.api import ToolExecutionResult
+from gluellm.api import ExecutionResult
 from gluellm.batch import BatchProcessor, batch_complete, batch_complete_simple
 from gluellm.models.batch import (
     APIKeyConfig,
@@ -140,7 +140,7 @@ class TestBatchProcessor:
         with patch("gluellm.batch.GlueLLM") as mock_gluellm:
             mock_client = AsyncMock()
             mock_client.complete = AsyncMock(
-                return_value=ToolExecutionResult(
+                return_value=ExecutionResult(
                     final_response="Response",
                     tool_calls_made=0,
                     tool_execution_history=[],
@@ -167,7 +167,7 @@ class TestBatchProcessor:
         with patch("gluellm.batch.GlueLLM") as mock_gluellm:
             mock_client = AsyncMock()
             mock_client.complete = AsyncMock(
-                return_value=ToolExecutionResult(
+                return_value=ExecutionResult(
                     final_response="Response",
                     tool_calls_made=0,
                     tool_execution_history=[],
@@ -204,7 +204,7 @@ class TestBatchProcessor:
         with patch("gluellm.batch.GlueLLM") as mock_gluellm:
             mock_client1 = AsyncMock()
             mock_client1.complete = AsyncMock(
-                return_value=ToolExecutionResult(
+                return_value=ExecutionResult(
                     final_response="Success",
                     tool_calls_made=0,
                     tool_execution_history=[],
@@ -254,7 +254,7 @@ class TestBatchProcessor:
         with patch("gluellm.batch.GlueLLM") as mock_gluellm:
             mock_client = AsyncMock()
             mock_client.complete = AsyncMock(
-                return_value=ToolExecutionResult(
+                return_value=ExecutionResult(
                     final_response="Success",
                     tool_calls_made=0,
                     tool_execution_history=[],
@@ -283,7 +283,7 @@ class TestBatchProcessor:
         with patch("gluellm.batch.GlueLLM") as mock_gluellm:
             mock_client = AsyncMock()
             mock_client.complete = AsyncMock(
-                return_value=ToolExecutionResult(
+                return_value=ExecutionResult(
                     final_response="Success",
                     tool_calls_made=0,
                     tool_execution_history=[],
@@ -314,7 +314,7 @@ class TestBatchProcessor:
         with patch("gluellm.batch.GlueLLM") as mock_gluellm:
             mock_client1 = AsyncMock()
             mock_client1.complete = AsyncMock(
-                return_value=ToolExecutionResult(
+                return_value=ExecutionResult(
                     final_response="Success",
                     tool_calls_made=0,
                     tool_execution_history=[],
@@ -354,7 +354,7 @@ class TestBatchFunctions:
         with patch("gluellm.batch.GlueLLM") as mock_gluellm:
             mock_client = AsyncMock()
             mock_client.complete = AsyncMock(
-                return_value=ToolExecutionResult(
+                return_value=ExecutionResult(
                     final_response="Response",
                     tool_calls_made=0,
                     tool_execution_history=[],
@@ -378,7 +378,7 @@ class TestBatchFunctions:
         with patch("gluellm.batch.GlueLLM") as mock_gluellm:
             mock_client = AsyncMock()
             mock_client.complete = AsyncMock(
-                return_value=ToolExecutionResult(
+                return_value=ExecutionResult(
                     final_response="Response",
                     tool_calls_made=0,
                     tool_execution_history=[],
@@ -399,7 +399,7 @@ class TestBatchFunctions:
         with patch("gluellm.batch.GlueLLM") as mock_gluellm:
             mock_client1 = AsyncMock()
             mock_client1.complete = AsyncMock(
-                return_value=ToolExecutionResult(
+                return_value=ExecutionResult(
                     final_response="Success",
                     tool_calls_made=0,
                     tool_execution_history=[],
