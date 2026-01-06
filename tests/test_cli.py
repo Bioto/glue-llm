@@ -437,13 +437,21 @@ class TestTestStructuredOutputCommand:
         """Test that test-structured-output executes without errors."""
         from pydantic import BaseModel
 
+        from gluellm.api import ExecutionResult
+
         # Create a mock response
         class MockPerson(BaseModel):
             name: str
             age: int
             city: str
 
-        mock_structured.return_value = MockPerson(name="John", age=30, city="NYC")
+        person = MockPerson(name="John", age=30, city="NYC")
+        mock_structured.return_value = ExecutionResult(
+            final_response='{"name": "John", "age": 30, "city": "NYC"}',
+            tool_calls_made=0,
+            tool_execution_history=[],
+            structured_output=person,
+        )
 
         runner = CliRunner()
         result = runner.invoke(cli, ["test-structured-output"])

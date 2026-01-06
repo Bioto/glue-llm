@@ -99,9 +99,11 @@ class TestStructuredOutput:
             system_prompt="Extract the requested information.",
         )
 
-        assert isinstance(result, SimpleResponse)
-        assert isinstance(result.message, str)
-        assert isinstance(result.number, int)
+        assert isinstance(result, ExecutionResult)
+        assert result.structured_output is not None
+        assert isinstance(result.structured_output, SimpleResponse)
+        assert isinstance(result.structured_output.message, str)
+        assert isinstance(result.structured_output.number, int)
 
     async def test_nested_structured_output(self):
         """Test structured output with nested models."""
@@ -121,11 +123,13 @@ class TestStructuredOutput:
             system_prompt="Extract person information from the text.",
         )
 
-        assert isinstance(result, Person)
-        assert isinstance(result.name, str)
-        assert isinstance(result.age, int)
-        assert isinstance(result.address, Address)
-        assert isinstance(result.address.city, str)
+        assert isinstance(result, ExecutionResult)
+        assert result.structured_output is not None
+        assert isinstance(result.structured_output, Person)
+        assert isinstance(result.structured_output.name, str)
+        assert isinstance(result.structured_output.age, int)
+        assert isinstance(result.structured_output.address, Address)
+        assert isinstance(result.structured_output.address.city, str)
 
     async def test_structured_output_with_client(self):
         """Test structured output using GlueLLM client."""
@@ -144,9 +148,11 @@ class TestStructuredOutput:
             response_format=Color,
         )
 
-        assert isinstance(result, Color)
-        assert isinstance(result.name, str)
-        assert isinstance(result.hex_code, str)
+        assert isinstance(result, ExecutionResult)
+        assert result.structured_output is not None
+        assert isinstance(result.structured_output, Color)
+        assert isinstance(result.structured_output.name, str)
+        assert isinstance(result.structured_output.hex_code, str)
 
 
 class TestToolExecution:
@@ -509,11 +515,13 @@ class TestStructuredOutputEdgeCases:
             system_prompt="Extract the information.",
         )
 
-        assert isinstance(result, ParentModel)
-        assert result.name == "test"
+        assert isinstance(result, ExecutionResult)
+        assert result.structured_output is not None
+        assert isinstance(result.structured_output, ParentModel)
+        assert result.structured_output.name == "test"
         # Nested may or may not be present depending on LLM
-        if result.nested is not None:
-            assert isinstance(result.nested, OptionalNested)
+        if result.structured_output.nested is not None:
+            assert isinstance(result.structured_output.nested, OptionalNested)
 
     async def test_list_fields_in_structured_output(self):
         """Test structured output with list/array fields."""
@@ -528,10 +536,12 @@ class TestStructuredOutputEdgeCases:
             system_prompt="Extract the list information.",
         )
 
-        assert isinstance(result, ListResponse)
-        assert isinstance(result.items, list)
-        assert len(result.items) > 0
-        assert isinstance(result.count, int)
+        assert isinstance(result, ExecutionResult)
+        assert result.structured_output is not None
+        assert isinstance(result.structured_output, ListResponse)
+        assert isinstance(result.structured_output.items, list)
+        assert len(result.structured_output.items) > 0
+        assert isinstance(result.structured_output.count, int)
 
     async def test_enum_fields_in_structured_output(self):
         """Test structured output with enum fields."""
@@ -551,8 +561,10 @@ class TestStructuredOutputEdgeCases:
             system_prompt="Extract the status.",
         )
 
-        assert isinstance(result, StatusResponse)
-        assert result.status in Status
+        assert isinstance(result, ExecutionResult)
+        assert result.structured_output is not None
+        assert isinstance(result.structured_output, StatusResponse)
+        assert result.structured_output.status in Status
 
     async def test_nested_list_in_structured_output(self):
         """Test structured output with nested lists."""
@@ -566,10 +578,12 @@ class TestStructuredOutputEdgeCases:
             system_prompt="Extract the matrix.",
         )
 
-        assert isinstance(result, NestedListResponse)
-        assert isinstance(result.matrix, list)
-        if len(result.matrix) > 0:
-            assert isinstance(result.matrix[0], list)
+        assert isinstance(result, ExecutionResult)
+        assert result.structured_output is not None
+        assert isinstance(result.structured_output, NestedListResponse)
+        assert isinstance(result.structured_output.matrix, list)
+        if len(result.structured_output.matrix) > 0:
+            assert isinstance(result.structured_output.matrix[0], list)
 
 
 class TestToolResultSerialization:

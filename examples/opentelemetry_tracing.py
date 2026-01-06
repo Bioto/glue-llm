@@ -137,9 +137,10 @@ async def structured_output_example():
 
     result = await client.structured_complete("Calculate 15 * 8 and explain the result", response_format=MathResult)
 
-    print(f"\nExpression: {result.expression}")
-    print(f"Result: {result.result}")
-    print(f"Explanation: {result.explanation}")
+    math_result = result.structured_output
+    print(f"\nExpression: {math_result.expression}")
+    print(f"Result: {math_result.result}")
+    print(f"Explanation: {math_result.explanation}")
 
 
 async def multi_turn_conversation_example():

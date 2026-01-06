@@ -39,11 +39,11 @@ Example:
     ...     class Answer(BaseModel):
     ...         number: int
     ...
-    ...     answer = await structured_complete(
+    ...     result = await structured_complete(
     ...         "What is 2+2?",
     ...         response_format=Answer
     ...     )
-    ...     print(answer.number)
+    ...     print(result.structured_output.number)
     >>>
     >>> asyncio.run(main())
 """
@@ -362,6 +362,7 @@ def _temporary_api_key(model: str, api_key: str | None):
 
 
 T = TypeVar("T", bound=BaseModel)
+StructuredOutputT = TypeVar("StructuredOutputT", bound=BaseModel | None)
 
 
 # ============================================================================
@@ -738,7 +739,11 @@ async def _llm_call_with_retry(
 
 
 class ExecutionResult(BaseModel):
-    """Result of a tool execution loop."""
+    """Result of a tool execution loop.
+
+    Generic type parameter allows proper typing for structured outputs.
+    Use ExecutionResult[YourModel] for structured completions.
+    """
 
     final_response: Annotated[str, Field(description="The final text response from the model")]
     tool_calls_made: Annotated[int, Field(description="Number of tool calls made")]
@@ -764,6 +769,13 @@ class ExecutionResult(BaseModel):
         str | None,
         Field(
             description="The model used for this completion",
+            default=None,
+        ),
+    ]
+    structured_output: Annotated[
+        Any | None,
+        Field(
+            description="Parsed structured output (Pydantic model instance) for structured completions",
             default=None,
         ),
     ]
@@ -1104,7 +1116,7 @@ class GlueLLM:
         correlation_id: str | None = None,
         timeout: float | None = None,
         api_key: str | None = None,
-    ) -> T:
+    ) -> ExecutionResult:
         """Complete a request and return structured output.
 
         Args:
@@ -1115,7 +1127,7 @@ class GlueLLM:
             api_key: Optional API key override (for key pool usage)
 
         Returns:
-            Instance of response_format with parsed data
+            ExecutionResult with structured_output field containing instance of response_format
 
         Raises:
             TokenLimitError: If token limit is exceeded
@@ -1190,29 +1202,50 @@ class GlueLLM:
                 if content:
                     self._conversation.add_message(Role.ASSISTANT, content)
 
-                # If parsed is already a Pydantic instance, return it
-                # Otherwise, instantiate the model from the parsed dict/JSON
+                # Parse the structured output
+                structured_output = None
                 if isinstance(parsed, response_format):
-                    logger.debug(f"Returning parsed Pydantic instance: {response_format.__name__}")
-                    return parsed
-
-                # Handle case where parsed is a dict
-                if isinstance(parsed, dict):
+                    logger.debug(f"Using parsed Pydantic instance: {response_format.__name__}")
+                    structured_output = parsed
+                elif isinstance(parsed, dict):
                     logger.debug(f"Instantiating {response_format.__name__} from dict")
-                    return response_format(**parsed)
-
-                # Fallback: try to parse from JSON string in content
-                if content:
+                    structured_output = response_format(**parsed)
+                elif content:
+                    # Fallback: try to parse from JSON string in content
                     try:
                         data = json.loads(content)
                         logger.debug(f"Parsed JSON from content, instantiating {response_format.__name__}")
-                        return response_format(**data)
+                        structured_output = response_format(**data)
                     except (json.JSONDecodeError, TypeError) as e:
                         logger.warning(f"Failed to parse structured response from content: {e}")
+                        structured_output = parsed
+                else:
+                    # Last resort: use parsed as-is
+                    logger.warning(f"Using parsed response as-is (type: {type(parsed)})")
+                    structured_output = parsed
 
-                # Last resort: return parsed as-is and hope for the best
-                logger.warning(f"Returning parsed response as-is (type: {type(parsed)})")
-                return parsed
+                # Extract token usage
+                tokens_used = _extract_token_usage(response)
+                if tokens_used:
+                    logger.debug(f"Token usage: {tokens_used}")
+
+                # Calculate cost and record to session tracker
+                estimated_cost = _calculate_and_record_cost(
+                    model=model or self.model,
+                    tokens_used=tokens_used,
+                    correlation_id=correlation_id,
+                )
+
+                return ExecutionResult(
+                    final_response=content or "",
+                    tool_calls_made=0,
+                    tool_execution_history=[],
+                    raw_response=response,
+                    tokens_used=tokens_used,
+                    estimated_cost_usd=estimated_cost,
+                    model=model or self.model,
+                    structured_output=structured_output,
+                )
         finally:
             # Clear correlation ID after request completes
             clear_correlation_id()
@@ -1568,7 +1601,7 @@ async def structured_complete(
     system_prompt: str | None = None,
     correlation_id: str | None = None,
     timeout: float | None = None,
-) -> T:
+) -> ExecutionResult:
     """Quick structured completion.
 
     Args:
@@ -1580,7 +1613,27 @@ async def structured_complete(
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
 
     Returns:
-        Instance of response_format with parsed data
+        ExecutionResult with structured_output field containing instance of response_format
+
+    Example:
+        >>> import asyncio
+        >>> from gluellm.api import structured_complete
+        >>> from pydantic import BaseModel
+        >>>
+        >>> class Answer(BaseModel):
+        ...     number: int
+        ...     reasoning: str
+        >>>
+        >>> async def main():
+        ...     result = await structured_complete(
+        ...         "What is 2+2?",
+        ...         response_format=Answer
+        ...     )
+        ...     print(f"Answer: {result.structured_output.number}")
+        ...     print(f"Reasoning: {result.structured_output.reasoning}")
+        ...     print(f"Cost: ${result.estimated_cost_usd:.6f}")
+        >>>
+        >>> asyncio.run(main())
     """
     client = GlueLLM(
         model=model,

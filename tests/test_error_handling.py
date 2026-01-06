@@ -310,6 +310,7 @@ class TestStructuredCompleteErrorHandling:
         mock_message.content = '{"name": "test", "value": 42}'
         mock_choice.message = mock_message
         mock_response.choices = [mock_choice]
+        mock_response.usage = Mock(prompt_tokens=10, completion_tokens=20, total_tokens=30)
 
         mock_safe_call.side_effect = [
             first_call_side_effect,
@@ -321,9 +322,13 @@ class TestStructuredCompleteErrorHandling:
 
         # Verify retry happened (2 calls total)
         assert mock_safe_call.call_count == 2
-        assert isinstance(result, TestModel)
-        assert result.name == "test"
-        assert result.value == 42
+        from gluellm.api import ExecutionResult
+
+        assert isinstance(result, ExecutionResult)
+        assert result.structured_output is not None
+        assert isinstance(result.structured_output, TestModel)
+        assert result.structured_output.name == "test"
+        assert result.structured_output.value == 42
 
 
 class TestRetryBackoffTiming:

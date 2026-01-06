@@ -69,11 +69,12 @@ async def data_extraction_example():
     Status: In Stock
     """
     try:
-        product = await structured_complete(
+        result = await structured_complete(
             user_message=f"Extract product information:\n{product_text}",
             response_format=Product,
             system_prompt="Extract product information accurately. Convert prices to float.",
         )
+        product = result.structured_output
         print(f"Name: {product.name}")
         print(f"Price: ${product.price:.2f}")
         print(f"Category: {product.category}")
@@ -91,11 +92,12 @@ async def data_extraction_example():
     Company: TechCorp Inc.
     """
     try:
-        contact = await structured_complete(
+        result = await structured_complete(
             user_message=f"Extract contact information:\n{contact_text}",
             response_format=Contact,
             system_prompt="Extract contact details accurately.",
         )
+        contact = result.structured_output
         print(f"Name: {contact.name}")
         print(f"Email: {contact.email}")
         print(f"Phone: {contact.phone}")
@@ -113,11 +115,12 @@ async def data_extraction_example():
     Attendees: John Smith, Jane Doe, Bob Wilson, Alice Brown
     """
     try:
-        event = await structured_complete(
+        result = await structured_complete(
             user_message=f"Extract event information:\n{event_text}",
             response_format=Event,
             system_prompt="Extract event details. Parse attendee list as array.",
         )
+        event = result.structured_output
         print(f"Title: {event.title}")
         print(f"Date: {event.date}")
         print(f"Location: {event.location}")
@@ -139,11 +142,12 @@ async def data_extraction_example():
     Total: $8,000.00
     """
     try:
-        invoice = await structured_complete(
+        result = await structured_complete(
             user_message=f"Extract invoice information:\n{invoice_text}",
             response_format=Invoice,
             system_prompt="Extract invoice details. Parse items as array of strings.",
         )
+        invoice = result.structured_output
         print(f"Invoice Number: {invoice.invoice_number}")
         print(f"Date: {invoice.date}")
         print(f"Customer: {invoice.customer_name}")
@@ -167,12 +171,12 @@ async def data_extraction_example():
     extracted_products = []
     for text in products_text:
         try:
-            product = await structured_complete(
+            result = await structured_complete(
                 user_message=f"Extract product: {text}",
                 response_format=Product,
                 system_prompt="Extract product information. Parse 'In Stock' as True, 'Out of Stock' as False.",
             )
-            extracted_products.append(product)
+            extracted_products.append(result.structured_output)
         except Exception as e:
             print(f"  Error extracting {text}: {e}")
 
