@@ -1696,9 +1696,12 @@ setup_logging(
     log_json_format=False,
     log_max_bytes=10 * 1024 * 1024,  # 10MB
     log_backup_count=5,
+    console_output=True,  # Enable console output (default: False for library usage)
     force=True,  # Force reconfiguration
 )
 ```
+
+**Important**: By default, `console_output=False` to avoid interfering with your application's logging configuration. GlueLLM will only log to files, and your application's logging handlers will control console output. Set `console_output=True` only for standalone usage or debugging.
 
 ### Log Levels
 

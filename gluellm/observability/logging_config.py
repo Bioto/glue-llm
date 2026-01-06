@@ -45,13 +45,17 @@ def setup_logging(
     log_json_format: bool = False,
     log_max_bytes: int = 10485760,  # 10MB
     log_backup_count: int = 5,
+    console_output: bool = False,
     force: bool = False,
 ) -> None:
     """Configure production-grade logging for GlueLLM.
 
+    By default, only configures file-based logging to avoid interfering with
+    the parent application's logging setup. Console output is opt-in.
+
     Sets up:
-    - Colored console handler (INFO level by default)
     - Rotating file handler (DEBUG level by default)
+    - Optional colored console handler (disabled by default for library usage)
     - Optional JSON formatter for structured logging
 
     Args:
@@ -62,6 +66,7 @@ def setup_logging(
         log_json_format: Enable JSON structured logging format
         log_max_bytes: Maximum size of log file before rotation (default: 10MB)
         log_backup_count: Number of backup log files to keep (default: 5)
+        console_output: Enable console logging (default: False, to avoid conflicts in library usage)
         force: Force reconfiguration even if logging is already configured
 
     Environment Variables:
@@ -72,6 +77,12 @@ def setup_logging(
         GLUELLM_LOG_JSON_FORMAT: Enable JSON logging (set to 'true' or '1')
         GLUELLM_LOG_MAX_BYTES: Override max file size
         GLUELLM_LOG_BACKUP_COUNT: Override backup count
+        GLUELLM_CONSOLE_OUTPUT: Enable console output (set to 'true' or '1')
+
+    Note:
+        When using GlueLLM as a library, leave console_output=False to let
+        the parent application control console logging. Only enable for
+        standalone usage or debugging.
     """
     # Check if logging is already configured
     root_logger = logging.getLogger()
@@ -85,6 +96,7 @@ def setup_logging(
     log_dir = os.getenv("GLUELLM_LOG_DIR", log_dir)
     log_file_name = os.getenv("GLUELLM_LOG_FILE_NAME", log_file_name)
     log_json_format = os.getenv("GLUELLM_LOG_JSON_FORMAT", str(log_json_format)).lower() in ("true", "1", "yes")
+    console_output = os.getenv("GLUELLM_CONSOLE_OUTPUT", str(console_output)).lower() in ("true", "1", "yes")
     try:
         log_max_bytes = int(os.getenv("GLUELLM_LOG_MAX_BYTES", log_max_bytes))
     except ValueError:
@@ -117,31 +129,32 @@ def setup_logging(
         root_logger.handlers.clear()
         root_logger.filters.clear()
 
-    # Console handler with colorlog
-    console_handler = colorlog.StreamHandler(sys.stdout)
-    console_handler.setLevel(numeric_level)
+    # Console handler with colorlog (only if explicitly enabled)
+    if console_output:
+        console_handler = colorlog.StreamHandler(sys.stdout)
+        console_handler.setLevel(numeric_level)
 
-    # Add correlation ID filter to console handler BEFORE formatting
-    console_handler.addFilter(CorrelationIDFilter())
+        # Add correlation ID filter to console handler BEFORE formatting
+        console_handler.addFilter(CorrelationIDFilter())
 
-    # Color scheme for different log levels
-    # Add correlation ID to format if available
-    color_formatter = colorlog.ColoredFormatter(
-        "%(log_color)s%(asctime)s | %(levelname)-8s | %(name)s | [%(correlation_id)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        reset=True,
-        log_colors={
-            "DEBUG": "cyan",
-            "INFO": "green",
-            "WARNING": "yellow",
-            "ERROR": "red",
-            "CRITICAL": "red,bg_white",
-        },
-        secondary_log_colors={},
-        style="%",
-    )
-    console_handler.setFormatter(color_formatter)
-    root_logger.addHandler(console_handler)
+        # Color scheme for different log levels
+        # Add correlation ID to format if available
+        color_formatter = colorlog.ColoredFormatter(
+            "%(log_color)s%(asctime)s | %(levelname)-8s | %(name)s | [%(correlation_id)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+            reset=True,
+            log_colors={
+                "DEBUG": "cyan",
+                "INFO": "green",
+                "WARNING": "yellow",
+                "ERROR": "red",
+                "CRITICAL": "red,bg_white",
+            },
+            secondary_log_colors={},
+            style="%",
+        )
+        console_handler.setFormatter(color_formatter)
+        root_logger.addHandler(console_handler)
 
     # File handler with rotation
     log_file_path = log_dir / log_file_name
@@ -179,8 +192,9 @@ def setup_logging(
 
     # Log the configuration
     logger = logging.getLogger(__name__)
+    console_status = f"console={log_level}" if console_output else "console=disabled"
     logger.info(
-        f"Logging configured: console={log_level}, file={log_file_level}, "
+        f"Logging configured: {console_status}, file={log_file_level}, "
         f"file_path={log_file_path}, json_format={log_json_format}"
     )
 

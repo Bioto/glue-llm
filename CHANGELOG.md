@@ -13,8 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-agent workflows (iterative, pipeline, debate)
 - Comprehensive error handling with retry logic
 - CLI interface for testing and demos
+- New `console_output` parameter for `setup_logging()` to control console handler
+- New `log_console_output` configuration setting and `GLUELLM_LOG_CONSOLE_OUTPUT` environment variable
 
 ### Changed
+- **BREAKING**: Console logging is now disabled by default in `setup_logging()` to avoid conflicts when GlueLLM is used as a library. Set `console_output=True` or `GLUELLM_LOG_CONSOLE_OUTPUT=true` to enable console output.
+- Logging now respects parent application's logging configuration by default
 
 ### Deprecated
 
