@@ -1701,7 +1701,29 @@ setup_logging(
 )
 ```
 
-**Important**: By default, `console_output=False` to avoid interfering with your application's logging configuration. GlueLLM will only log to files, and your application's logging handlers will control console output. Set `console_output=True` only for standalone usage or debugging.
+### Library Integration
+
+When using GlueLLM as a library in your application, you have two options:
+
+**Option 1: Complete Control (Recommended)**
+```python
+# In your application's initialization
+import os
+os.environ["GLUELLM_DISABLE_LOGGING"] = "true"
+
+# Then configure your own logging with your filters/handlers
+import logging
+logging.basicConfig(...)  # Your config
+```
+
+**Option 2: Minimal Impact (File-only logging)**
+```python
+# Default behavior - GlueLLM logs to files only, no console interference
+from gluellm import completion
+# Your application's logging handlers control console output
+```
+
+**Important**: By default, `console_output=False` to avoid interfering with your application's logging configuration. GlueLLM will only log to files, and your application's logging handlers will control console output. For complete control, set `GLUELLM_DISABLE_LOGGING=true` to prevent GlueLLM from configuring logging at all.
 
 ### Log Levels
 
