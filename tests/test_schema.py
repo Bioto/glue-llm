@@ -212,6 +212,112 @@ class TestCreateOpenAIResponseFormat:
         assert response_format["json_schema"]["strict"] is False
 
 
+class TestCreateNormalizedModel:
+    """Tests for the create_normalized_model function."""
+
+    def test_returns_subclass(self):
+        """Test that the returned class is a subclass of the original."""
+        from gluellm.schema import create_normalized_model
+
+        class OriginalModel(BaseModel):
+            name: str
+            value: int
+
+        normalized_model = create_normalized_model(OriginalModel)
+
+        # Should be a subclass
+        assert issubclass(normalized_model, OriginalModel)
+
+        # Should be able to instantiate with same fields
+        instance = normalized_model(name="test", value=42)
+        assert instance.name == "test"
+        assert instance.value == 42
+
+    def test_overrides_schema_generation(self):
+        """Test that model_json_schema() returns normalized schema."""
+        from gluellm.schema import create_normalized_model, normalize_schema_for_openai
+
+        class TestModel(BaseModel):
+            name: str
+            value: int
+
+        normalized_model = create_normalized_model(TestModel)
+        expected_schema = normalize_schema_for_openai(TestModel)
+
+        # Should return normalized schema
+        schema = normalized_model.model_json_schema()
+
+        assert schema.get("strict") is True
+        assert schema.get("additionalProperties") is False
+        assert schema == expected_schema
+
+    def test_preserves_class_name(self):
+        """Test that the normalized class preserves the original name."""
+        from gluellm.schema import create_normalized_model
+
+        class IncomeStatement(BaseModel):
+            revenue: float
+
+        normalized_income_statement = create_normalized_model(IncomeStatement)
+
+        # Should preserve name for OpenAI's schema naming
+        assert normalized_income_statement.__name__ == "IncomeStatement"
+        # __qualname__ may include function context, but __name__ is what OpenAI uses
+        assert IncomeStatement.__name__ in normalized_income_statement.__qualname__
+
+    def test_response_parsing_still_works(self):
+        """Test that response parsing works with normalized model."""
+        from gluellm.schema import create_normalized_model
+
+        class TestModel(BaseModel):
+            name: str
+            count: int
+
+        normalized_model = create_normalized_model(TestModel)
+
+        # Parse from dict (simulating OpenAI response)
+        data = {"name": "test", "count": 5}
+        instance = normalized_model(**data)
+
+        assert instance.name == "test"
+        assert instance.count == 5
+        assert isinstance(instance, TestModel)  # Should be instance of original too
+
+    def test_works_with_complex_union_types(self):
+        """Test that normalized model works with union types in lists."""
+        from gluellm.schema import create_normalized_model
+
+        class EntryA(BaseModel):
+            type: str = "a"
+            value: str
+
+        class EntryB(BaseModel):
+            type: str = "b"
+            number: int
+
+        class Container(BaseModel):
+            items: list[EntryA | EntryB]
+
+        normalized_container = create_normalized_model(Container)
+
+        # Should generate normalized schema
+        schema = normalized_container.model_json_schema()
+        assert schema.get("strict") is True
+        assert schema.get("additionalProperties") is False
+
+        # Should still parse correctly
+        data = {
+            "items": [
+                {"type": "a", "value": "test"},
+                {"type": "b", "number": 42},
+            ]
+        }
+        instance = normalized_container(**data)
+        assert len(instance.items) == 2
+        assert isinstance(instance.items[0], EntryA)
+        assert isinstance(instance.items[1], EntryB)
+
+
 class TestSchemaCompatibility:
     """Integration tests for schema compatibility with actual complex models."""
 

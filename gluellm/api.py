@@ -81,7 +81,7 @@ from gluellm.rate_limiting.api_key_pool import extract_provider_from_model
 from gluellm.rate_limiting.rate_limiter import acquire_rate_limit
 from gluellm.runtime.context import clear_correlation_id, get_correlation_id, set_correlation_id
 from gluellm.runtime.shutdown import ShutdownContext, is_shutting_down, register_shutdown_callback
-from gluellm.schema import create_openai_response_format
+from gluellm.schema import create_normalized_model
 from gluellm.telemetry import (
     is_tracing_enabled,
     log_llm_metrics,
@@ -559,11 +559,13 @@ async def _safe_llm_call(
     # Normalize Pydantic model schema for OpenAI compatibility
     # This fixes issues with union types, additionalProperties, etc. that cause
     # "True is not of type 'array'" and similar schema validation errors
-    normalized_response_format: dict[str, Any] | None = None
+    # We create a subclass that overrides model_json_schema() so OpenAI's .parse()
+    # method gets the normalized schema when it calls model_json_schema()
+    normalized_response_format: type[BaseModel] | None = None
     if response_format is not None:
         try:
-            normalized_response_format = create_openai_response_format(response_format)
-            logger.debug(f"Normalized schema for {response_format.__name__}")
+            normalized_response_format = create_normalized_model(response_format)
+            logger.debug(f"Created normalized model class for {response_format.__name__}")
         except Exception as e:
             # Fall back to passing the Pydantic model directly if normalization fails
             logger.warning(f"Schema normalization failed for {response_format.__name__}: {e}")
@@ -593,7 +595,8 @@ async def _safe_llm_call(
             # Use context manager for temporary API key
             with _temporary_api_key(model, api_key):
                 # Make LLM call with timeout
-                # Use normalized schema if available, otherwise fall back to Pydantic model
+                # Use normalized model class if available, otherwise fall back to original Pydantic model
+                # The normalized class is a subclass, so response parsing still works correctly
                 response = await asyncio.wait_for(
                     any_llm_acompletion(
                         messages=messages,

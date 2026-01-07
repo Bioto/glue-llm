@@ -12,12 +12,17 @@ Known issues addressed:
 5. Unsupported keywords: title, description, examples need careful handling
 
 Usage:
-    from gluellm.schema import normalize_schema_for_openai
+    from gluellm.schema import create_normalized_model, normalize_schema_for_openai
 
     class MyModel(BaseModel):
         name: str
         items: list[Item]
 
+    # Recommended: Create a normalized model class (works with any_llm/OpenAI)
+    NormalizedModel = create_normalized_model(MyModel)
+    # Use NormalizedModel with structured_complete() - schema will be normalized
+
+    # Alternative: Get normalized schema dict directly
     schema = normalize_schema_for_openai(MyModel)
 """
 
@@ -202,6 +207,55 @@ def _normalize_defs(schema: dict[str, Any]) -> dict[str, Any]:
     return schema
 
 
+def create_normalized_model(
+    model: type[BaseModel],
+    *,
+    strict: bool = True,
+) -> type[BaseModel]:
+    """Create a Pydantic model subclass with normalized JSON schema.
+
+    Returns a subclass that overrides model_json_schema() to return
+    an OpenAI-compatible schema, while preserving all other behavior.
+    This is the recommended approach for fixing schema compatibility
+    issues with OpenAI's structured outputs.
+
+    Args:
+        model: The Pydantic model class to normalize
+        strict: Whether to enforce OpenAI strict mode requirements (default: True)
+
+    Returns:
+        A subclass of the original model with normalized schema generation
+
+    Example:
+        >>> from pydantic import BaseModel
+        >>> class MyModel(BaseModel):
+        ...     name: str
+        ...     items: list[str]
+        ...
+        >>> NormalizedMyModel = create_normalized_model(MyModel)
+        >>> # Use NormalizedMyModel with OpenAI - schema will be normalized
+        >>> # Response parsing still works because it's a subclass
+    """
+    # Generate normalized schema once
+    normalized_schema = normalize_schema_for_openai(model, strict=strict)
+
+    # Create a subclass that overrides model_json_schema()
+    class NormalizedModel(model):
+        @classmethod
+        def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            """Return the normalized schema instead of the original."""
+            return normalized_schema
+
+    # Preserve the original class name for OpenAI's schema naming
+    NormalizedModel.__name__ = model.__name__
+    NormalizedModel.__qualname__ = model.__qualname__
+    NormalizedModel.__module__ = model.__module__
+
+    logger.debug(f"Created normalized model class for {model.__name__}")
+
+    return NormalizedModel
+
+
 def create_openai_response_format(
     model: type[BaseModel],
     *,
@@ -211,6 +265,10 @@ def create_openai_response_format(
 
     This creates the full response_format structure expected by OpenAI's
     chat.completions.create() with structured outputs.
+
+    Note: For use with any_llm and OpenAI's .parse() method, prefer
+    create_normalized_model() instead, as it works better with the
+    Pydantic model interface that OpenAI expects.
 
     Args:
         model: The Pydantic model class

@@ -128,7 +128,11 @@ from gluellm.runtime.shutdown import (
     unregister_shutdown_callback,
     wait_for_shutdown,
 )
-from gluellm.schema import create_openai_response_format, normalize_schema_for_openai
+from gluellm.schema import (
+    create_normalized_model,
+    create_openai_response_format,
+    normalize_schema_for_openai,
+)
 
 # Initialize logging on package import
 _setup_logging_called = False
@@ -220,6 +224,7 @@ __all__ = [
     "execute_shutdown_callbacks",
     # Schema Utilities
     "normalize_schema_for_openai",
+    "create_normalized_model",
     "create_openai_response_format",
 ]
 
