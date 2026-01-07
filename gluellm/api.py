@@ -565,10 +565,26 @@ async def _safe_llm_call(
     if response_format is not None:
         try:
             normalized_response_format = create_normalized_model(response_format)
-            logger.debug(f"Created normalized model class for {response_format.__name__}")
+            # Verify the normalization worked by checking the schema
+            test_schema = normalized_response_format.model_json_schema()
+            if test_schema.get("additionalProperties") is True:
+                logger.error(
+                    f"Schema normalization failed for {response_format.__name__}: "
+                    "additionalProperties is still True. Falling back to original model."
+                )
+                normalized_response_format = None
+            else:
+                logger.debug(
+                    f"Created normalized model class for {response_format.__name__}: "
+                    f"strict={test_schema.get('strict')}, "
+                    f"additionalProperties={test_schema.get('additionalProperties')}"
+                )
         except Exception as e:
             # Fall back to passing the Pydantic model directly if normalization fails
-            logger.warning(f"Schema normalization failed for {response_format.__name__}: {e}")
+            logger.warning(
+                f"Schema normalization failed for {response_format.__name__}: {e}",
+                exc_info=True,
+            )
             normalized_response_format = None
 
     start_time = time.time()

@@ -160,6 +160,60 @@ class TestNormalizeSchemaForOpenAI:
 
         check_booleans(schema)
 
+    def test_removes_required_true_from_field_schemas(self):
+        """Test that 'required: True' is removed from field schemas.
+
+        Pydantic can generate 'required: True' in individual field schemas
+        when using Annotated with Field(). OpenAI rejects this - 'required'
+        must only be an array at the object level.
+        """
+        from typing import Annotated
+
+        from pydantic import Field
+
+        from gluellm.schema import normalize_schema_for_openai
+
+        class TestModel(BaseModel):
+            # Using Annotated with Field can cause 'required: True' in field schema
+            name: Annotated[
+                str,
+                Field(
+                    ...,
+                    description="Name field",
+                    examples=["test"],
+                ),
+            ]
+            optional_field: Annotated[
+                str | None,
+                Field(
+                    description="Optional field",
+                    examples=[None],
+                ),
+            ] = None
+
+        schema = normalize_schema_for_openai(TestModel)
+
+        # Check that no field schema has 'required: True'
+        def check_required_true(obj, path=""):
+            """Recursively check for 'required: True'."""
+            issues = []
+            if isinstance(obj, dict):
+                if "required" in obj and obj["required"] is True:
+                    issues.append(f"{path}.required is True (should be array or removed)")
+                for k, v in obj.items():
+                    issues.extend(check_required_true(v, f"{path}.{k}"))
+            elif isinstance(obj, list):
+                for i, item in enumerate(obj):
+                    issues.extend(check_required_true(item, f"{path}[{i}]"))
+            return issues
+
+        issues = check_required_true(schema)
+        assert not issues, f"Found 'required: True' in schema: {issues}"
+
+        # Verify top-level 'required' is an array
+        assert isinstance(schema.get("required"), list), "Top-level 'required' should be a list"
+        assert "name" in schema["required"]
+
 
 class TestCreateOpenAIResponseFormat:
     """Tests for the create_openai_response_format function."""
@@ -348,6 +402,144 @@ class TestSchemaCompatibility:
         for _name, defn in schema.get("$defs", {}).items():
             if defn.get("type") == "object":
                 assert defn.get("additionalProperties") is False
+
+    def test_cash_flow_statement_with_annotated_fields(self):
+        """Test the exact user example with Annotated fields and Field().
+
+        This reproduces the real-world scenario where Pydantic generates
+        'required: True' in field schemas, which OpenAI rejects.
+        """
+        from typing import Annotated
+
+        from pydantic import Field
+
+        from gluellm.schema import create_normalized_model
+
+        # Simulate the Date model
+        class Date(BaseModel):
+            year: int
+            month: int
+            day: int
+
+            @classmethod
+            def get_examples(cls, count: int = 1):
+                return [Date(year=2025, month=9, day=30) for _ in range(count)]
+
+        class CashFlowStatementEntry(BaseModel):
+            name: str
+            amount: float
+
+        class CashFlowStatementEntryGroup(BaseModel):
+            name: str
+            entries: list[CashFlowStatementEntry]
+
+        year = 2025
+
+        class CashFlowStatement(BaseModel):
+            # Using Date | None to match the pattern (the function would return Date type)
+            reporting_date: Annotated[
+                Date | None,
+                Field(
+                    description=(
+                        "Date of reporting of the cash flow statement for the specific year, usually indicated by month"
+                        "and day in the statement, and years as a column."
+                    ),
+                    examples=[
+                        Date.get_examples(count=1)[0],
+                        None,
+                    ],
+                ),
+            ]
+            scale: Annotated[
+                int,
+                Field(
+                    description=(
+                        "Scaling units of the values inside the single-year cash flow statement. Typically indicated by"
+                        "'In millions', 'In billions', 'In thousands' etc. at the beginnig of the cash flow statement. For"
+                        "instance, if the cash flow statement states (in millions), the scale is 1000000. If it states in "
+                        "thousands, the scaling unit is 1000. If not scaling unit is indicated, this value should be 1. "
+                        "If the scaling values differ for the years, find the one that covers the most entries sensibly. "
+                        "For instance, if two years have millions, one has thousands, choose the  majority, millions."
+                    ),
+                    examples=[1000000, 1000000000, 1000, 1],
+                ),
+            ]
+            unit: Annotated[
+                str,
+                Field(
+                    ...,
+                    description=(
+                        "Unit of the majority of elements in the cash flow statement. This can be a specific currency,"
+                        "physical unit or other. Percentage is not a unit, nor shares. Always use the ISO currency code for"
+                        " currencies, such as USD, EUR, JPY, etc. If the units are very mixed with a lot of different "
+                        "units, this is None. Usually, in cash flow statements, it's a currency like USD, EUR, JPY or "
+                        "others."
+                    ),
+                    examples=["USD", "EUR", "JPY", "GBP", "CHF"],
+                ),
+            ]
+            entries: Annotated[
+                list[CashFlowStatementEntry | CashFlowStatementEntryGroup],
+                Field(
+                    description=(
+                        "Entries of the cash flow statement for each year. This is a list of CashFlowStatementEntry or "
+                        "CashFlowStatementEntryGroup."
+                    ),
+                ),
+            ]
+
+        # Create normalized model - this should not raise errors
+        normalized_model = create_normalized_model(CashFlowStatement)
+
+        # Get the schema
+        schema = normalized_model.model_json_schema()
+
+        # Verify no 'required: True' exists anywhere
+        def check_required_true(obj, path=""):
+            """Recursively check for 'required: True'."""
+            issues = []
+            if isinstance(obj, dict):
+                if "required" in obj and obj["required"] is True:
+                    issues.append(f"{path}.required is True (should be array or removed)")
+                for k, v in obj.items():
+                    issues.extend(check_required_true(v, f"{path}.{k}"))
+            elif isinstance(obj, list):
+                for i, item in enumerate(obj):
+                    issues.extend(check_required_true(item, f"{path}[{i}]"))
+            return issues
+
+        issues = check_required_true(schema)
+        assert not issues, f"Found 'required: True' in schema: {issues}"
+
+        # Verify structure
+        assert schema.get("additionalProperties") is False
+        assert schema.get("strict") is True
+        assert isinstance(schema.get("required"), list)
+        assert "reporting_date" in schema["required"]
+        assert "scale" in schema["required"]
+        assert "unit" in schema["required"]
+        assert "entries" in schema["required"]
+
+        # Verify entries field has correct structure
+        entries_schema = schema["properties"]["entries"]
+        assert entries_schema["type"] == "array"
+        assert "items" in entries_schema
+        items_schema = entries_schema["items"]
+        assert "anyOf" in items_schema  # Union type should be represented as anyOf
+
+        # Verify it can still parse responses
+        test_data = {
+            "reporting_date": {"year": 2025, "month": 9, "day": 30},
+            "scale": 1000000,
+            "unit": "USD",
+            "entries": [
+                {"name": "Operating Activities", "amount": 1000000.0},
+            ],
+        }
+        instance = normalized_model(**test_data)
+        assert instance.scale == 1000000
+        assert instance.unit == "USD"
+        assert len(instance.entries) == 1
 
     def test_deeply_nested_unions(self):
         """Test deeply nested union types."""

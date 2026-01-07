@@ -98,6 +98,14 @@ def _apply_strict_mode_fixes(schema: dict[str, Any]) -> dict[str, Any]:
 
         obj_type = obj.get("type")
 
+        # CRITICAL FIX: Remove 'required: True' from ANY schema (not just objects)
+        # Pydantic can generate 'required: True' in field schemas which OpenAI rejects
+        # OpenAI expects 'required' only at object level as an array, never as a boolean
+        if "required" in obj and obj["required"] is True:
+            # Remove invalid 'required: True' - it should only be an array at object level
+            obj.pop("required")
+            logger.debug(f"Removed invalid 'required: True' at {path}")
+
         # Fix object types
         if obj_type == "object":
             # Ensure additionalProperties is false, not true
@@ -107,9 +115,32 @@ def _apply_strict_mode_fixes(schema: dict[str, Any]) -> dict[str, Any]:
             elif "additionalProperties" not in obj:
                 obj["additionalProperties"] = False
 
-            # Ensure all properties are in required array
+            # CRITICAL: Remove 'required: True' from individual field schemas
+            # Pydantic can generate field-level 'required: True' which OpenAI rejects
+            # OpenAI expects 'required' only at the object level as an array
             properties = obj.get("properties", {})
             if properties:
+                for prop_name, prop_schema in properties.items():
+                    if isinstance(prop_schema, dict) and prop_schema.get("required") is True:
+                        # Remove the invalid 'required: True' from field schema
+                        prop_schema = copy.copy(prop_schema)
+                        prop_schema.pop("required", None)
+                        properties[prop_name] = prop_schema
+                        logger.debug(f"Removed 'required: True' from field schema at {path}.properties.{prop_name}")
+
+            # Ensure all properties are in required array (at object level, not field level)
+            if properties:
+                # Ensure 'required' is an array, not True
+                current_required = obj.get("required")
+                if current_required is True:
+                    # Convert True to array of all properties
+                    obj["required"] = list(properties.keys())
+                    logger.debug(f"Converted 'required: True' to array at {path}")
+                elif not isinstance(current_required, list):
+                    # If it's not a list, make it one
+                    obj["required"] = list(properties.keys())
+                    logger.debug(f"Converted 'required' to array at {path}")
+
                 required = set(obj.get("required", []))
                 all_props = set(properties.keys())
                 missing = all_props - required
@@ -239,12 +270,28 @@ def create_normalized_model(
     # Generate normalized schema once
     normalized_schema = normalize_schema_for_openai(model, strict=strict)
 
-    # Create a subclass that overrides model_json_schema()
+    # Deep copy to ensure we don't modify the cached schema
+    normalized_schema = copy.deepcopy(normalized_schema)
+
+    # Create a subclass that overrides schema generation methods
     class NormalizedModel(model):
         @classmethod
         def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
             """Return the normalized schema instead of the original."""
-            return normalized_schema
+            # Return a fresh copy to avoid any mutation issues
+            return copy.deepcopy(normalized_schema)
+
+        @classmethod
+        def __get_pydantic_json_schema__(cls, core_schema: Any, handler: Any) -> dict[str, Any]:
+            """Override Pydantic's internal schema generation method.
+
+            This is called by Pydantic's schema generation system and ensures
+            OpenAI SDK gets the normalized schema even if it uses this method.
+            """
+            # Return the normalized schema, converting it to the format expected
+            # by the handler if needed
+            # The handler expects a JsonSchemaValue, which is just a dict
+            return copy.deepcopy(normalized_schema)
 
     # Preserve the original class name for OpenAI's schema naming
     NormalizedModel.__name__ = model.__name__
