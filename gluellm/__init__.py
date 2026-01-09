@@ -93,6 +93,17 @@ from gluellm.batch import (
     batch_complete_simple,
 )
 from gluellm.config import GlueLLMSettings, get_settings, reload_settings, settings
+from gluellm.eval import (
+    CallbackStore,
+    EvalRecord,
+    EvalStore,
+    JSONLFileStore,
+    MultiStore,
+    enable_callback_recording,
+    enable_file_recording,
+    get_global_eval_store,
+    set_global_eval_store,
+)
 from gluellm.models.batch import (
     APIKeyConfig,
     BatchConfig,
@@ -198,6 +209,16 @@ __all__ = [
     "SystemPrompt",
     "Prompt",
     "EmbeddingResult",
+    "EvalRecord",
+    # Evaluation Recording
+    "EvalStore",
+    "JSONLFileStore",
+    "CallbackStore",
+    "MultiStore",
+    "enable_file_recording",
+    "enable_callback_recording",
+    "set_global_eval_store",
+    "get_global_eval_store",
     # Configuration
     "GlueLLMSettings",
     "settings",

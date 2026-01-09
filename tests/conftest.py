@@ -23,3 +23,15 @@ def clear_global_hooks():
     yield
     # Clear after test
     clear_hooks()
+
+
+@pytest.fixture(autouse=True)
+def clear_global_eval_store():
+    """Clear global eval store before and after each test to ensure test isolation."""
+    from gluellm.eval import set_global_eval_store
+
+    # Clear before test
+    set_global_eval_store(None)
+    yield
+    # Clear after test
+    set_global_eval_store(None)

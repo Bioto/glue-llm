@@ -106,6 +106,10 @@ class GlueLLMSettings(BaseSettings):
     track_costs: bool = True  # Enable cost tracking and include in responses
     print_session_summary_on_exit: bool = True  # Print token/cost summary when program exits
 
+    # Evaluation recording settings
+    eval_recording_enabled: bool = False  # Enable evaluation data recording
+    eval_recording_path: Path | None = None  # Path to JSONL file (defaults to logs/eval_records.jsonl)
+
 
 # Global settings instance
 settings = GlueLLMSettings()

@@ -41,6 +41,7 @@ GlueLLM is a high-level Python SDK that makes working with Large Language Models
 - 🔍 **OpenTelemetry Tracing** - Distributed tracing with MLflow for observability
 - 🚀 **Local Batch Processing** - Efficient concurrent processing with automatic retry and error handling
 - 🚦 **Smart Rate Limiting** - Transparent rate limiting with API key pool management for batch operations
+- 📊 **Evaluation Data Recording** - Capture complete request/response lifecycle for LLM evaluations and analysis
 
 ## Installation
 
@@ -243,6 +244,7 @@ client = GlueLLM(
     system_prompt="You are helpful.",    # System prompt (optional)
     tools=[my_tool],                     # List of tools (optional)
     max_tool_iterations=10,              # Max tool execution loops (optional)
+    eval_store=my_store,                 # Evaluation store (optional)
 )
 
 # Make completions with conversation memory
@@ -565,6 +567,351 @@ except RateLimitError:
 except TokenLimitError:
     print("Text too long - reduce input size")
 ```
+
+## Evaluation Data Recording
+
+GlueLLM provides comprehensive evaluation data recording to capture complete request/response lifecycle data for LLM evaluations, debugging, and analysis. This feature enables full observability with pluggable storage backends, giving you maximum flexibility in how you store and evaluate LLM interaction data.
+
+### Overview
+
+The evaluation recording system automatically captures:
+- **Request data**: User messages, system prompts, model configuration, conversation state
+- **Response data**: Final responses, structured outputs, raw API responses
+- **Tool execution**: Tool calls made, execution history, available tools
+- **Metrics**: Latency, token usage, estimated costs
+- **Outcomes**: Success/failure status, error types and messages
+
+All recording happens asynchronously and non-blocking, ensuring zero performance impact on your application. Failures in recording never break your completions - the system gracefully degrades.
+
+### Quick Start
+
+The simplest way to enable evaluation recording is using the built-in file storage:
+
+```python
+from gluellm import GlueLLM
+from gluellm.eval import enable_file_recording
+
+# Enable global file recording
+store = enable_file_recording("./eval_data/records.jsonl")
+
+# All GlueLLM instances will now record automatically
+client = GlueLLM()
+result = await client.complete("What is 2+2?")
+print(f"Response: {result.final_response}")
+
+# Clean up when done
+await store.close()
+```
+
+### Built-in File Storage
+
+`JSONLFileStore` writes evaluation records to a newline-delimited JSON file, perfect for analysis and evaluation workflows:
+
+```python
+from gluellm import GlueLLM
+from gluellm.eval import JSONLFileStore
+
+# Create a file store
+store = JSONLFileStore("./eval_data/records.jsonl")
+
+# Use with a specific client instance
+client = GlueLLM(eval_store=store)
+result = await client.complete("Explain quantum computing")
+
+# Records are written asynchronously
+await store.close()
+```
+
+Each line in the JSONL file is a complete `EvalRecord` with all request/response data:
+
+```json
+{"id": "uuid-here", "user_message": "...", "final_response": "...", "latency_ms": 1234.5, ...}
+{"id": "uuid-here", "user_message": "...", "final_response": "...", "latency_ms": 987.6, ...}
+```
+
+### Custom Callbacks
+
+For custom storage backends (databases, APIs, etc.), use `CallbackStore`:
+
+```python
+from gluellm import GlueLLM
+from gluellm.eval import CallbackStore, enable_callback_recording
+from gluellm.models.eval import EvalRecord
+
+# Define your custom storage handler
+async def save_to_database(record: EvalRecord):
+    """Save record to your database."""
+    # Your storage logic here
+    await db.save(record.model_dump_dict())
+
+# Enable callback recording globally
+enable_callback_recording(save_to_database)
+
+# Or use with a specific instance
+store = CallbackStore(save_to_database)
+client = GlueLLM(eval_store=store)
+```
+
+Callbacks can be synchronous or asynchronous:
+
+```python
+# Synchronous callback
+def sync_handler(record: EvalRecord):
+    print(f"Recorded: {record.id}")
+
+# Asynchronous callback
+async def async_handler(record: EvalRecord):
+    await api.post("/records", record.model_dump_dict())
+```
+
+### Multi-Store (Fan-Out)
+
+Record to multiple backends simultaneously using `MultiStore`:
+
+```python
+from gluellm import GlueLLM
+from gluellm.eval import JSONLFileStore, CallbackStore, MultiStore
+
+# In-memory storage for real-time analysis
+memory_records = []
+
+async def save_to_memory(record: EvalRecord):
+    memory_records.append(record)
+
+# Create multi-store that writes to both file and memory
+multi_store = MultiStore([
+    JSONLFileStore("./eval_data/records.jsonl"),
+    CallbackStore(save_to_memory),
+])
+
+client = GlueLLM(eval_store=multi_store)
+result = await client.complete("What is Python?")
+
+# Records are written to both stores concurrently
+await multi_store.close()
+```
+
+### Configuration
+
+Evaluation recording can be configured via environment variables:
+
+```bash
+# Enable/disable recording globally
+export GLUELLM_EVAL_RECORDING_ENABLED=true
+
+# Set default file path (used when no store is explicitly provided)
+export GLUELLM_EVAL_RECORDING_PATH=logs/eval_records.jsonl
+```
+
+Or programmatically:
+
+```python
+from gluellm.config import settings
+
+# Check if recording is enabled
+if settings.eval_recording_enabled:
+    print("Recording is enabled")
+
+# Get default recording path
+print(settings.eval_recording_path)
+```
+
+### Data Model
+
+The `EvalRecord` model captures comprehensive data about each LLM interaction:
+
+```python
+from gluellm.models.eval import EvalRecord
+
+# EvalRecord fields:
+# - id: Unique identifier (UUID)
+# - correlation_id: Request tracking ID
+# - timestamp: When the request was made
+# - user_message: User's input message
+# - system_prompt: System prompt used
+# - model: Model identifier (e.g., "openai:gpt-4o-mini")
+# - messages_snapshot: Full conversation state
+# - final_response: Final text response
+# - structured_output: Serialized structured output (if applicable)
+# - raw_response: Raw API response
+# - tool_calls_made: Number of tool calls executed
+# - tool_execution_history: Complete tool call history
+# - tools_available: List of available tool names
+# - latency_ms: Total request latency
+# - tokens_used: Token usage dict (prompt, completion, total)
+# - estimated_cost_usd: Estimated cost in USD
+# - success: Whether request succeeded
+# - error_type: Error type if failed
+# - error_message: Error message if failed
+```
+
+### Advanced Usage
+
+#### Conditional Recording
+
+Create custom stores that filter or transform records:
+
+```python
+class ConditionalStore:
+    """Only record expensive requests."""
+
+    def __init__(self, base_store: JSONLFileStore):
+        self.base_store = base_store
+
+    async def record(self, record: EvalRecord) -> None:
+        # Only record if cost > $0.001
+        if record.estimated_cost_usd and record.estimated_cost_usd > 0.001:
+            await self.base_store.record(record)
+
+    async def close(self) -> None:
+        await self.base_store.close()
+
+store = ConditionalStore(JSONLFileStore("./expensive_records.jsonl"))
+client = GlueLLM(eval_store=store)
+```
+
+#### Reading Recorded Data
+
+Read and analyze recorded data from JSONL files:
+
+```python
+import json
+from pathlib import Path
+
+records = []
+with Path("./eval_data/records.jsonl").open() as f:
+    for line in f:
+        if line.strip():
+            records.append(json.loads(line))
+
+# Analyze your data
+total_cost = sum(r.get("estimated_cost_usd", 0) for r in records)
+avg_latency = sum(r["latency_ms"] for r in records) / len(records)
+print(f"Total cost: ${total_cost:.4f}")
+print(f"Average latency: {avg_latency:.2f}ms")
+```
+
+#### Instance-Level vs Global Stores
+
+Use stores at different scopes:
+
+```python
+from gluellm.eval import enable_file_recording, JSONLFileStore
+
+# Global store - all clients record to it
+enable_file_recording("./global_records.jsonl")
+client1 = GlueLLM()  # Records to global store
+client2 = GlueLLM()  # Records to global store
+
+# Instance-level store - only this client records to it
+instance_store = JSONLFileStore("./instance_records.jsonl")
+client3 = GlueLLM(eval_store=instance_store)  # Records to instance store only
+```
+
+### Integration Examples
+
+#### Recording Structured Outputs
+
+Structured outputs are automatically captured:
+
+```python
+from pydantic import BaseModel
+from gluellm import structured_complete
+from gluellm.eval import JSONLFileStore, enable_file_recording
+
+class Answer(BaseModel):
+    number: int
+    reasoning: str
+
+# Enable recording
+enable_file_recording("./structured_records.jsonl")
+
+# Structured outputs are recorded automatically
+result = await structured_complete(
+    "What is 2+2? Provide your reasoning.",
+    response_format=Answer,
+)
+# Record includes structured_output field with serialized Answer
+```
+
+#### Recording Tool Execution
+
+Tool calls and execution history are fully captured:
+
+```python
+from gluellm import GlueLLM
+from gluellm.eval import JSONLFileStore
+
+def get_weather(city: str) -> str:
+    """Get weather for a city."""
+    return f"Sunny in {city}, 72°F"
+
+store = JSONLFileStore("./tool_records.jsonl")
+client = GlueLLM(
+    tools=[get_weather],
+    eval_store=store,
+)
+
+result = await client.complete("What's the weather in Paris?")
+# Record includes:
+# - tool_calls_made: 1
+# - tool_execution_history: [{"tool": "get_weather", "args": {...}, "result": "..."}]
+# - tools_available: ["get_weather"]
+```
+
+#### Error Recording
+
+Errors are automatically recorded with full context:
+
+```python
+from gluellm import GlueLLM
+from gluellm.eval import JSONLFileStore
+
+store = JSONLFileStore("./error_records.jsonl")
+client = GlueLLM(eval_store=store)
+
+try:
+    await client.complete("Hello", model="invalid:model-name")
+except Exception:
+    pass  # Error is automatically recorded with error_type and error_message
+```
+
+### Creating Custom Stores
+
+Implement the `EvalStore` protocol to create custom storage backends:
+
+```python
+from gluellm.eval import EvalStore
+from gluellm.models.eval import EvalRecord
+
+class DatabaseStore:
+    """Custom store that saves to a database."""
+
+    async def record(self, record: EvalRecord) -> None:
+        # Your database save logic
+        await db.insert("eval_records", record.model_dump_dict())
+
+    async def close(self) -> None:
+        # Cleanup if needed
+        await db.close()
+
+# Use your custom store
+client = GlueLLM(eval_store=DatabaseStore())
+```
+
+The `EvalStore` protocol requires:
+- `async def record(record: EvalRecord) -> None`: Record an evaluation
+- `async def close() -> None`: Cleanup resources
+
+### Best Practices
+
+1. **Always close stores**: Call `await store.close()` when done to ensure all records are flushed
+2. **Use instance-level stores**: For better isolation, use instance-level stores instead of global ones
+3. **Handle errors gracefully**: Recording failures won't break your completions, but monitor them
+4. **Filter when needed**: Use conditional stores to reduce storage costs for high-volume applications
+5. **Analyze regularly**: Regularly analyze recorded data to understand usage patterns and costs
+
+For more examples, see `examples/eval_recording.py`.
 
 ## Structured Output
 
@@ -1428,6 +1775,10 @@ export GLUELLM_LOG_FILE_NAME=gluellm.log         # Log file name
 export GLUELLM_LOG_JSON_FORMAT=false             # Enable JSON structured logging
 export GLUELLM_LOG_MAX_BYTES=10485760            # Max log file size before rotation (10MB)
 export GLUELLM_LOG_BACKUP_COUNT=5                # Number of backup log files to keep
+
+# Evaluation recording
+export GLUELLM_EVAL_RECORDING_ENABLED=false        # Enable/disable recording
+export GLUELLM_EVAL_RECORDING_PATH=logs/eval_records.jsonl  # Default file path
 
 # API Keys (optional - can also use provider-specific vars)
 export GLUELLM_OPENAI_API_KEY=your-key
@@ -3282,10 +3633,17 @@ gluellm/
 │   ├── api.py                   # Core API (GlueLLM, complete, structured_complete)
 │   ├── cli.py                   # Command-line interface
 │   ├── config.py                # Configuration management
+│   ├── eval/
+│   │   ├── __init__.py          # Public API, global store registration
+│   │   ├── store.py              # EvalStore protocol
+│   │   ├── jsonl_store.py       # Built-in file storage
+│   │   ├── callback_store.py    # Wrapper for custom callbacks
+│   │   └── multi_store.py       # Fan-out to multiple stores
 │   ├── models/
 │   │   ├── agent.py            # Agent model
 │   │   ├── config.py           # Request configuration
 │   │   ├── conversation.py     # Conversation and message models
+│   │   ├── eval.py             # Evaluation record model
 │   │   ├── prompt.py           # Prompt templates
 │   │   └── workflow.py         # Workflow configurations
 │   ├── executors/
