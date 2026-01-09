@@ -578,6 +578,7 @@ The evaluation recording system automatically captures:
 - **Request data**: User messages, system prompts, model configuration, conversation state
 - **Response data**: Final responses, structured outputs, raw API responses
 - **Tool execution**: Tool calls made, execution history, available tools
+- **Agent data**: When using `AgentExecutor` or `AgentStructuredExecutor`, full agent configuration (name, description, model, system prompt, tools, max iterations) is automatically captured
 - **Metrics**: Latency, token usage, estimated costs
 - **Outcomes**: Success/failure status, error types and messages
 
@@ -737,6 +738,12 @@ from gluellm.models.eval import EvalRecord
 # - tool_calls_made: Number of tool calls executed
 # - tool_execution_history: Complete tool call history
 # - tools_available: List of available tool names
+# - agent_name: Name of the agent used (if using AgentExecutor)
+# - agent_description: Description of the agent (if using AgentExecutor)
+# - agent_model: Model configured for the agent (if using AgentExecutor)
+# - agent_system_prompt: System prompt configured for the agent (if using AgentExecutor)
+# - agent_tools: List of tool names available to the agent (if using AgentExecutor)
+# - agent_max_tool_iterations: Max tool iterations configured for the agent (if using AgentExecutor)
 # - latency_ms: Total request latency
 # - tokens_used: Token usage dict (prompt, completion, total)
 # - estimated_cost_usd: Estimated cost in USD
@@ -744,6 +751,46 @@ from gluellm.models.eval import EvalRecord
 # - error_type: Error type if failed
 # - error_message: Error message if failed
 ```
+
+#### Agent Data Recording
+
+When using `AgentExecutor` or `AgentStructuredExecutor`, agent information is automatically captured in evaluation records. This happens transparently via context variables - no additional configuration needed:
+
+```python
+from gluellm.executors import AgentExecutor
+from gluellm.models.agent import Agent
+from gluellm.models.prompt import SystemPrompt
+from gluellm.eval import JSONLFileStore
+
+# Create an agent
+agent = Agent(
+    name="Research Assistant",
+    description="Helps with research tasks",
+    system_prompt=SystemPrompt(content="You are a research assistant."),
+    tools=[search_tool],
+    model="openai:gpt-4o-mini",
+    max_tool_iterations=5,
+)
+
+# Enable recording
+store = JSONLFileStore("./agent_records.jsonl")
+
+# Use AgentExecutor - agent data is automatically recorded
+executor = AgentExecutor(agent=agent)
+result = await executor.execute("Research quantum computing")
+
+await store.close()
+
+# The record will include:
+# - agent_name: "Research Assistant"
+# - agent_description: "Helps with research tasks"
+# - agent_model: "openai:gpt-4o-mini"
+# - agent_system_prompt: "You are a research assistant."
+# - agent_tools: ["search_tool"]
+# - agent_max_tool_iterations: 5
+```
+
+Agent data is only recorded when using executors. Direct `GlueLLM` calls will have `None` for all agent fields.
 
 ### Advanced Usage
 

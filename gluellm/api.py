@@ -56,9 +56,11 @@ import os
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Annotated, Any, TypeVar
 
 if TYPE_CHECKING:
+    from gluellm.models.agent import Agent
     from gluellm.models.embedding import EmbeddingResult
 
 from any_llm import acompletion as any_llm_acompletion
@@ -95,6 +97,11 @@ from gluellm.telemetry import (
 
 # Configure logging
 logger = get_logger(__name__)
+
+# Context variable to store current agent during executor execution
+# This allows _record_eval_data to automatically capture agent information
+# when AgentExecutor is used, without requiring API changes
+_current_agent: ContextVar["Agent | None"] = ContextVar("_current_agent", default=None)
 
 # ============================================================================
 # Constants
@@ -261,6 +268,25 @@ async def _record_eval_data(
     if not eval_store:
         return
 
+    # Get agent from context (set by AgentExecutor)
+    agent = _current_agent.get()
+
+    # Extract agent information if available
+    agent_name = None
+    agent_description = None
+    agent_model = None
+    agent_system_prompt = None
+    agent_tools = None
+    agent_max_tool_iterations = None
+
+    if agent:
+        agent_name = agent.name
+        agent_description = agent.description
+        agent_model = agent.model
+        agent_system_prompt = agent.system_prompt.content if agent.system_prompt else None
+        agent_tools = [tool.__name__ for tool in agent.tools] if agent.tools else []
+        agent_max_tool_iterations = agent.max_tool_iterations
+
     try:
         latency_ms = (time.time() - start_time) * 1000.0
 
@@ -347,6 +373,12 @@ async def _record_eval_data(
                 tokens_used=result.tokens_used,
                 estimated_cost_usd=result.estimated_cost_usd,
                 success=True,
+                agent_name=agent_name,
+                agent_description=agent_description,
+                agent_model=agent_model,
+                agent_system_prompt=agent_system_prompt,
+                agent_tools=agent_tools,
+                agent_max_tool_iterations=agent_max_tool_iterations,
             )
         else:
             # Error case
@@ -364,6 +396,12 @@ async def _record_eval_data(
                 success=False,
                 error_type=type(error).__name__ if error else None,
                 error_message=str(error) if error else None,
+                agent_name=agent_name,
+                agent_description=agent_description,
+                agent_model=agent_model,
+                agent_system_prompt=agent_system_prompt,
+                agent_tools=agent_tools,
+                agent_max_tool_iterations=agent_max_tool_iterations,
             )
 
         # Record asynchronously (fire and forget)

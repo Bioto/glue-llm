@@ -32,6 +32,12 @@ class EvalRecord(BaseModel):
         tool_calls_made: Number of tool calls executed
         tool_execution_history: Complete history of tool calls and results
         tools_available: List of tool names available to the model
+        agent_name: Name of the agent used (if using AgentExecutor)
+        agent_description: Description of the agent (if using AgentExecutor)
+        agent_model: Model configured for the agent (if using AgentExecutor)
+        agent_system_prompt: System prompt configured for the agent (if using AgentExecutor)
+        agent_tools: List of tool names available to the agent (if using AgentExecutor)
+        agent_max_tool_iterations: Max tool iterations configured for the agent (if using AgentExecutor)
         latency_ms: Total request latency in milliseconds
         tokens_used: Token usage dictionary with 'prompt', 'completion', 'total'
         estimated_cost_usd: Estimated cost in USD
@@ -51,6 +57,16 @@ class EvalRecord(BaseModel):
     model: str = Field(description="Model identifier (provider:model_name)")
     messages_snapshot: list[dict[str, Any]] = Field(
         default_factory=list, description="Full conversation state at time of request"
+    )
+
+    # Agent information (optional - only present when using AgentExecutor)
+    agent_name: str | None = Field(default=None, description="Name of the agent used")
+    agent_description: str | None = Field(default=None, description="Description of the agent")
+    agent_model: str | None = Field(default=None, description="Model configured for the agent")
+    agent_system_prompt: str | None = Field(default=None, description="System prompt configured for the agent")
+    agent_tools: list[str] | None = Field(default=None, description="List of tool names available to the agent")
+    agent_max_tool_iterations: int | None = Field(
+        default=None, description="Max tool iterations configured for the agent"
     )
 
     # Response
