@@ -75,7 +75,10 @@ from tenacity import (
 
 from gluellm.config import settings
 from gluellm.costing.pricing_data import calculate_cost
+from gluellm.eval import get_global_eval_store
+from gluellm.eval.store import EvalStore
 from gluellm.models.conversation import Conversation, Role
+from gluellm.models.eval import EvalRecord
 from gluellm.observability.logging_config import get_logger
 from gluellm.rate_limiting.api_key_pool import extract_provider_from_model
 from gluellm.rate_limiting.rate_limiter import acquire_rate_limit
@@ -229,6 +232,146 @@ def reset_session_tracker() -> dict[str, Any]:
         Dictionary with the final session statistics before reset.
     """
     return _session_tracker.reset()
+
+
+async def _record_eval_data(
+    eval_store: EvalStore | None,
+    user_message: str,
+    system_prompt: str,
+    model: str,
+    messages_snapshot: list[dict],
+    start_time: float,
+    result: "ExecutionResult | None" = None,
+    error: Exception | None = None,
+    tools_available: list[Callable] | None = None,
+) -> None:
+    """Record evaluation data to the eval store.
+
+    Args:
+        eval_store: The evaluation store to record to (None = no recording)
+        user_message: The user's input message
+        system_prompt: System prompt used
+        model: Model identifier
+        messages_snapshot: Full conversation state
+        start_time: Request start time (from time.time())
+        result: ExecutionResult if successful
+        error: Exception if request failed
+        tools_available: List of available tools
+    """
+    if not eval_store:
+        return
+
+    try:
+        latency_ms = (time.time() - start_time) * 1000.0
+
+        # Extract tool names
+        tools_available_names = [tool.__name__ for tool in (tools_available or [])]
+
+        # Build EvalRecord
+        if result:
+            # Success case
+            # Serialize raw_response if present
+            raw_response_dict = None
+            if result.raw_response:
+                try:
+                    # Convert ChatCompletion to dict
+                    raw_response_dict = {
+                        "id": getattr(result.raw_response, "id", None),
+                        "model": getattr(result.raw_response, "model", None),
+                        "choices": [
+                            {
+                                "index": getattr(choice, "index", None),
+                                "message": {
+                                    "role": getattr(choice.message, "role", None),
+                                    "content": getattr(choice.message, "content", None),
+                                    "tool_calls": [
+                                        {
+                                            "id": getattr(tc, "id", None),
+                                            "type": getattr(tc, "type", None),
+                                            "function": {
+                                                "name": getattr(tc.function, "name", None),
+                                                "arguments": getattr(tc.function, "arguments", None),
+                                            },
+                                        }
+                                        for tc in (getattr(choice.message, "tool_calls", None) or [])
+                                    ],
+                                },
+                                "finish_reason": getattr(choice, "finish_reason", None),
+                            }
+                            for choice in (getattr(result.raw_response, "choices", None) or [])
+                        ],
+                        "usage": {
+                            "prompt_tokens": getattr(result.raw_response.usage, "prompt_tokens", None)
+                            if hasattr(result.raw_response, "usage") and result.raw_response.usage
+                            else None,
+                            "completion_tokens": getattr(result.raw_response.usage, "completion_tokens", None)
+                            if hasattr(result.raw_response, "usage") and result.raw_response.usage
+                            else None,
+                            "total_tokens": getattr(result.raw_response.usage, "total_tokens", None)
+                            if hasattr(result.raw_response, "usage") and result.raw_response.usage
+                            else None,
+                        }
+                        if hasattr(result.raw_response, "usage") and result.raw_response.usage
+                        else None,
+                    }
+                except Exception as e:
+                    logger.debug(f"Failed to serialize raw_response: {e}")
+
+            # Serialize structured_output if present
+            structured_output_serialized = None
+            if result.structured_output:
+                try:
+                    if hasattr(result.structured_output, "model_dump"):
+                        structured_output_serialized = result.structured_output.model_dump()
+                    elif hasattr(result.structured_output, "dict"):
+                        structured_output_serialized = result.structured_output.dict()
+                    else:
+                        structured_output_serialized = str(result.structured_output)
+                except Exception as e:
+                    logger.debug(f"Failed to serialize structured_output: {e}")
+                    structured_output_serialized = str(result.structured_output)
+
+            record = EvalRecord(
+                correlation_id=get_correlation_id(),
+                user_message=user_message,
+                system_prompt=system_prompt,
+                model=model,
+                messages_snapshot=messages_snapshot,
+                final_response=result.final_response,
+                structured_output=structured_output_serialized,
+                raw_response=raw_response_dict,
+                tool_calls_made=result.tool_calls_made,
+                tool_execution_history=result.tool_execution_history,
+                tools_available=tools_available_names,
+                latency_ms=latency_ms,
+                tokens_used=result.tokens_used,
+                estimated_cost_usd=result.estimated_cost_usd,
+                success=True,
+            )
+        else:
+            # Error case
+            record = EvalRecord(
+                correlation_id=get_correlation_id(),
+                user_message=user_message,
+                system_prompt=system_prompt,
+                model=model,
+                messages_snapshot=messages_snapshot,
+                final_response="",
+                tool_calls_made=0,
+                tool_execution_history=[],
+                tools_available=tools_available_names,
+                latency_ms=latency_ms,
+                success=False,
+                error_type=type(error).__name__ if error else None,
+                error_message=str(error) if error else None,
+            )
+
+        # Record asynchronously (fire and forget)
+        await eval_store.record(record)
+
+    except Exception as e:
+        # Log but don't raise - recording failures shouldn't break completions
+        logger.error(f"Failed to record evaluation data: {e}", exc_info=True)
 
 
 def _calculate_and_record_cost(
@@ -841,6 +984,7 @@ class GlueLLM:
         system_prompt: str | None = None,
         tools: list[Callable] | None = None,
         max_tool_iterations: int | None = None,
+        eval_store: EvalStore | None = None,
     ):
         """Initialize GlueLLM client.
 
@@ -850,6 +994,7 @@ class GlueLLM:
             system_prompt: System prompt content (defaults to settings.default_system_prompt)
             tools: List of callable functions to use as tools
             max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
+            eval_store: Optional evaluation store for recording request/response data (defaults to global store if set)
         """
         self.model = model or settings.default_model
         self.embedding_model = embedding_model or settings.default_embedding_model
@@ -857,6 +1002,7 @@ class GlueLLM:
         self.tools = tools or []
         self.max_tool_iterations = max_tool_iterations or settings.max_tool_iterations
         self._conversation = Conversation()
+        self.eval_store = eval_store or get_global_eval_store()
 
     async def complete(
         self,
@@ -902,6 +1048,13 @@ class GlueLLM:
         correlation_id = get_correlation_id()
         logger.info(f"Starting completion request: correlation_id={correlation_id}, message_length={len(user_message)}")
 
+        # Capture start time for evaluation recording
+        start_time = time.time()
+        system_prompt_content = self._format_system_prompt()
+        messages_snapshot: list[dict] = []
+        result: ExecutionResult | None = None
+        error: Exception | None = None
+
         # Use shutdown context to track in-flight requests for entire execution
         try:
             with ShutdownContext():
@@ -911,9 +1064,10 @@ class GlueLLM:
                 # Build initial messages
                 system_message = {
                     "role": "system",
-                    "content": self._format_system_prompt(),
+                    "content": system_prompt_content,
                 }
                 messages = [system_message] + self._conversation.messages_dict
+                messages_snapshot = messages.copy()
 
                 tool_execution_history = []
                 tool_calls_made = 0
@@ -1113,7 +1267,7 @@ class GlueLLM:
                         correlation_id=correlation_id,
                     )
 
-                    return ExecutionResult(
+                    result = ExecutionResult(
                         final_response=final_content,
                         tool_calls_made=tool_calls_made,
                         tool_execution_history=tool_execution_history,
@@ -1122,6 +1276,20 @@ class GlueLLM:
                         estimated_cost_usd=estimated_cost,
                         model=self.model,
                     )
+
+                    # Record evaluation data
+                    await _record_eval_data(
+                        eval_store=self.eval_store,
+                        user_message=user_message,
+                        system_prompt=system_prompt_content,
+                        model=model or self.model,
+                        messages_snapshot=messages_snapshot,
+                        start_time=start_time,
+                        result=result,
+                        tools_available=self.tools,
+                    )
+
+                    return result
 
                 # Max iterations reached
                 logger.warning(f"Max tool execution iterations ({self.max_tool_iterations}) reached")
@@ -1137,7 +1305,7 @@ class GlueLLM:
                     correlation_id=correlation_id,
                 )
 
-                return ExecutionResult(
+                result = ExecutionResult(
                     final_response=final_content,
                     tool_calls_made=tool_calls_made,
                     tool_execution_history=tool_execution_history,
@@ -1146,7 +1314,36 @@ class GlueLLM:
                     estimated_cost_usd=estimated_cost,
                     model=self.model,
                 )
+
+                # Record evaluation data
+                await _record_eval_data(
+                    eval_store=self.eval_store,
+                    user_message=user_message,
+                    system_prompt=system_prompt_content,
+                    model=model or self.model,
+                    messages_snapshot=messages_snapshot,
+                    start_time=start_time,
+                    result=result,
+                    tools_available=self.tools,
+                )
+
+                return result
+        except Exception as e:
+            error = e
+            raise
         finally:
+            # Record evaluation data on error if not already recorded
+            if error and not result:
+                await _record_eval_data(
+                    eval_store=self.eval_store,
+                    user_message=user_message,
+                    system_prompt=system_prompt_content,
+                    model=model or self.model,
+                    messages_snapshot=messages_snapshot,
+                    start_time=start_time,
+                    error=error,
+                    tools_available=self.tools,
+                )
             # Clear correlation ID after request completes
             clear_correlation_id()
 
@@ -1206,6 +1403,13 @@ class GlueLLM:
             f"response_format={response_format.__name__}, message_length={len(user_message)}"
         )
 
+        # Capture start time for evaluation recording
+        start_time = time.time()
+        system_prompt_content = self._format_system_prompt()
+        messages_snapshot: list[dict] = []
+        result: ExecutionResult | None = None
+        error: Exception | None = None
+
         # Determine which tools to use: parameter overrides instance tools
         tools_to_use = tools if tools is not None else self.tools
 
@@ -1218,9 +1422,10 @@ class GlueLLM:
                 # Build initial messages
                 system_message = {
                     "role": "system",
-                    "content": self._format_system_prompt(),
+                    "content": system_prompt_content,
                 }
                 messages = [system_message] + self._conversation.messages_dict
+                messages_snapshot = messages.copy()
 
                 tool_execution_history = []
                 tool_calls_made = 0
@@ -1249,7 +1454,8 @@ class GlueLLM:
                         tokens_used=iteration_tokens,
                         correlation_id=correlation_id,
                     )
-                    total_cost += iteration_cost
+                    if iteration_cost is not None:
+                        total_cost += iteration_cost
 
                 # PHASE 1: Tool execution loop (if tools are provided and execute_tools is True)
                 if tools_to_use and execute_tools:
@@ -1479,17 +1685,46 @@ class GlueLLM:
 
                 logger.info(f"Structured completion finished: tool_calls={tool_calls_made}, cost=${total_cost:.6f}")
 
-                return ExecutionResult(
+                result = ExecutionResult(
                     final_response=content or "",
                     tool_calls_made=tool_calls_made,
                     tool_execution_history=tool_execution_history,
                     raw_response=response,
                     tokens_used=total_tokens_used,
-                    estimated_cost_usd=total_cost,
+                    estimated_cost_usd=total_cost if total_cost > 0 else None,
                     model=model or self.model,
                     structured_output=structured_output,
                 )
+
+                # Record evaluation data
+                await _record_eval_data(
+                    eval_store=self.eval_store,
+                    user_message=user_message,
+                    system_prompt=system_prompt_content,
+                    model=model or self.model,
+                    messages_snapshot=messages_snapshot,
+                    start_time=start_time,
+                    result=result,
+                    tools_available=tools_to_use,
+                )
+
+                return result
+        except Exception as e:
+            error = e
+            raise
         finally:
+            # Record evaluation data on error if not already recorded
+            if error and not result:
+                await _record_eval_data(
+                    eval_store=self.eval_store,
+                    user_message=user_message,
+                    system_prompt=system_prompt_content,
+                    model=model or self.model,
+                    messages_snapshot=messages_snapshot,
+                    start_time=start_time,
+                    error=error,
+                    tools_available=tools_to_use,
+                )
             # Clear correlation ID after request completes
             clear_correlation_id()
 
