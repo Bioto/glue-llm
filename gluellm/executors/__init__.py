@@ -137,13 +137,21 @@ class AgentExecutor(Executor):
         Returns:
             str: The LLM's final response
         """
-        client = GlueLLM(
-            model=self.agent.model,
-            system_prompt=self.agent.system_prompt.content if self.agent.system_prompt else None,
-            tools=self.agent.tools,
-            max_tool_iterations=self.agent.max_tool_iterations,
-        )
-        return await client.complete(query)
+        from gluellm.api import _current_agent
+
+        # Set agent in context for automatic recording
+        token = _current_agent.set(self.agent)
+        try:
+            client = GlueLLM(
+                model=self.agent.model,
+                system_prompt=self.agent.system_prompt.content if self.agent.system_prompt else None,
+                tools=self.agent.tools,
+                max_tool_iterations=self.agent.max_tool_iterations,
+            )
+            return await client.complete(query)
+        finally:
+            # Reset context variable
+            _current_agent.reset(token)
 
 
 class AgentStructuredExecutor(Executor):
@@ -156,13 +164,21 @@ class AgentStructuredExecutor(Executor):
 
     async def _execute_internal(self, query: str) -> ExecutionResult:
         """Execute a query using the agent's configuration and return structured output."""
-        client = GlueLLM(
-            model=self.agent.model,
-            system_prompt=self.agent.system_prompt.content if self.agent.system_prompt else None,
-            tools=self.agent.tools,
-            max_tool_iterations=self.agent.max_tool_iterations,
-        )
-        return await client.structured_complete(query, self.response_format)
+        from gluellm.api import _current_agent
+
+        # Set agent in context for automatic recording
+        token = _current_agent.set(self.agent)
+        try:
+            client = GlueLLM(
+                model=self.agent.model,
+                system_prompt=self.agent.system_prompt.content if self.agent.system_prompt else None,
+                tools=self.agent.tools,
+                max_tool_iterations=self.agent.max_tool_iterations,
+            )
+            return await client.structured_complete(query, self.response_format)
+        finally:
+            # Reset context variable
+            _current_agent.reset(token)
 
 
 __all__ = [

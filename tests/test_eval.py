@@ -18,7 +18,10 @@ from gluellm.eval import (
     get_global_eval_store,
     set_global_eval_store,
 )
+from gluellm.executors import AgentExecutor, AgentStructuredExecutor
+from gluellm.models.agent import Agent
 from gluellm.models.eval import EvalRecord
+from gluellm.models.prompt import SystemPrompt
 
 # Test Fixtures
 
@@ -1060,3 +1063,256 @@ class TestEvalEdgeCases:
 
             # Verify all three distinct requests were recorded
             assert user_messages == {"Request 1", "Request 2", "Request 3"}
+
+
+@pytest.mark.asyncio
+class TestAgentDataRecording:
+    """Tests for agent data recording via context variable."""
+
+    async def test_agent_executor_records_agent_data(self, temp_jsonl_file):
+        """Test that AgentExecutor automatically records agent information."""
+        store = JSONLFileStore(temp_jsonl_file)
+        set_global_eval_store(store)
+
+        # Create an agent
+        agent = Agent(
+            name="Test Agent",
+            description="A test agent for evaluation",
+            system_prompt=SystemPrompt(content="You are a helpful test agent."),
+            tools=[],
+            model="openai:gpt-4o-mini",
+            max_tool_iterations=5,
+        )
+
+        executor = AgentExecutor(agent=agent)
+
+        # Mock the LLM call
+        with patch("gluellm.api._llm_call_with_retry") as mock_call:
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "Test response"
+            mock_response.choices[0].message.tool_calls = None
+            mock_response.usage = None
+            mock_call.return_value = mock_response
+
+            await executor.execute("Test query")
+
+        await store.close()
+
+        # Verify agent data was recorded
+        with temp_jsonl_file.open() as f:
+            lines = [line.strip() for line in f if line.strip()]
+            assert len(lines) == 1
+            data = json.loads(lines[0])
+
+            assert data["agent_name"] == "Test Agent"
+            assert data["agent_description"] == "A test agent for evaluation"
+            assert data["agent_model"] == "openai:gpt-4o-mini"
+            assert data["agent_system_prompt"] == "You are a helpful test agent."
+            assert data["agent_tools"] == []
+            assert data["agent_max_tool_iterations"] == 5
+
+    async def test_agent_executor_with_tools_records_tool_names(self, temp_jsonl_file):
+        """Test that agent tools are correctly recorded."""
+        store = JSONLFileStore(temp_jsonl_file)
+        set_global_eval_store(store)
+
+        def test_tool(x: str) -> str:
+            return f"Result: {x}"
+
+        agent = Agent(
+            name="Tool Agent",
+            description="An agent with tools",
+            system_prompt=SystemPrompt(content="You have tools."),
+            tools=[test_tool],
+            model="openai:gpt-4o-mini",
+            max_tool_iterations=3,
+        )
+
+        executor = AgentExecutor(agent=agent)
+
+        # Mock the LLM call
+        with patch("gluellm.api._llm_call_with_retry") as mock_call:
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "Response"
+            mock_response.choices[0].message.tool_calls = None
+            mock_response.usage = None
+            mock_call.return_value = mock_response
+
+            await executor.execute("Test")
+
+        await store.close()
+
+        # Verify agent tools were recorded
+        with temp_jsonl_file.open() as f:
+            lines = [line.strip() for line in f if line.strip()]
+            data = json.loads(lines[0])
+            assert data["agent_tools"] == ["test_tool"]
+
+    async def test_direct_glue_llm_no_agent_data(self, temp_jsonl_file):
+        """Test that direct GlueLLM calls (not via executor) have no agent data."""
+        store = JSONLFileStore(temp_jsonl_file)
+        client = GlueLLM(eval_store=store)
+
+        # Mock the LLM call
+        with patch("gluellm.api._llm_call_with_retry") as mock_call:
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "Response"
+            mock_response.choices[0].message.tool_calls = None
+            mock_response.usage = None
+            mock_call.return_value = mock_response
+
+            await client.complete("Test")
+
+        await store.close()
+
+        # Verify no agent data was recorded
+        with temp_jsonl_file.open() as f:
+            lines = [line.strip() for line in f if line.strip()]
+            data = json.loads(lines[0])
+            assert data["agent_name"] is None
+            assert data["agent_description"] is None
+            assert data["agent_model"] is None
+            assert data["agent_system_prompt"] is None
+            assert data["agent_tools"] is None
+            assert data["agent_max_tool_iterations"] is None
+
+    async def test_agent_structured_executor_records_agent_data(self, temp_jsonl_file):
+        """Test that AgentStructuredExecutor records agent information."""
+        store = JSONLFileStore(temp_jsonl_file)
+        set_global_eval_store(store)
+
+        class Answer(BaseModel):
+            value: int
+
+        agent = Agent(
+            name="Structured Agent",
+            description="An agent for structured output",
+            system_prompt=SystemPrompt(content="You provide structured answers."),
+            tools=[],
+            model="openai:gpt-4o-mini",
+            max_tool_iterations=10,
+        )
+
+        executor = AgentStructuredExecutor(agent=agent, response_format=Answer)
+
+        # Mock the LLM call
+        with patch("gluellm.api._llm_call_with_retry") as mock_call:
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = '{"value": 42}'
+            mock_response.choices[0].message.tool_calls = None
+            mock_response.usage = None
+            mock_call.return_value = mock_response
+
+            await executor.execute("What is 2+2?")
+
+        await store.close()
+
+        # Verify agent data was recorded
+        with temp_jsonl_file.open() as f:
+            lines = [line.strip() for line in f if line.strip()]
+            assert len(lines) == 1
+            data = json.loads(lines[0])
+
+            assert data["agent_name"] == "Structured Agent"
+            assert data["agent_description"] == "An agent for structured output"
+            assert data["agent_model"] == "openai:gpt-4o-mini"
+            assert data["agent_max_tool_iterations"] == 10
+
+    async def test_agent_context_isolation(self, temp_jsonl_file):
+        """Test that agent context is properly isolated in concurrent execution."""
+        store = JSONLFileStore(temp_jsonl_file)
+        set_global_eval_store(store)
+
+        agent1 = Agent(
+            name="Agent 1",
+            description="First agent",
+            system_prompt=SystemPrompt(content="Agent 1 prompt"),
+            tools=[],
+            model="openai:gpt-4o-mini",
+            max_tool_iterations=1,
+        )
+
+        agent2 = Agent(
+            name="Agent 2",
+            description="Second agent",
+            system_prompt=SystemPrompt(content="Agent 2 prompt"),
+            tools=[],
+            model="openai:gpt-4o-mini",
+            max_tool_iterations=2,
+        )
+
+        executor1 = AgentExecutor(agent=agent1)
+        executor2 = AgentExecutor(agent=agent2)
+
+        # Mock the LLM call
+        with patch("gluellm.api._llm_call_with_retry") as mock_call:
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "Response"
+            mock_response.choices[0].message.tool_calls = None
+            mock_response.usage = None
+            mock_call.return_value = mock_response
+
+            # Execute concurrently
+            await asyncio.gather(
+                executor1.execute("Query 1"),
+                executor2.execute("Query 2"),
+            )
+
+        await store.close()
+
+        # Verify each record has correct agent data
+        with temp_jsonl_file.open() as f:
+            lines = [line.strip() for line in f if line.strip()]
+            assert len(lines) == 2
+
+            agent_names = {json.loads(line)["agent_name"] for line in lines}
+            assert agent_names == {"Agent 1", "Agent 2"}
+
+            # Verify each has correct max_tool_iterations
+            for line in lines:
+                data = json.loads(line)
+                if data["agent_name"] == "Agent 1":
+                    assert data["agent_max_tool_iterations"] == 1
+                elif data["agent_name"] == "Agent 2":
+                    assert data["agent_max_tool_iterations"] == 2
+
+    async def test_agent_with_none_system_prompt(self, temp_jsonl_file):
+        """Test that agent with None system_prompt is handled correctly."""
+        store = JSONLFileStore(temp_jsonl_file)
+        set_global_eval_store(store)
+
+        agent = Agent(
+            name="No Prompt Agent",
+            description="Agent without system prompt",
+            system_prompt=None,
+            tools=[],
+            model="openai:gpt-4o-mini",
+            max_tool_iterations=5,
+        )
+
+        executor = AgentExecutor(agent=agent)
+
+        # Mock the LLM call
+        with patch("gluellm.api._llm_call_with_retry") as mock_call:
+            mock_response = MagicMock()
+            mock_response.choices = [MagicMock()]
+            mock_response.choices[0].message.content = "Response"
+            mock_response.choices[0].message.tool_calls = None
+            mock_response.usage = None
+            mock_call.return_value = mock_response
+
+            await executor.execute("Test")
+
+        await store.close()
+
+        # Verify None system_prompt is handled
+        with temp_jsonl_file.open() as f:
+            lines = [line.strip() for line in f if line.strip()]
+            data = json.loads(lines[0])
+            assert data["agent_name"] == "No Prompt Agent"
+            assert data["agent_system_prompt"] is None
