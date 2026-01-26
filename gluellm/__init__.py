@@ -69,6 +69,7 @@ Exceptions:
     - AuthenticationError: Authentication failed
 """
 
+from gluellm._version import get_version
 from gluellm.api import (
     APIConnectionError,
     AuthenticationError,
@@ -249,4 +250,4 @@ __all__ = [
     "create_openai_response_format",
 ]
 
-__version__ = "0.1.0"
+__version__ = get_version()
