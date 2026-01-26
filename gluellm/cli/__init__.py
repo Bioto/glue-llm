@@ -15,6 +15,7 @@ The main CLI is assembled from these groups in the main module.
 
 import click
 
+from gluellm._version import get_version
 from gluellm.cli.commands.completion import completion_commands
 from gluellm.cli.commands.infrastructure import infrastructure_commands
 from gluellm.cli.commands.tools import tools_commands
@@ -24,6 +25,7 @@ from gluellm.cli.utils import get_weather
 
 
 @click.group()
+@click.version_option(version=get_version(), prog_name="gluellm")
 def cli() -> None:
     """GlueLLM CLI - Command-line interface for GlueLLM operations.
 
