@@ -105,6 +105,12 @@ from gluellm.eval import (
     get_global_eval_store,
     set_global_eval_store,
 )
+from gluellm.guardrails import (
+    GuardrailBlockedError,
+    GuardrailRejectedError,
+    GuardrailsConfig,
+    PromptGuidedConfig,
+)
 from gluellm.models.batch import (
     APIKeyConfig,
     BatchConfig,
@@ -202,6 +208,11 @@ __all__ = [
     "APIConnectionError",
     "InvalidRequestError",
     "AuthenticationError",
+    # Guardrails
+    "GuardrailsConfig",
+    "PromptGuidedConfig",
+    "GuardrailBlockedError",
+    "GuardrailRejectedError",
     # Models
     "RequestConfig",
     "Conversation",

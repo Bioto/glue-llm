@@ -79,6 +79,8 @@ from gluellm.config import settings
 from gluellm.costing.pricing_data import calculate_cost
 from gluellm.eval import get_global_eval_store
 from gluellm.eval.store import EvalStore
+from gluellm.guardrails import GuardrailBlockedError, GuardrailRejectedError, GuardrailsConfig
+from gluellm.guardrails.runner import run_input_guardrails, run_output_guardrails
 from gluellm.models.conversation import Conversation, Role
 from gluellm.models.eval import EvalRecord
 from gluellm.observability.logging_config import get_logger
@@ -1023,6 +1025,7 @@ class GlueLLM:
         tools: list[Callable] | None = None,
         max_tool_iterations: int | None = None,
         eval_store: EvalStore | None = None,
+        guardrails: GuardrailsConfig | None = None,
     ):
         """Initialize GlueLLM client.
 
@@ -1033,6 +1036,7 @@ class GlueLLM:
             tools: List of callable functions to use as tools
             max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
             eval_store: Optional evaluation store for recording request/response data (defaults to global store if set)
+            guardrails: Optional guardrails configuration for input/output validation
         """
         self.model = model or settings.default_model
         self.embedding_model = embedding_model or settings.default_embedding_model
@@ -1041,6 +1045,7 @@ class GlueLLM:
         self.max_tool_iterations = max_tool_iterations or settings.max_tool_iterations
         self._conversation = Conversation()
         self.eval_store = eval_store or get_global_eval_store()
+        self.guardrails = guardrails
 
     async def complete(
         self,
@@ -1050,6 +1055,7 @@ class GlueLLM:
         correlation_id: str | None = None,
         timeout: float | None = None,
         api_key: str | None = None,
+        guardrails: GuardrailsConfig | None = None,
     ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
 
@@ -1059,6 +1065,7 @@ class GlueLLM:
             correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
             timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
             api_key: Optional API key override (for key pool usage)
+            guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
 
         Returns:
             ToolExecutionResult with final response and execution history
@@ -1071,10 +1078,14 @@ class GlueLLM:
             InvalidRequestError: If request parameters are invalid
             asyncio.TimeoutError: If request exceeds timeout
             RuntimeError: If shutdown is in progress
+            GuardrailBlockedError: If input guardrails block the request or output guardrails fail after max retries
         """
         # Check for shutdown
         if is_shutting_down():
             raise RuntimeError("Cannot process request: shutdown in progress")
+
+        # Resolve guardrails config: per-call overrides instance
+        effective_guardrails = guardrails if guardrails is not None else self.guardrails
 
         # Set correlation ID if provided
         if correlation_id:
@@ -1086,6 +1097,13 @@ class GlueLLM:
         correlation_id = get_correlation_id()
         logger.info(f"Starting completion request: correlation_id={correlation_id}, message_length={len(user_message)}")
 
+        # Run input guardrails before processing
+        if effective_guardrails:
+            try:
+                user_message = run_input_guardrails(user_message, effective_guardrails)
+            except GuardrailBlockedError:
+                raise  # Re-raise as-is (no retry for input)
+
         # Capture start time for evaluation recording
         start_time = time.time()
         system_prompt_content = self._format_system_prompt()
@@ -1096,7 +1114,7 @@ class GlueLLM:
         # Use shutdown context to track in-flight requests for entire execution
         try:
             with ShutdownContext():
-                # Add user message to conversation
+                # Add user message to conversation (after input guardrails)
                 self._conversation.add_message(Role.USER, user_message)
 
                 # Build initial messages
@@ -1290,7 +1308,80 @@ class GlueLLM:
                         f"final_response_length={len(final_content)}"
                     )
 
-                    # Add assistant response to conversation
+                    # Output guardrails with retry loop
+                    if effective_guardrails:
+                        max_retries = effective_guardrails.max_output_guardrail_retries
+                        output_retry_count = 0
+                        while output_retry_count <= max_retries:
+                            try:
+                                # Run output guardrails
+                                final_content = run_output_guardrails(final_content, effective_guardrails)
+                                # Guardrails passed, break out of retry loop
+                                break
+                            except GuardrailRejectedError as e:
+                                output_retry_count += 1
+                                if output_retry_count > max_retries:
+                                    # Max retries exceeded, raise blocked error
+                                    logger.warning(f"Output guardrails failed after {max_retries} retries: {e.reason}")
+                                    raise GuardrailBlockedError(
+                                        f"Output guardrails failed after {max_retries} retries: {e.reason}",
+                                        guardrail_name=e.guardrail_name,
+                                    ) from e
+
+                                # Add rejected response to conversation (for context)
+                                messages.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": final_content,
+                                    }
+                                )
+
+                                # Append feedback message requesting revised response
+                                feedback_message = (
+                                    f"Your previous response was rejected: {e.reason}. "
+                                    "Please provide a revised response that addresses this issue."
+                                )
+                                messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": feedback_message,
+                                    }
+                                )
+                                logger.info(
+                                    f"Output guardrail rejected response (attempt {output_retry_count}/{max_retries}): "
+                                    f"{e.reason}. Requesting revised response."
+                                )
+
+                                # Call LLM again for revised response (no tools, just text response)
+                                try:
+                                    response = await _llm_call_with_retry(
+                                        messages=messages,
+                                        model=model or self.model,
+                                        tools=None,  # No tools on retry
+                                        timeout=timeout,
+                                        api_key=api_key,
+                                    )
+                                except LLMError as llm_error:
+                                    # LLM call failed during retry, raise blocked error
+                                    raise GuardrailBlockedError(
+                                        f"Failed to get revised response after guardrail rejection: {llm_error}",
+                                        guardrail_name=e.guardrail_name,
+                                    ) from llm_error
+
+                                if not response.choices:
+                                    raise InvalidRequestError(
+                                        "Empty response from LLM provider during guardrail retry"
+                                    ) from None
+
+                                # Get the revised response
+                                final_content = response.choices[0].message.content or ""
+                                logger.debug(
+                                    f"Received revised response (length={len(final_content)}), "
+                                    f"re-running output guardrails"
+                                )
+                                # Continue loop to re-check guardrails
+
+                    # Add assistant response to conversation (after guardrails pass)
                     self._conversation.add_message(Role.ASSISTANT, final_content)
 
                     # Extract token usage if available
@@ -1395,6 +1486,7 @@ class GlueLLM:
         correlation_id: str | None = None,
         timeout: float | None = None,
         api_key: str | None = None,
+        guardrails: GuardrailsConfig | None = None,
     ) -> ExecutionResult:
         """Complete a request and return structured output.
 
@@ -1411,6 +1503,7 @@ class GlueLLM:
             correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
             timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
             api_key: Optional API key override (for key pool usage)
+            guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
 
         Returns:
             ExecutionResult with structured_output field containing instance of response_format
@@ -1423,10 +1516,14 @@ class GlueLLM:
             InvalidRequestError: If request parameters are invalid
             asyncio.TimeoutError: If request exceeds timeout
             RuntimeError: If shutdown is in progress
+            GuardrailBlockedError: If input guardrails block the request or output guardrails fail after max retries
         """
         # Check for shutdown
         if is_shutting_down():
             raise RuntimeError("Cannot process request: shutdown in progress")
+
+        # Resolve guardrails config: per-call overrides instance
+        effective_guardrails = guardrails if guardrails is not None else self.guardrails
 
         # Set correlation ID if provided
         if correlation_id:
@@ -1441,6 +1538,13 @@ class GlueLLM:
             f"response_format={response_format.__name__}, message_length={len(user_message)}"
         )
 
+        # Run input guardrails before processing
+        if effective_guardrails:
+            try:
+                user_message = run_input_guardrails(user_message, effective_guardrails)
+            except GuardrailBlockedError:
+                raise  # Re-raise as-is (no retry for input)
+
         # Capture start time for evaluation recording
         start_time = time.time()
         system_prompt_content = self._format_system_prompt()
@@ -1454,7 +1558,7 @@ class GlueLLM:
         # Use shutdown context to track in-flight requests for entire execution
         try:
             with ShutdownContext():
-                # Add user message to conversation
+                # Add user message to conversation (after input guardrails)
                 self._conversation.add_message(Role.USER, user_message)
 
                 # Build initial messages
@@ -1696,7 +1800,84 @@ class GlueLLM:
                     f"content_length={len(content) if content else 0}"
                 )
 
-                # Add assistant response to conversation
+                # Output guardrails with retry loop
+                if effective_guardrails and content:
+                    max_retries = effective_guardrails.max_output_guardrail_retries
+                    output_retry_count = 0
+                    while output_retry_count <= max_retries:
+                        try:
+                            # Run output guardrails
+                            content = run_output_guardrails(content, effective_guardrails)
+                            # Guardrails passed, break out of retry loop
+                            break
+                        except GuardrailRejectedError as e:
+                            output_retry_count += 1
+                            if output_retry_count > max_retries:
+                                # Max retries exceeded, raise blocked error
+                                logger.warning(f"Output guardrails failed after {max_retries} retries: {e.reason}")
+                                raise GuardrailBlockedError(
+                                    f"Output guardrails failed after {max_retries} retries: {e.reason}",
+                                    guardrail_name=e.guardrail_name,
+                                ) from e
+
+                            # Add rejected response to conversation (for context)
+                            messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": content,
+                                }
+                            )
+
+                            # Append feedback message requesting revised response
+                            feedback_message = (
+                                f"Your previous response was rejected: {e.reason}. "
+                                "Please provide a revised structured response that addresses this issue."
+                            )
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": feedback_message,
+                                }
+                            )
+                            logger.info(
+                                f"Output guardrail rejected structured response "
+                                f"(attempt {output_retry_count}/{max_retries}): {e.reason}. "
+                                "Requesting revised response."
+                            )
+
+                            # Call LLM again for revised structured response
+                            try:
+                                response = await _llm_call_with_retry(
+                                    messages=messages,
+                                    model=model or self.model,
+                                    response_format=response_format,  # Still request structured output
+                                    timeout=timeout,
+                                    api_key=api_key,
+                                )
+                            except LLMError as llm_error:
+                                # LLM call failed during retry, raise blocked error
+                                raise GuardrailBlockedError(
+                                    f"Failed to get revised structured response after guardrail rejection: {llm_error}",
+                                    guardrail_name=e.guardrail_name,
+                                ) from llm_error
+
+                            _track_usage(response)
+
+                            if not response.choices:
+                                raise InvalidRequestError(
+                                    "Empty response from LLM provider during guardrail retry"
+                                ) from None
+
+                            # Get the revised response
+                            parsed = getattr(response.choices[0].message, "parsed", None)
+                            content = response.choices[0].message.content
+                            logger.debug(
+                                f"Received revised structured response (length={len(content) if content else 0}), "
+                                f"re-running output guardrails"
+                            )
+                            # Continue loop to re-check guardrails
+
+                # Add assistant response to conversation (after guardrails pass)
                 if content:
                     self._conversation.add_message(Role.ASSISTANT, content)
 
@@ -1796,6 +1977,7 @@ class GlueLLM:
         user_message: str,
         execute_tools: bool = True,
         model: str | None = None,
+        guardrails: GuardrailsConfig | None = None,
     ) -> AsyncIterator[StreamingChunk]:
         """Stream completion with automatic tool execution.
 
@@ -1817,6 +1999,8 @@ class GlueLLM:
         Args:
             user_message: The user's message/request
             execute_tools: Whether to automatically execute tools
+            model: Model identifier override (defaults to instance model)
+            guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
 
         Yields:
             StreamingChunk objects with content and metadata
@@ -1827,8 +2011,19 @@ class GlueLLM:
             APIConnectionError: If connection fails after retries
             AuthenticationError: If authentication fails
             InvalidRequestError: If request parameters are invalid
+            GuardrailBlockedError: If input guardrails block the request or output guardrails fail after max retries
         """
-        # Add user message to conversation
+        # Resolve guardrails config: per-call overrides instance
+        effective_guardrails = guardrails if guardrails is not None else self.guardrails
+
+        # Run input guardrails before processing
+        if effective_guardrails:
+            try:
+                user_message = run_input_guardrails(user_message, effective_guardrails)
+            except GuardrailBlockedError:
+                raise  # Re-raise as-is (no retry for input)
+
+        # Add user message to conversation (after input guardrails)
         self._conversation.add_message(Role.USER, user_message)
 
         # Build initial messages
@@ -1860,8 +2055,18 @@ class GlueLLM:
                                     done=False,
                                     tool_calls_made=tool_calls_made,
                                 )
-                    # Final chunk
+                    # Final chunk - run output guardrails on accumulated content
                     if accumulated_content:
+                        if effective_guardrails:
+                            try:
+                                accumulated_content = run_output_guardrails(accumulated_content, effective_guardrails)
+                            except GuardrailRejectedError as e:
+                                # For streaming, we can't easily retry, so raise blocked error
+                                logger.warning(f"Output guardrails rejected streamed content: {e.reason}")
+                                raise GuardrailBlockedError(
+                                    f"Output guardrails rejected streamed content: {e.reason}",
+                                    guardrail_name=e.guardrail_name,
+                                ) from e
                         self._conversation.add_message(Role.ASSISTANT, accumulated_content)
                         yield StreamingChunk(content="", done=True, tool_calls_made=tool_calls_made)
                     return
@@ -2001,6 +2206,76 @@ class GlueLLM:
             final_content = response.choices[0].message.content or ""
             accumulated_content = ""
 
+            # Output guardrails with retry loop (similar to complete())
+            if effective_guardrails and final_content:
+                max_retries = effective_guardrails.max_output_guardrail_retries
+                output_retry_count = 0
+                while output_retry_count <= max_retries:
+                    try:
+                        # Run output guardrails
+                        final_content = run_output_guardrails(final_content, effective_guardrails)
+                        # Guardrails passed, break out of retry loop
+                        break
+                    except GuardrailRejectedError as e:
+                        output_retry_count += 1
+                        if output_retry_count > max_retries:
+                            # Max retries exceeded, raise blocked error
+                            logger.warning(f"Output guardrails failed after {max_retries} retries: {e.reason}")
+                            raise GuardrailBlockedError(
+                                f"Output guardrails failed after {max_retries} retries: {e.reason}",
+                                guardrail_name=e.guardrail_name,
+                            ) from e
+
+                        # Add rejected response to conversation (for context)
+                        messages.append(
+                            {
+                                "role": "assistant",
+                                "content": final_content,
+                            }
+                        )
+
+                        # Append feedback message requesting revised response
+                        feedback_message = (
+                            f"Your previous response was rejected: {e.reason}. "
+                            "Please provide a revised response that addresses this issue."
+                        )
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": feedback_message,
+                            }
+                        )
+                        logger.info(
+                            f"Output guardrail rejected response (attempt {output_retry_count}/{max_retries}): "
+                            f"{e.reason}. Requesting revised response."
+                        )
+
+                        # Call LLM again for revised response (no tools, just text response)
+                        try:
+                            response = await _llm_call_with_retry(
+                                messages=messages,
+                                model=model or self.model,
+                                tools=None,  # No tools on retry
+                            )
+                        except LLMError as llm_error:
+                            # LLM call failed during retry, raise blocked error
+                            raise GuardrailBlockedError(
+                                f"Failed to get revised response after guardrail rejection: {llm_error}",
+                                guardrail_name=e.guardrail_name,
+                            ) from llm_error
+
+                        if not response.choices:
+                            raise InvalidRequestError(
+                                "Empty response from LLM provider during guardrail retry"
+                            ) from None
+
+                        # Get the revised response
+                        final_content = response.choices[0].message.content or ""
+                        logger.debug(
+                            f"Received revised response (length={len(final_content)}), re-running output guardrails"
+                        )
+                        # Continue loop to re-check guardrails
+
             # Stream the final response character by character (simulated streaming)
             # In a real implementation, you'd stream from the API
             if final_content:
@@ -2109,6 +2384,7 @@ async def complete(
     max_tool_iterations: int | None = None,
     correlation_id: str | None = None,
     timeout: float | None = None,
+    guardrails: GuardrailsConfig | None = None,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
 
@@ -2121,6 +2397,7 @@ async def complete(
         max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        guardrails: Optional guardrails configuration
 
     Returns:
         ToolExecutionResult with final response and execution history
@@ -2130,6 +2407,7 @@ async def complete(
         system_prompt=system_prompt,
         tools=tools,
         max_tool_iterations=max_tool_iterations,
+        guardrails=guardrails,
     )
     return await client.complete(
         user_message, execute_tools=execute_tools, correlation_id=correlation_id, timeout=timeout
@@ -2146,6 +2424,7 @@ async def structured_complete(
     max_tool_iterations: int | None = None,
     correlation_id: str | None = None,
     timeout: float | None = None,
+    guardrails: GuardrailsConfig | None = None,
 ) -> ExecutionResult:
     """Quick structured completion with optional tool support.
 
@@ -2163,6 +2442,7 @@ async def structured_complete(
         max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        guardrails: Optional guardrails configuration
 
     Returns:
         ExecutionResult with structured_output field containing instance of response_format
@@ -2206,6 +2486,7 @@ async def structured_complete(
         system_prompt=system_prompt,
         tools=tools,
         max_tool_iterations=max_tool_iterations,
+        guardrails=guardrails,
     )
     return await client.structured_complete(
         user_message,
@@ -2278,6 +2559,7 @@ async def stream_complete(
     tools: list[Callable] | None = None,
     execute_tools: bool = True,
     max_tool_iterations: int | None = None,
+    guardrails: GuardrailsConfig | None = None,
 ) -> AsyncIterator[StreamingChunk]:
     """Stream completion with automatic tool execution.
 
@@ -2299,6 +2581,7 @@ async def stream_complete(
         tools: List of callable functions to use as tools
         execute_tools: Whether to automatically execute tools
         max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
+        guardrails: Optional guardrails configuration
 
     Yields:
         StreamingChunk objects with content and metadata
@@ -2314,6 +2597,7 @@ async def stream_complete(
         system_prompt=system_prompt,
         tools=tools,
         max_tool_iterations=max_tool_iterations,
+        guardrails=guardrails,
     )
     async for chunk in client.stream_complete(user_message, execute_tools=execute_tools):
         yield chunk
