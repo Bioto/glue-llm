@@ -11,6 +11,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
+from typing import Any
 
 from any_llm import aembedding as any_llm_aembedding
 from openai.types.create_embedding_response import CreateEmbeddingResponse
@@ -155,6 +156,7 @@ async def _safe_embedding_call(
     inputs: str | list[str],
     timeout: float | None = None,
     api_key: str | None = None,
+    embedding_kwargs: dict[str, Any] | None = None,
 ) -> CreateEmbeddingResponse:
     """Make an embedding call with error classification and tracing.
 
@@ -167,6 +169,7 @@ async def _safe_embedding_call(
         inputs: Single text string or list of text strings to embed
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
         api_key: Optional API key override (for key pool usage)
+        embedding_kwargs: Optional dictionary of provider-specific arguments to pass to the embedding API
 
     Returns:
         CreateEmbeddingResponse from the embedding API
@@ -219,10 +222,13 @@ async def _safe_embedding_call(
             # Use context manager for temporary API key
             with _temporary_api_key(model, api_key):
                 # Make embedding call with timeout
+                # Pass through any embedding-specific kwargs to the provider
+                embedding_kwargs_dict = embedding_kwargs or {}
                 response = await asyncio.wait_for(
                     any_llm_aembedding(
                         model=model,
                         inputs=inputs,
+                        **embedding_kwargs_dict,
                     ),
                     timeout=timeout,
                 )
@@ -324,6 +330,7 @@ async def _embedding_call_with_retry(
     inputs: str | list[str],
     timeout: float | None = None,
     api_key: str | None = None,
+    embedding_kwargs: dict[str, Any] | None = None,
 ) -> CreateEmbeddingResponse:
     """Make an embedding call with automatic retry on transient errors.
 
@@ -342,12 +349,14 @@ async def _embedding_call_with_retry(
         inputs: Single text string or list of text strings to embed
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
         api_key: Optional API key override (for key pool usage)
+        embedding_kwargs: Optional dictionary of provider-specific arguments to pass to the embedding API
     """
     return await _safe_embedding_call(
         model=model,
         inputs=inputs,
         timeout=timeout,
         api_key=api_key,
+        embedding_kwargs=embedding_kwargs,
     )
 
 
@@ -357,6 +366,9 @@ async def embed(
     correlation_id: str | None = None,
     timeout: float | None = None,
     api_key: str | None = None,
+    dimensions: int | None = None,
+    encoding_format: str | None = None,
+    **kwargs: Any,
 ) -> EmbeddingResult:
     """Generate embeddings for the given text(s).
 
@@ -369,6 +381,13 @@ async def embed(
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
         api_key: Optional API key override (for key pool usage)
+        dimensions: Optional number of dimensions for the output embeddings. Only supported by some
+            models (e.g., OpenAI text-embedding-3 and later). Provider-specific.
+        encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
+            Provider-specific. Note: If using "base64", the embedding format may differ from
+            the standard list[float] format.
+        **kwargs: Additional provider-specific arguments passed through to the embedding API.
+            Examples: `user` (OpenAI) for end-user identification.
 
     Returns:
         EmbeddingResult with embeddings, model, token usage, and cost
@@ -391,9 +410,12 @@ async def embed(
         ...     result = await embed("Hello, world!")
         ...     print(f"Embedding dimension: {result.dimension}")
         ...
-        ...     # Multiple texts
-        ...     result = await embed(["Hello", "World"])
-        ...     print(f"Generated {result.count} embeddings")
+        ...     # Multiple texts with custom dimensions
+        ...     result = await embed(["Hello", "World"], dimensions=256)
+        ...     print(f"Generated {result.count} embeddings with {result.dimension} dimensions")
+        ...
+        ...     # With encoding format and user ID (OpenAI-specific)
+        ...     result = await embed("Hello", encoding_format="float", user="user-123")
         >>>
         >>> asyncio.run(main())
     """
@@ -416,6 +438,15 @@ async def embed(
         f"Starting embedding request: correlation_id={correlation_id}, model={model}, input_count={input_count}"
     )
 
+    # Build embedding kwargs from explicit parameters and any additional kwargs
+    embedding_kwargs: dict[str, Any] = {}
+    if dimensions is not None:
+        embedding_kwargs["dimensions"] = dimensions
+    if encoding_format is not None:
+        embedding_kwargs["encoding_format"] = encoding_format
+    # Merge any additional kwargs (e.g., user, etc.)
+    embedding_kwargs.update(kwargs)
+
     # Use shutdown context to track in-flight requests
     try:
         with ShutdownContext():
@@ -425,6 +456,7 @@ async def embed(
                 inputs=texts,
                 timeout=timeout,
                 api_key=api_key,
+                embedding_kwargs=embedding_kwargs if embedding_kwargs else None,
             )
 
             # Extract embeddings from response
