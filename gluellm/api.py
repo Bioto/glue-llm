@@ -2307,7 +2307,6 @@ class GlueLLM:
         correlation_id: str | None = None,
         timeout: float | None = None,
         api_key: str | None = None,
-        dimensions: int | None = None,
         encoding_format: str | None = None,
         **kwargs: Any,
     ) -> "EmbeddingResult":
@@ -2319,8 +2318,6 @@ class GlueLLM:
             correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
             timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
             api_key: Optional API key override (for key pool usage)
-            dimensions: Optional number of dimensions for the output embeddings. Only supported by some
-                models (e.g., OpenAI text-embedding-3 and later). Provider-specific.
             encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
                 Provider-specific. Note: If using "base64", the embedding format may differ from
                 the standard list[float] format.
@@ -2348,10 +2345,6 @@ class GlueLLM:
             ...     result = await client.complete("Hello")
             ...     embedding = await client.embed("Hello")
             ...     print(f"Embedding dimension: {embedding.dimension}")
-            ...
-            ...     # With custom dimensions
-            ...     embedding = await client.embed("Hello", dimensions=256)
-            ...     print(f"Custom dimension: {embedding.dimension}")
             >>>
             >>> asyncio.run(main())
         """
@@ -2366,7 +2359,6 @@ class GlueLLM:
             correlation_id=correlation_id,
             timeout=timeout,
             api_key=api_key,
-            dimensions=dimensions,
             encoding_format=encoding_format,
             **kwargs,
         )
@@ -2503,7 +2495,6 @@ async def embed(
     model: str | None = None,
     correlation_id: str | None = None,
     timeout: float | None = None,
-    dimensions: int | None = None,
     encoding_format: str | None = None,
     **kwargs: Any,
 ) -> "EmbeddingResult":
@@ -2514,8 +2505,6 @@ async def embed(
         model: Model identifier (defaults to settings.default_embedding_model)
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
-        dimensions: Optional number of dimensions for the output embeddings. Only supported by some
-            models (e.g., OpenAI text-embedding-3 and later). Provider-specific.
         encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
             Provider-specific. Note: If using "base64", the embedding format may differ from
             the standard list[float] format.
@@ -2532,10 +2521,6 @@ async def embed(
         >>> async def main():
         ...     result = await embed("Hello, world!")
         ...     print(f"Embedding dimension: {result.dimension}")
-        ...
-        ...     # With custom dimensions
-        ...     result = await embed("Hello", dimensions=256)
-        ...     print(f"Custom dimension: {result.dimension}")
         >>>
         >>> asyncio.run(main())
     """
@@ -2546,7 +2531,6 @@ async def embed(
         model=model,
         correlation_id=correlation_id,
         timeout=timeout,
-        dimensions=dimensions,
         encoding_format=encoding_format,
         **kwargs,
     )
