@@ -57,6 +57,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated, Any, TypeVar
 
 if TYPE_CHECKING:
@@ -516,6 +517,90 @@ def _parse_structured_content(content: str, response_format: type[BaseModel]) ->
     except (json.JSONDecodeError, TypeError, ValueError) as e:
         logger.debug(f"Could not parse structured content: {e}")
         return None
+
+
+def _build_message_from_stream(
+    accumulated_content: str,
+    tool_calls_accumulator: dict[int, dict[str, Any]],
+) -> SimpleNamespace | None:
+    """Build an assistant message from streamed content and/or accumulated tool_calls.
+
+    Returns a message-like object with .content and .tool_calls (list of objects with
+    .id, .function.name, .function.arguments) for use when appending to messages.
+    Returns None if there are no tool_calls (caller uses content only).
+    """
+    if not tool_calls_accumulator:
+        return None
+    # Build tool_calls list in index order; each entry is compatible with attribute access.
+    sorted_indices = sorted(tool_calls_accumulator.keys())
+    tool_calls_list = []
+    for idx in sorted_indices:
+        acc = tool_calls_accumulator[idx]
+        fid = acc.get("id") or ""
+        fname = acc.get("function", {}).get("name") or ""
+        fargs = acc.get("function", {}).get("arguments") or ""
+        tool_calls_list.append(
+            SimpleNamespace(
+                id=fid,
+                type="function",
+                function=SimpleNamespace(name=fname, arguments=fargs),
+            )
+        )
+    return SimpleNamespace(
+        role="assistant",
+        content=accumulated_content or None,
+        tool_calls=tool_calls_list,
+    )
+
+
+async def _consume_stream_with_tools(
+    stream_iter: AsyncIterator[Any],
+) -> AsyncIterator[tuple[bool, str, SimpleNamespace | None]]:
+    """Consume a streaming LLM response that may include content and/or tool_calls.
+
+    Yields (True, content_delta) for each content chunk, then (False, accumulated_content, assistant_message)
+    at the end. assistant_message is non-None only if tool_calls were present (caller appends to messages
+    and executes tools).
+    """
+    accumulated_content = ""
+    tool_calls_accumulator: dict[int, dict[str, Any]] = {}
+
+    async for chunk in stream_iter:
+        if not getattr(chunk, "choices", None):
+            continue
+        choice = chunk.choices[0] if chunk.choices else None
+        if not choice:
+            continue
+        delta = getattr(choice, "delta", None)
+        if not delta:
+            continue
+
+        # Content delta: forward immediately
+        content = getattr(delta, "content", None)
+        if content:
+            accumulated_content += content
+            yield (True, content, None)
+
+        # Tool call deltas: accumulate by index (arguments may arrive in multiple chunks)
+        tool_calls_delta = getattr(delta, "tool_calls", None) or []
+        for tc in tool_calls_delta:
+            idx = getattr(tc, "index", None)
+            if idx is None:
+                continue
+            if idx not in tool_calls_accumulator:
+                tool_calls_accumulator[idx] = {"id": None, "function": {"name": "", "arguments": ""}}
+            acc = tool_calls_accumulator[idx]
+            if getattr(tc, "id", None):
+                acc["id"] = tc.id
+            fn = getattr(tc, "function", None)
+            if fn:
+                if getattr(fn, "name", None):
+                    acc["function"]["name"] = fn.name
+                if getattr(fn, "arguments", None):
+                    acc["function"]["arguments"] = acc["function"]["arguments"] + fn.arguments
+
+    message = _build_message_from_stream(accumulated_content, tool_calls_accumulator)
+    yield (False, accumulated_content, message)
 
 
 @contextmanager
@@ -2249,16 +2334,12 @@ class GlueLLM:
         parsed Pydantic instance (when parsing succeeds).
 
         Note:
-            **Streaming Limitation:** When tools are enabled (`execute_tools=True`),
-            the final response after tool execution is NOT streamed token-by-token.
-            Instead, it's returned as a single chunk. This is because we need to
-            check if the model wants to call more tools before streaming.
-
-            True streaming only occurs when:
-            - No tools are provided (`tools=[]` or `tools=None`), OR
-            - Tool execution is disabled (`execute_tools=False`)
-
-            This is a known limitation and may be improved in future versions.
+            When tools are enabled, the LLM is called with streaming. Content
+            deltas are yielded and emitted via ``on_status`` (``stream_chunk``) as
+            they arrive. If the model requests tool calls, they are accumulated
+            from the stream, tools are executed, and the loop continues with
+            another streaming call. Token-by-token streaming therefore applies to
+            both tool and non-tool turns.
 
         Args:
             user_message: The user's message/request
@@ -2385,7 +2466,15 @@ class GlueLLM:
                         )
                     return
 
-                # With tools: get full response first to check for tool calls
+                # With tools: stream so we get token-by-token text and can detect tool_calls from the stream
+                await emit_status(
+                    ProcessEvent(
+                        kind="stream_start",
+                        correlation_id=get_correlation_id(),
+                        timestamp=time.time(),
+                    ),
+                    on_status,
+                )
                 await emit_status(
                     ProcessEvent(
                         kind="llm_call_start",
@@ -2397,11 +2486,37 @@ class GlueLLM:
                     ),
                     on_status,
                 )
-                response = await _llm_call_with_retry(
+                stream_iter = await _safe_llm_call(
                     messages=messages,
                     model=model or self.model,
                     tools=self.tools if self.tools else None,
+                    response_format=None,
+                    stream=True,
                 )
+                accumulated_content = ""
+                assistant_message = None
+                async for is_content, content_or_accumulated, msg in _consume_stream_with_tools(stream_iter):
+                    if is_content:
+                        await emit_status(
+                            ProcessEvent(
+                                kind="stream_chunk",
+                                correlation_id=get_correlation_id(),
+                                timestamp=time.time(),
+                                content=content_or_accumulated,
+                                done=False,
+                            ),
+                            on_status,
+                        )
+                        yield StreamingChunk(
+                            content=content_or_accumulated,
+                            done=False,
+                            tool_calls_made=tool_calls_made,
+                        )
+                    else:
+                        accumulated_content = content_or_accumulated
+                        assistant_message = msg
+                        break
+                has_tool_calls = bool(assistant_message and getattr(assistant_message, "tool_calls", None))
                 await emit_status(
                     ProcessEvent(
                         kind="llm_call_end",
@@ -2409,10 +2524,8 @@ class GlueLLM:
                         timestamp=time.time(),
                         iteration=iteration + 1,
                         model=model or self.model,
-                        has_tool_calls=bool(
-                            execute_tools and self.tools and response.choices and response.choices[0].message.tool_calls
-                        ),
-                        token_usage=_extract_token_usage(response),
+                        has_tool_calls=has_tool_calls,
+                        token_usage=None,
                     ),
                     on_status,
                 )
@@ -2421,13 +2534,9 @@ class GlueLLM:
                 error_msg = f"Failed during tool execution loop (iteration {iteration + 1}/{self.max_tool_iterations})"
                 raise type(e)(f"{error_msg}: {e}") from e
 
-            # Validate response has choices
-            if not response.choices:
-                raise InvalidRequestError("Empty response from LLM provider")
-
-            # Check if model wants to call tools
-            if execute_tools and self.tools and response.choices[0].message.tool_calls:
-                tool_calls = response.choices[0].message.tool_calls
+            # Check if model wants to call tools (from streamed response)
+            if execute_tools and self.tools and assistant_message and getattr(assistant_message, "tool_calls", None):
+                tool_calls = assistant_message.tool_calls
                 logger.info(f"Stream iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
 
                 # Yield a chunk indicating tool execution is happening
@@ -2438,7 +2547,7 @@ class GlueLLM:
                 )
 
                 # Add assistant message with tool calls to history
-                messages.append(response.choices[0].message)
+                messages.append(assistant_message)
 
                 # Execute each tool call
                 for call_index, tool_call in enumerate(tool_calls, 1):
@@ -2596,16 +2705,11 @@ class GlueLLM:
                             }
                         )
 
-                # Continue loop to get next response (may stream this time)
+                # Continue loop to get next response (stream again)
                 continue
 
-            # Validate response has choices
-            if not response.choices:
-                raise InvalidRequestError("Empty response from LLM provider")
-
-            # No more tool calls, stream the final response
-            final_content = response.choices[0].message.content or ""
-            accumulated_content = ""
+            # No more tool calls: we streamed the final text; run guardrails and finish
+            final_content = accumulated_content or ""
 
             # Output guardrails with retry loop (similar to complete())
             if effective_guardrails and final_content:
@@ -2988,11 +3092,9 @@ async def stream_complete(
     (parsed Pydantic instance).
 
     Note:
-        **Streaming Limitation:** When tools are enabled (`execute_tools=True`),
-        the final response after tool execution is NOT streamed token-by-token.
-        Instead, it's returned as a single chunk. True streaming only occurs
-        when no tools are provided or when `execute_tools=False`.
-        See GlueLLM.stream_complete() for details.
+        When tools are enabled, responses are streamed token-by-token; tool calls
+        are detected from the stream and executed before the next turn. See
+        GlueLLM.stream_complete() for details.
 
     Args:
         user_message: The user's message/request
