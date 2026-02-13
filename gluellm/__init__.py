@@ -105,6 +105,7 @@ from gluellm.eval import (
     get_global_eval_store,
     set_global_eval_store,
 )
+from gluellm.events import ProcessEvent
 from gluellm.guardrails import (
     GuardrailBlockedError,
     GuardrailRejectedError,
@@ -186,6 +187,7 @@ __all__ = [
     "ExecutionResult",
     "EmbeddingResult",
     "StreamingChunk",
+    "ProcessEvent",
     # Session Tracking
     "get_session_summary",
     "reset_session_tracker",
