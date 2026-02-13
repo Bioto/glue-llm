@@ -579,6 +579,51 @@ def _streamed_assistant_message_to_dict(msg: SimpleNamespace | None) -> dict[str
     }
 
 
+def _normalize_tool_call_to_dict(tc: Any) -> dict[str, Any]:
+    """Convert a single tool call (dict or object) to the canonical dict shape for messages."""
+    if isinstance(tc, dict):
+        fn = tc.get("function") or {}
+        if isinstance(fn, dict):
+            name = fn.get("name", "")
+            args = fn.get("arguments", "")
+        else:
+            name = getattr(fn, "name", "")
+            args = getattr(fn, "arguments", "")
+        return {
+            "id": tc.get("id", ""),
+            "type": tc.get("type", "function"),
+            "function": {"name": name, "arguments": args},
+        }
+    fn = getattr(tc, "function", None)
+    return {
+        "id": getattr(tc, "id", ""),
+        "type": getattr(tc, "type", "function"),
+        "function": {
+            "name": getattr(fn, "name", "") if fn is not None else "",
+            "arguments": getattr(fn, "arguments", "") if fn is not None else "",
+        },
+    }
+
+
+def _response_message_to_dict(msg: Any) -> dict[str, Any]:
+    """Convert a provider response message to a dict for appending to messages.
+
+    Providers may return a Pydantic model or an object (e.g. OpenAI ChatCompletionMessage).
+    any_llm expects messages to be a list of dicts, so we normalize before appending.
+    """
+    if hasattr(msg, "model_dump"):
+        d = msg.model_dump()
+        raw_tool_calls = d.get("tool_calls") or []
+        d["tool_calls"] = [_normalize_tool_call_to_dict(tc) for tc in raw_tool_calls]
+        return d
+    tool_calls_raw = getattr(msg, "tool_calls", None) or []
+    return {
+        "role": getattr(msg, "role", "assistant"),
+        "content": getattr(msg, "content", None),
+        "tool_calls": [_normalize_tool_call_to_dict(tc) for tc in tool_calls_raw],
+    }
+
+
 async def _consume_stream_with_tools(
     stream_iter: AsyncIterator[Any],
 ) -> AsyncIterator[tuple[bool, str, SimpleNamespace | None]]:
@@ -1326,8 +1371,8 @@ class GlueLLM:
                         tool_calls = response.choices[0].message.tool_calls
                         logger.info(f"Iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
 
-                        # Add assistant message with tool calls to history
-                        messages.append(response.choices[0].message)
+                        # Add assistant message with tool calls to history (dict for any_llm validation)
+                        messages.append(_response_message_to_dict(response.choices[0].message))
 
                         # Execute each tool call
                         for call_index, tool_call in enumerate(tool_calls, 1):
@@ -1905,8 +1950,8 @@ class GlueLLM:
                             tool_calls = response.choices[0].message.tool_calls
                             logger.info(f"Iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
 
-                            # Add assistant message with tool calls to history
-                            messages.append(response.choices[0].message)
+                            # Add assistant message with tool calls to history (dict for any_llm validation)
+                            messages.append(_response_message_to_dict(response.choices[0].message))
 
                             # Execute each tool call
                             for call_index, tool_call in enumerate(tool_calls, 1):
