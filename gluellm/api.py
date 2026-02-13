@@ -553,6 +553,32 @@ def _build_message_from_stream(
     )
 
 
+def _streamed_assistant_message_to_dict(msg: SimpleNamespace | None) -> dict[str, Any] | None:
+    """Convert assistant message from _build_message_from_stream to dict for API (messages list).
+
+    any_llm validates messages as a list of dicts; the stream path produces SimpleNamespace
+    objects, so we must convert before appending to messages for the next _safe_llm_call.
+    """
+    if msg is None:
+        return None
+    tool_calls = getattr(msg, "tool_calls", None) or []
+    return {
+        "role": getattr(msg, "role", "assistant"),
+        "content": getattr(msg, "content", None),
+        "tool_calls": [
+            {
+                "id": getattr(tc, "id", ""),
+                "type": getattr(tc, "type", "function"),
+                "function": {
+                    "name": getattr(getattr(tc, "function", None), "name", ""),
+                    "arguments": getattr(getattr(tc, "function", None), "arguments", ""),
+                },
+            }
+            for tc in tool_calls
+        ],
+    }
+
+
 async def _consume_stream_with_tools(
     stream_iter: AsyncIterator[Any],
 ) -> AsyncIterator[tuple[bool, str, SimpleNamespace | None]]:
@@ -2546,8 +2572,10 @@ class GlueLLM:
                     tool_calls_made=tool_calls_made,
                 )
 
-                # Add assistant message with tool calls to history
-                messages.append(assistant_message)
+                # Add assistant message with tool calls to history (dict for any_llm validation)
+                msg_dict = _streamed_assistant_message_to_dict(assistant_message)
+                if msg_dict is not None:
+                    messages.append(msg_dict)
 
                 # Execute each tool call
                 for call_index, tool_call in enumerate(tool_calls, 1):

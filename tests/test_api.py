@@ -1,6 +1,8 @@
 """Tests for the GlueLLM API."""
 
+from types import SimpleNamespace
 from typing import Annotated
+from unittest.mock import patch
 
 import pytest
 from pydantic import BaseModel, Field
@@ -843,6 +845,87 @@ class TestProcessStatusEvents:
         kinds = [e.kind for e in events]
         assert "stream_start" in kinds
         assert "stream_end" in kinds
+
+
+class TestStreamCompleteWithTools:
+    """Test stream_complete with execute_tools=True (streaming + tool loop)."""
+
+    async def test_stream_complete_execute_tools_iteration2_messages_are_dicts(self):
+        """Second LLM call in tool loop receives messages as list[dict], not SimpleNamespace.
+
+        Regression test: _build_message_from_stream returns SimpleNamespace; we must convert
+        to dict before appending to messages so any_llm validation does not fail on iteration 2.
+        """
+        call_count = 0
+        second_call_messages = []
+
+        async def fake_safe_llm_call(*, messages, stream, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if not stream:
+                raise NotImplementedError("This test only covers stream=True path")
+            if call_count == 1:
+                # First call: stream with one tool call so loop appends to messages and continues
+                async def first_stream():
+                    yield SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(content=" ", tool_calls=None),
+                            )
+                        ]
+                    )
+                    yield SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(
+                                    content=None,
+                                    tool_calls=[
+                                        SimpleNamespace(
+                                            index=0,
+                                            id="call_1",
+                                            function=SimpleNamespace(
+                                                name="dummy_tool",
+                                                arguments='{"value":"x"}',
+                                            ),
+                                        )
+                                    ],
+                                ),
+                            )
+                        ]
+                    )
+
+                return first_stream()
+            # Second call: must receive only dicts (fix for SimpleNamespace in messages)
+            second_call_messages.extend(messages)
+            for m in messages:
+                assert isinstance(m, dict), f"Expected all messages to be dicts, got {type(m).__name__}"
+
+            async def second_stream():
+                yield SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="Done", tool_calls=None),
+                        )
+                    ]
+                )
+
+            return second_stream()
+
+        with patch("gluellm.api._safe_llm_call", side_effect=fake_safe_llm_call):
+            chunks = []
+            async for ch in stream_complete(
+                user_message="Use dummy_tool with value x",
+                system_prompt="Use the tool when asked.",
+                tools=[dummy_tool],
+                execute_tools=True,
+            ):
+                chunks.append(ch)
+
+        assert call_count == 2, "Expected two LLM calls (first with tool call, second final response)"
+        assert all(isinstance(m, dict) for m in second_call_messages), (
+            "Second call messages must all be dicts for any_llm CompletionParams validation"
+        )
+        assert any(ch.done for ch in chunks), "Should receive a final done chunk"
 
 
 class TestStreamingStructuredOutput:
