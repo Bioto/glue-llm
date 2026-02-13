@@ -54,7 +54,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Annotated, Any, TypeVar
@@ -79,6 +79,7 @@ from gluellm.config import settings
 from gluellm.costing.pricing_data import calculate_cost
 from gluellm.eval import get_global_eval_store
 from gluellm.eval.store import EvalStore
+from gluellm.events import ProcessEvent, emit_status
 from gluellm.guardrails import GuardrailBlockedError, GuardrailRejectedError, GuardrailsConfig
 from gluellm.guardrails.runner import run_input_guardrails, run_output_guardrails
 from gluellm.models.conversation import Conversation, Role
@@ -96,6 +97,9 @@ from gluellm.telemetry import (
     set_span_attributes,
     trace_llm_call,
 )
+
+# Callback for process status events (sync or async)
+type OnStatusCallback = Callable[[ProcessEvent], None] | Callable[[ProcessEvent], Awaitable[None]] | None
 
 # Configure logging
 logger = get_logger(__name__)
@@ -498,6 +502,20 @@ def _extract_token_usage(response: ChatCompletion) -> dict[str, int] | None:
         "completion": int(completion_tokens) if isinstance(completion_tokens, (int, float)) else 0,
         "total": int(total_tokens) if isinstance(total_tokens, (int, float)) else 0,
     }
+
+
+def _parse_structured_content(content: str, response_format: type[BaseModel]) -> BaseModel | None:
+    """Parse accumulated stream/content into response_format. Returns None on failure."""
+    if not content or not content.strip():
+        return None
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            return response_format(**data)
+        return None
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        logger.debug(f"Could not parse structured content: {e}")
+        return None
 
 
 @contextmanager
@@ -1012,6 +1030,13 @@ class StreamingChunk(BaseModel):
     content: Annotated[str, Field(description="The content chunk")]
     done: Annotated[bool, Field(description="Whether this is the final chunk")]
     tool_calls_made: Annotated[int, Field(description="Number of tool calls made so far", default=0)]
+    structured_output: Annotated[
+        Any | None,
+        Field(
+            description="Parsed structured output (when response_format was set); set on the final chunk only",
+            default=None,
+        ),
+    ] = None
 
 
 class GlueLLM:
@@ -1056,6 +1081,7 @@ class GlueLLM:
         timeout: float | None = None,
         api_key: str | None = None,
         guardrails: GuardrailsConfig | None = None,
+        on_status: OnStatusCallback = None,
     ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
 
@@ -1066,6 +1092,7 @@ class GlueLLM:
             timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
             api_key: Optional API key override (for key pool usage)
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
+            on_status: Optional callback for process status events (LLM call start/end, tool start/end, complete)
 
         Returns:
             ToolExecutionResult with final response and execution history
@@ -1136,6 +1163,17 @@ class GlueLLM:
                 for iteration in range(self.max_tool_iterations):
                     logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
                     try:
+                        await emit_status(
+                            ProcessEvent(
+                                kind="llm_call_start",
+                                correlation_id=correlation_id,
+                                timestamp=time.time(),
+                                iteration=iteration + 1,
+                                model=model or self.model,
+                                message_count=len(messages),
+                            ),
+                            on_status,
+                        )
                         response = await _llm_call_with_retry(
                             messages=messages,
                             model=model or self.model,
@@ -1156,6 +1194,22 @@ class GlueLLM:
                     if not response.choices:
                         raise InvalidRequestError("Empty response from LLM provider")
 
+                    tokens_used = _extract_token_usage(response)
+                    await emit_status(
+                        ProcessEvent(
+                            kind="llm_call_end",
+                            correlation_id=correlation_id,
+                            timestamp=time.time(),
+                            iteration=iteration + 1,
+                            model=model or self.model,
+                            has_tool_calls=bool(
+                                execute_tools and self.tools and response.choices[0].message.tool_calls
+                            ),
+                            token_usage=tokens_used,
+                        ),
+                        on_status,
+                    )
+
                     # Check if model wants to call tools
                     if execute_tools and self.tools and response.choices[0].message.tool_calls:
                         tool_calls = response.choices[0].message.tool_calls
@@ -1165,9 +1219,20 @@ class GlueLLM:
                         messages.append(response.choices[0].message)
 
                         # Execute each tool call
-                        for tool_call in tool_calls:
+                        for call_index, tool_call in enumerate(tool_calls, 1):
                             tool_calls_made += 1
                             tool_name = tool_call.function.name
+                            await emit_status(
+                                ProcessEvent(
+                                    kind="tool_call_start",
+                                    correlation_id=correlation_id,
+                                    timestamp=time.time(),
+                                    iteration=iteration + 1,
+                                    tool_name=tool_name,
+                                    call_index=call_index,
+                                ),
+                                on_status,
+                            )
 
                             try:
                                 tool_args = json.loads(tool_call.function.arguments)
@@ -1175,6 +1240,19 @@ class GlueLLM:
                                 # Handle malformed JSON from model
                                 error_msg = f"Invalid JSON in tool arguments: {str(e)}"
                                 logger.warning(f"Tool {tool_name} - {error_msg}")
+                                await emit_status(
+                                    ProcessEvent(
+                                        kind="tool_call_end",
+                                        correlation_id=correlation_id,
+                                        timestamp=time.time(),
+                                        tool_name=tool_name,
+                                        call_index=call_index,
+                                        success=False,
+                                        duration_seconds=0,
+                                        error=error_msg,
+                                    ),
+                                    on_status,
+                                )
                                 tool_execution_history.append(
                                     {
                                         "tool_name": tool_name,
@@ -1207,6 +1285,18 @@ class GlueLLM:
                                     tool_result_str = str(tool_result)
                                     tool_elapsed = time.time() - tool_start_time
                                     logger.info(f"Tool {tool_name} executed successfully in {tool_elapsed:.3f}s")
+                                    await emit_status(
+                                        ProcessEvent(
+                                            kind="tool_call_end",
+                                            correlation_id=correlation_id,
+                                            timestamp=time.time(),
+                                            tool_name=tool_name,
+                                            call_index=call_index,
+                                            success=True,
+                                            duration_seconds=tool_elapsed,
+                                        ),
+                                        on_status,
+                                    )
 
                                     # Record in history
                                     tool_execution_history.append(
@@ -1239,6 +1329,19 @@ class GlueLLM:
                                     logger.warning(
                                         f"Tool {tool_name} execution failed after {tool_elapsed:.3f}s: {e}",
                                         exc_info=True,
+                                    )
+                                    await emit_status(
+                                        ProcessEvent(
+                                            kind="tool_call_end",
+                                            correlation_id=correlation_id,
+                                            timestamp=time.time(),
+                                            tool_name=tool_name,
+                                            call_index=call_index,
+                                            success=False,
+                                            duration_seconds=tool_elapsed,
+                                            error=str(e),
+                                        ),
+                                        on_status,
                                     )
 
                                     tool_execution_history.append(
@@ -1278,6 +1381,19 @@ class GlueLLM:
                                 # Tool not found
                                 error_msg = f"Tool '{tool_name}' not found in available tools"
                                 logger.warning(error_msg)
+                                await emit_status(
+                                    ProcessEvent(
+                                        kind="tool_call_end",
+                                        correlation_id=correlation_id,
+                                        timestamp=time.time(),
+                                        tool_name=tool_name,
+                                        call_index=call_index,
+                                        success=False,
+                                        duration_seconds=0,
+                                        error=error_msg,
+                                    ),
+                                    on_status,
+                                )
                                 tool_execution_history.append(
                                     {
                                         "tool_name": tool_name,
@@ -1396,6 +1512,17 @@ class GlueLLM:
                         correlation_id=correlation_id,
                     )
 
+                    await emit_status(
+                        ProcessEvent(
+                            kind="complete",
+                            correlation_id=correlation_id,
+                            timestamp=time.time(),
+                            tool_calls_made=tool_calls_made,
+                            response_length=len(final_content),
+                        ),
+                        on_status,
+                    )
+
                     result = ExecutionResult(
                         final_response=final_content,
                         tool_calls_made=tool_calls_made,
@@ -1432,6 +1559,17 @@ class GlueLLM:
                     model=self.model,
                     tokens_used=tokens_used,
                     correlation_id=correlation_id,
+                )
+
+                await emit_status(
+                    ProcessEvent(
+                        kind="complete",
+                        correlation_id=correlation_id,
+                        timestamp=time.time(),
+                        tool_calls_made=tool_calls_made,
+                        response_length=len(final_content),
+                    ),
+                    on_status,
                 )
 
                 result = ExecutionResult(
@@ -1487,6 +1625,7 @@ class GlueLLM:
         timeout: float | None = None,
         api_key: str | None = None,
         guardrails: GuardrailsConfig | None = None,
+        on_status: OnStatusCallback = None,
     ) -> ExecutionResult:
         """Complete a request and return structured output.
 
@@ -1504,6 +1643,7 @@ class GlueLLM:
             timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
             api_key: Optional API key override (for key pool usage)
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
+            on_status: Optional callback for process status events
 
         Returns:
             ExecutionResult with structured_output field containing instance of response_format
@@ -1609,6 +1749,17 @@ class GlueLLM:
                         logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
 
                         try:
+                            await emit_status(
+                                ProcessEvent(
+                                    kind="llm_call_start",
+                                    correlation_id=correlation_id,
+                                    timestamp=time.time(),
+                                    iteration=iteration + 1,
+                                    model=model or self.model,
+                                    message_count=len(messages),
+                                ),
+                                on_status,
+                            )
                             response = await _llm_call_with_retry(
                                 messages=messages,
                                 model=model or self.model,
@@ -1616,6 +1767,18 @@ class GlueLLM:
                                 # No response_format during tool phase
                                 timeout=timeout,
                                 api_key=api_key,
+                            )
+                            await emit_status(
+                                ProcessEvent(
+                                    kind="llm_call_end",
+                                    correlation_id=correlation_id,
+                                    timestamp=time.time(),
+                                    iteration=iteration + 1,
+                                    model=model or self.model,
+                                    has_tool_calls=bool(response.choices and response.choices[0].message.tool_calls),
+                                    token_usage=_extract_token_usage(response),
+                                ),
+                                on_status,
                             )
                         except LLMError as e:
                             logger.error(f"LLM call failed on iteration {iteration + 1}: {e}")
@@ -1635,15 +1798,39 @@ class GlueLLM:
                             messages.append(response.choices[0].message)
 
                             # Execute each tool call
-                            for tool_call in tool_calls:
+                            for call_index, tool_call in enumerate(tool_calls, 1):
                                 tool_calls_made += 1
                                 tool_name = tool_call.function.name
+                                await emit_status(
+                                    ProcessEvent(
+                                        kind="tool_call_start",
+                                        correlation_id=correlation_id,
+                                        timestamp=time.time(),
+                                        iteration=iteration + 1,
+                                        tool_name=tool_name,
+                                        call_index=call_index,
+                                    ),
+                                    on_status,
+                                )
 
                                 try:
                                     tool_args = json.loads(tool_call.function.arguments)
                                 except json.JSONDecodeError as e:
                                     error_msg = f"Invalid JSON in tool arguments: {str(e)}"
                                     logger.warning(f"Tool {tool_name} - {error_msg}")
+                                    await emit_status(
+                                        ProcessEvent(
+                                            kind="tool_call_end",
+                                            correlation_id=correlation_id,
+                                            timestamp=time.time(),
+                                            tool_name=tool_name,
+                                            call_index=call_index,
+                                            success=False,
+                                            duration_seconds=0,
+                                            error=error_msg,
+                                        ),
+                                        on_status,
+                                    )
                                     tool_execution_history.append(
                                         {
                                             "tool_name": tool_name,
@@ -1675,6 +1862,18 @@ class GlueLLM:
                                         tool_result_str = str(tool_result)
                                         tool_elapsed = time.time() - tool_start_time
                                         logger.info(f"Tool {tool_name} executed successfully in {tool_elapsed:.3f}s")
+                                        await emit_status(
+                                            ProcessEvent(
+                                                kind="tool_call_end",
+                                                correlation_id=correlation_id,
+                                                timestamp=time.time(),
+                                                tool_name=tool_name,
+                                                call_index=call_index,
+                                                success=True,
+                                                duration_seconds=tool_elapsed,
+                                            ),
+                                            on_status,
+                                        )
 
                                         tool_execution_history.append(
                                             {
@@ -1704,6 +1903,19 @@ class GlueLLM:
                                         logger.warning(
                                             f"Tool {tool_name} execution failed after {tool_elapsed:.3f}s: {e}",
                                             exc_info=True,
+                                        )
+                                        await emit_status(
+                                            ProcessEvent(
+                                                kind="tool_call_end",
+                                                correlation_id=correlation_id,
+                                                timestamp=time.time(),
+                                                tool_name=tool_name,
+                                                call_index=call_index,
+                                                success=False,
+                                                duration_seconds=tool_elapsed,
+                                                error=str(e),
+                                            ),
+                                            on_status,
                                         )
 
                                         tool_execution_history.append(
@@ -1740,6 +1952,19 @@ class GlueLLM:
                                 else:
                                     error_msg = f"Tool '{tool_name}' not found"
                                     logger.warning(error_msg)
+                                    await emit_status(
+                                        ProcessEvent(
+                                            kind="tool_call_end",
+                                            correlation_id=correlation_id,
+                                            timestamp=time.time(),
+                                            tool_name=tool_name,
+                                            call_index=call_index,
+                                            success=False,
+                                            duration_seconds=0,
+                                            error=error_msg,
+                                        ),
+                                        on_status,
+                                    )
                                     tool_execution_history.append(
                                         {
                                             "tool_name": tool_name,
@@ -1755,7 +1980,7 @@ class GlueLLM:
                                             "content": error_msg,
                                         }
                                     )
-                            # Continue to next iteration
+                        # Continue to next iteration
                         else:
                             # LLM didn't call any tools - it has enough info, break out of tool loop
                             logger.debug(f"LLM finished with tools after {iteration + 1} iteration(s)")
@@ -1775,6 +2000,17 @@ class GlueLLM:
                 # PHASE 2: Final structured output call
                 logger.debug(f"Requesting structured output: response_format={response_format.__name__}")
                 try:
+                    await emit_status(
+                        ProcessEvent(
+                            kind="llm_call_start",
+                            correlation_id=correlation_id,
+                            timestamp=time.time(),
+                            iteration=None,
+                            model=model or self.model,
+                            message_count=len(messages),
+                        ),
+                        on_status,
+                    )
                     response = await _llm_call_with_retry(
                         messages=messages,
                         model=model or self.model,
@@ -1782,6 +2018,17 @@ class GlueLLM:
                         # No tools during structured output phase
                         timeout=timeout,
                         api_key=api_key,
+                    )
+                    await emit_status(
+                        ProcessEvent(
+                            kind="llm_call_end",
+                            correlation_id=correlation_id,
+                            timestamp=time.time(),
+                            model=model or self.model,
+                            has_tool_calls=False,
+                            token_usage=_extract_token_usage(response),
+                        ),
+                        on_status,
                     )
                 except LLMError as e:
                     logger.error(f"Structured output call failed: {e}")
@@ -1904,6 +2151,17 @@ class GlueLLM:
 
                 logger.info(f"Structured completion finished: tool_calls={tool_calls_made}, cost=${total_cost:.6f}")
 
+                await emit_status(
+                    ProcessEvent(
+                        kind="complete",
+                        correlation_id=correlation_id,
+                        timestamp=time.time(),
+                        tool_calls_made=tool_calls_made,
+                        response_length=len(content) if content else 0,
+                    ),
+                    on_status,
+                )
+
                 result = ExecutionResult(
                     final_response=content or "",
                     tool_calls_made=tool_calls_made,
@@ -1978,11 +2236,17 @@ class GlueLLM:
         execute_tools: bool = True,
         model: str | None = None,
         guardrails: GuardrailsConfig | None = None,
+        response_format: type[BaseModel] | None = None,
+        on_status: OnStatusCallback = None,
     ) -> AsyncIterator[StreamingChunk]:
         """Stream completion with automatic tool execution.
 
         Yields chunks of the response as they arrive. When tools are called,
         streaming pauses and tool execution occurs, then streaming resumes.
+
+        When response_format is set, the model is asked to return JSON matching
+        that schema; the final chunk will have structured_output set to the
+        parsed Pydantic instance (when parsing succeeds).
 
         Note:
             **Streaming Limitation:** When tools are enabled (`execute_tools=True`),
@@ -2001,9 +2265,11 @@ class GlueLLM:
             execute_tools: Whether to automatically execute tools
             model: Model identifier override (defaults to instance model)
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
+            response_format: Optional Pydantic model; if set, the final chunk may include structured_output
+            on_status: Optional callback for process status events
 
         Yields:
-            StreamingChunk objects with content and metadata
+            StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)
 
         Raises:
             TokenLimitError: If token limit is exceeded
@@ -2043,19 +2309,55 @@ class GlueLLM:
                 # Try streaming first (if no tools or tools disabled, stream directly)
                 if not execute_tools or not self.tools:
                     # Simple streaming without tool execution
+                    await emit_status(
+                        ProcessEvent(
+                            kind="stream_start",
+                            correlation_id=get_correlation_id(),
+                            timestamp=time.time(),
+                        ),
+                        on_status,
+                    )
+                    # Providers (e.g. OpenAI) do not support response_format with stream=True;
+                    # we stream plain text and parse into response_format when the stream ends.
                     async for chunk_response in await _safe_llm_call(
-                        messages=messages, model=self.model, tools=None, stream=True
+                        messages=messages,
+                        model=self.model,
+                        tools=None,
+                        response_format=None,
+                        stream=True,
                     ):
                         if hasattr(chunk_response, "choices") and chunk_response.choices:
                             delta = chunk_response.choices[0].delta
                             if hasattr(delta, "content") and delta.content:
                                 accumulated_content += delta.content
-                                yield StreamingChunk(
+                                chunk = StreamingChunk(
                                     content=delta.content,
                                     done=False,
                                     tool_calls_made=tool_calls_made,
                                 )
+                                await emit_status(
+                                    ProcessEvent(
+                                        kind="stream_chunk",
+                                        correlation_id=get_correlation_id(),
+                                        timestamp=time.time(),
+                                        content=delta.content,
+                                        done=False,
+                                    ),
+                                    on_status,
+                                )
+                                yield chunk
                     # Final chunk - run output guardrails on accumulated content
+                    await emit_status(
+                        ProcessEvent(
+                            kind="stream_end",
+                            correlation_id=get_correlation_id(),
+                            timestamp=time.time(),
+                        ),
+                        on_status,
+                    )
+                    structured_output = None
+                    if response_format and accumulated_content:
+                        structured_output = _parse_structured_content(accumulated_content, response_format)
                     if accumulated_content:
                         if effective_guardrails:
                             try:
@@ -2068,14 +2370,51 @@ class GlueLLM:
                                     guardrail_name=e.guardrail_name,
                                 ) from e
                         self._conversation.add_message(Role.ASSISTANT, accumulated_content)
-                        yield StreamingChunk(content="", done=True, tool_calls_made=tool_calls_made)
+                        yield StreamingChunk(
+                            content="",
+                            done=True,
+                            tool_calls_made=tool_calls_made,
+                            structured_output=structured_output,
+                        )
+                    else:
+                        yield StreamingChunk(
+                            content="",
+                            done=True,
+                            tool_calls_made=tool_calls_made,
+                            structured_output=structured_output,
+                        )
                     return
 
                 # With tools: get full response first to check for tool calls
+                await emit_status(
+                    ProcessEvent(
+                        kind="llm_call_start",
+                        correlation_id=get_correlation_id(),
+                        timestamp=time.time(),
+                        iteration=iteration + 1,
+                        model=model or self.model,
+                        message_count=len(messages),
+                    ),
+                    on_status,
+                )
                 response = await _llm_call_with_retry(
                     messages=messages,
                     model=model or self.model,
                     tools=self.tools if self.tools else None,
+                )
+                await emit_status(
+                    ProcessEvent(
+                        kind="llm_call_end",
+                        correlation_id=get_correlation_id(),
+                        timestamp=time.time(),
+                        iteration=iteration + 1,
+                        model=model or self.model,
+                        has_tool_calls=bool(
+                            execute_tools and self.tools and response.choices and response.choices[0].message.tool_calls
+                        ),
+                        token_usage=_extract_token_usage(response),
+                    ),
+                    on_status,
                 )
             except LLMError as e:
                 logger.error(f"LLM call failed on iteration {iteration + 1}: {e}")
@@ -2102,10 +2441,21 @@ class GlueLLM:
                 messages.append(response.choices[0].message)
 
                 # Execute each tool call
-                for tool_call in tool_calls:
+                for call_index, tool_call in enumerate(tool_calls, 1):
                     tool_calls_made += 1
                     tool_name = tool_call.function.name
                     logger.debug(f"Executing tool call {tool_calls_made}: {tool_name}")
+                    await emit_status(
+                        ProcessEvent(
+                            kind="tool_call_start",
+                            correlation_id=get_correlation_id(),
+                            timestamp=time.time(),
+                            iteration=iteration + 1,
+                            tool_name=tool_name,
+                            call_index=call_index,
+                        ),
+                        on_status,
+                    )
 
                     try:
                         tool_args = json.loads(tool_call.function.arguments)
@@ -2113,6 +2463,19 @@ class GlueLLM:
                     except json.JSONDecodeError as e:
                         error_msg = f"Invalid JSON in tool arguments: {str(e)}"
                         logger.warning(f"Tool {tool_name} - {error_msg}")
+                        await emit_status(
+                            ProcessEvent(
+                                kind="tool_call_end",
+                                correlation_id=get_correlation_id(),
+                                timestamp=time.time(),
+                                tool_name=tool_name,
+                                call_index=call_index,
+                                success=False,
+                                duration_seconds=0,
+                                error=error_msg,
+                            ),
+                            on_status,
+                        )
                         tool_execution_history.append(
                             {
                                 "tool_name": tool_name,
@@ -2145,6 +2508,18 @@ class GlueLLM:
                             tool_result_str = str(tool_result)
                             tool_elapsed = time.time() - tool_start_time
                             logger.info(f"Tool {tool_name} executed successfully in {tool_elapsed:.3f}s")
+                            await emit_status(
+                                ProcessEvent(
+                                    kind="tool_call_end",
+                                    correlation_id=get_correlation_id(),
+                                    timestamp=time.time(),
+                                    tool_name=tool_name,
+                                    call_index=call_index,
+                                    success=True,
+                                    duration_seconds=tool_elapsed,
+                                ),
+                                on_status,
+                            )
 
                             tool_execution_history.append(
                                 {
@@ -2159,6 +2534,19 @@ class GlueLLM:
                             tool_result_str = f"Error executing tool: {type(e).__name__}: {str(e)}"
                             logger.warning(
                                 f"Tool {tool_name} execution failed after {tool_elapsed:.3f}s: {e}", exc_info=True
+                            )
+                            await emit_status(
+                                ProcessEvent(
+                                    kind="tool_call_end",
+                                    correlation_id=get_correlation_id(),
+                                    timestamp=time.time(),
+                                    tool_name=tool_name,
+                                    call_index=call_index,
+                                    success=False,
+                                    duration_seconds=tool_elapsed,
+                                    error=str(e),
+                                ),
+                                on_status,
                             )
                             tool_execution_history.append(
                                 {
@@ -2179,6 +2567,19 @@ class GlueLLM:
                     else:
                         error_msg = f"Tool '{tool_name}' not found in available tools"
                         logger.warning(error_msg)
+                        await emit_status(
+                            ProcessEvent(
+                                kind="tool_call_end",
+                                correlation_id=get_correlation_id(),
+                                timestamp=time.time(),
+                                tool_name=tool_name,
+                                call_index=call_index,
+                                success=False,
+                                duration_seconds=0,
+                                error=error_msg,
+                            ),
+                            on_status,
+                        )
                         tool_execution_history.append(
                             {
                                 "tool_name": tool_name,
@@ -2278,13 +2679,34 @@ class GlueLLM:
 
             # Stream the final response character by character (simulated streaming)
             # In a real implementation, you'd stream from the API
+            await emit_status(
+                ProcessEvent(
+                    kind="stream_end",
+                    correlation_id=get_correlation_id(),
+                    timestamp=time.time(),
+                ),
+                on_status,
+            )
+            structured_output = None
+            if response_format and final_content:
+                structured_output = _parse_structured_content(final_content, response_format)
             if final_content:
                 # For now, yield the full content as a single chunk
                 # In production, this would be actual streaming chunks from the API
                 self._conversation.add_message(Role.ASSISTANT, final_content)
-                yield StreamingChunk(content=final_content, done=True, tool_calls_made=tool_calls_made)
+                yield StreamingChunk(
+                    content=final_content,
+                    done=True,
+                    tool_calls_made=tool_calls_made,
+                    structured_output=structured_output,
+                )
             else:
-                yield StreamingChunk(content="", done=True, tool_calls_made=tool_calls_made)
+                yield StreamingChunk(
+                    content="",
+                    done=True,
+                    tool_calls_made=tool_calls_made,
+                    structured_output=structured_output,
+                )
 
             return
 
@@ -2377,6 +2799,7 @@ async def complete(
     correlation_id: str | None = None,
     timeout: float | None = None,
     guardrails: GuardrailsConfig | None = None,
+    on_status: OnStatusCallback = None,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
 
@@ -2390,6 +2813,7 @@ async def complete(
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
         guardrails: Optional guardrails configuration
+        on_status: Optional callback for process status events
 
     Returns:
         ToolExecutionResult with final response and execution history
@@ -2402,7 +2826,11 @@ async def complete(
         guardrails=guardrails,
     )
     return await client.complete(
-        user_message, execute_tools=execute_tools, correlation_id=correlation_id, timeout=timeout
+        user_message,
+        execute_tools=execute_tools,
+        correlation_id=correlation_id,
+        timeout=timeout,
+        on_status=on_status,
     )
 
 
@@ -2417,6 +2845,7 @@ async def structured_complete(
     correlation_id: str | None = None,
     timeout: float | None = None,
     guardrails: GuardrailsConfig | None = None,
+    on_status: OnStatusCallback = None,
 ) -> ExecutionResult:
     """Quick structured completion with optional tool support.
 
@@ -2435,6 +2864,7 @@ async def structured_complete(
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
         guardrails: Optional guardrails configuration
+        on_status: Optional callback for process status events
 
     Returns:
         ExecutionResult with structured_output field containing instance of response_format
@@ -2487,6 +2917,7 @@ async def structured_complete(
         execute_tools=execute_tools,
         correlation_id=correlation_id,
         timeout=timeout,
+        on_status=on_status,
     )
 
 
@@ -2544,12 +2975,17 @@ async def stream_complete(
     execute_tools: bool = True,
     max_tool_iterations: int | None = None,
     guardrails: GuardrailsConfig | None = None,
+    response_format: type[BaseModel] | None = None,
+    on_status: OnStatusCallback = None,
 ) -> AsyncIterator[StreamingChunk]:
     """Stream completion with automatic tool execution.
 
     Yields chunks of the response as they arrive. Note: tool execution
     interrupts streaming - when tools are called, streaming pauses until
     tool results are processed.
+
+    When response_format is set, the final chunk may include structured_output
+    (parsed Pydantic instance).
 
     Note:
         **Streaming Limitation:** When tools are enabled (`execute_tools=True`),
@@ -2566,9 +3002,11 @@ async def stream_complete(
         execute_tools: Whether to automatically execute tools
         max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
         guardrails: Optional guardrails configuration
+        response_format: Optional Pydantic model; final chunk may include structured_output
+        on_status: Optional callback for process status events
 
     Yields:
-        StreamingChunk objects with content and metadata
+        StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)
 
     Example:
         >>> async for chunk in stream_complete("Tell me a story"):
@@ -2583,5 +3021,10 @@ async def stream_complete(
         max_tool_iterations=max_tool_iterations,
         guardrails=guardrails,
     )
-    async for chunk in client.stream_complete(user_message, execute_tools=execute_tools):
+    async for chunk in client.stream_complete(
+        user_message,
+        execute_tools=execute_tools,
+        response_format=response_format,
+        on_status=on_status,
+    ):
         yield chunk

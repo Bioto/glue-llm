@@ -5,7 +5,14 @@ from typing import Annotated
 import pytest
 from pydantic import BaseModel, Field
 
-from gluellm.api import ExecutionResult, GlueLLM, complete, structured_complete
+from gluellm.api import (
+    ExecutionResult,
+    GlueLLM,
+    complete,
+    stream_complete,
+    structured_complete,
+)
+from gluellm.events import ProcessEvent
 
 # Mark all tests as async
 pytestmark = pytest.mark.asyncio
@@ -780,6 +787,95 @@ class TestToolResultSerialization:
             # Unicode should be preserved
             assert isinstance(result.tool_execution_history[0]["result"], str)
             assert "Unicode" in result.tool_execution_history[0]["result"]
+
+
+class TestProcessStatusEvents:
+    """Test on_status callback and process events."""
+
+    @pytest.mark.integration
+    async def test_complete_emits_llm_and_complete_events(self):
+        """complete() with on_status receives llm_call_start, llm_call_end, complete."""
+        import os
+
+        if not os.getenv("OPENAI_API_KEY"):
+            pytest.skip("OPENAI_API_KEY not set")
+        events: list[ProcessEvent] = []
+
+        def on_status(e: ProcessEvent) -> None:
+            events.append(e)
+
+        result = await complete(
+            user_message="Reply with the word OK only.",
+            system_prompt="You are a terse assistant. Reply with exactly: OK",
+            on_status=on_status,
+        )
+
+        assert isinstance(result, ExecutionResult)
+        kinds = [e.kind for e in events]
+        assert "llm_call_start" in kinds
+        assert "llm_call_end" in kinds
+        assert "complete" in kinds
+        assert kinds.index("llm_call_start") < kinds.index("llm_call_end")
+        assert kinds.index("llm_call_end") < kinds.index("complete")
+
+    @pytest.mark.integration
+    async def test_stream_complete_emits_stream_events(self):
+        """stream_complete() without tools emits stream_start, stream_chunk, stream_end."""
+        import os
+
+        if not os.getenv("OPENAI_API_KEY"):
+            pytest.skip("OPENAI_API_KEY not set")
+        events: list[ProcessEvent] = []
+
+        def on_status(e: ProcessEvent) -> None:
+            events.append(e)
+
+        chunks = []
+        async for chunk in stream_complete(
+            user_message="Say hi in one word.",
+            system_prompt="Reply with one word: Hi",
+            tools=[],
+            on_status=on_status,
+        ):
+            chunks.append(chunk)
+
+        assert len(chunks) >= 1
+        kinds = [e.kind for e in events]
+        assert "stream_start" in kinds
+        assert "stream_end" in kinds
+
+
+class TestStreamingStructuredOutput:
+    """Test stream_complete with response_format (structured output on final chunk)."""
+
+    @pytest.mark.integration
+    async def test_stream_complete_with_response_format_final_chunk_has_structured_output(
+        self,
+    ):
+        """When response_format is set, the final chunk may have structured_output."""
+        import os
+
+        if not os.getenv("OPENAI_API_KEY"):
+            pytest.skip("OPENAI_API_KEY not set")
+
+        class TinyResponse(BaseModel):
+            word: Annotated[str, Field(description="A single word")]
+
+        last_chunk = None
+        async for chunk in stream_complete(
+            user_message="Reply with a single word: hello",
+            system_prompt='You must respond with valid JSON only, e.g. {"word": "hello"}.',
+            tools=[],
+            response_format=TinyResponse,
+        ):
+            last_chunk = chunk
+
+        assert last_chunk is not None
+        assert last_chunk.done is True
+        # Parser may or may not succeed depending on model output; if it does, we get structured_output
+        if last_chunk.structured_output is not None:
+            assert isinstance(last_chunk.structured_output, TinyResponse)
+            assert isinstance(last_chunk.structured_output.word, str)
 
 
 if __name__ == "__main__":

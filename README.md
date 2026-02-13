@@ -41,7 +41,9 @@ GlueLLM is a high-level SDK that makes working with LLMs actually pleasant:
 
 - **Zero ceremony**: minimal code to get real results
 - **Tool execution loop**: automatic tool calling orchestration
-- **Structured output**: Pydantic models, validated
+- **Structured output**: Pydantic models, validated (including streaming: parse on final chunk)
+- **Streaming**: `stream_complete()` with optional structured output on the last chunk
+- **Process status events**: optional `on_status` callback for LLM/tool/stream progress
 - **Provider-agnostic**: one API for OpenAI, Anthropic, XAI, and others
 - **Embeddings**: same ergonomics + error handling
 - **Batch processing**: concurrency control, retry strategies, key pools
@@ -124,6 +126,60 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### Streaming
+
+Stream token-by-token with `stream_complete()`. When tools are enabled, the final response after tool runs is returned as one chunk (streaming resumes between tool rounds).
+
+```python
+import asyncio
+from gluellm import stream_complete
+
+async def main():
+    async for chunk in stream_complete("Tell me a short joke."):
+        print(chunk.content, end="", flush=True)
+        if chunk.done:
+            print(f"\nTool calls: {chunk.tool_calls_made}")
+
+asyncio.run(main())
+```
+
+**Streaming + structured output:** Pass `response_format` to get a parsed Pydantic instance on the final chunk (the stream is plain text; we parse when the stream ends).
+
+```python
+from pydantic import BaseModel, Field
+from gluellm import stream_complete
+
+class Answer(BaseModel):
+    word: str
+
+async for chunk in stream_complete(
+    "Reply with JSON: {\"word\": \"hello\"}",
+    response_format=Answer,
+    tools=[],
+):
+    if chunk.done and chunk.structured_output:
+        print(chunk.structured_output.word)  # hello
+```
+
+### Process status events
+
+Use the optional `on_status` callback to observe what’s happening (LLM call start/end, tool execution, stream start/chunk/end, completion). Handy for progress UIs or logging.
+
+```python
+from gluellm import complete, ProcessEvent
+
+def on_status(e: ProcessEvent) -> None:
+    print(f"{e.kind}: {e.tool_name or e.iteration or ''}")
+
+result = await complete(
+    "What is 2+2?",
+    on_status=on_status,
+)
+# llm_call_start, llm_call_end, complete (and tool_call_* if tools run)
+```
+
+`on_status` is supported on `complete()`, `stream_complete()`, and `structured_complete()` (and the `GlueLLM` client methods).
 
 ### Embeddings
 
