@@ -115,25 +115,26 @@ Feedback from critics:
 
 Please revise the content based on this feedback."""
 
-            # Execute producer
-            current_output = await self.producer.execute(producer_input)
+            # Execute producer (Executor.execute returns str; some wrappers may return object with .final_response)
+            raw = await self.producer.execute(producer_input)
+            current_output = raw if isinstance(raw, str) else getattr(raw, "final_response", None) or str(raw)
             interactions.append(
                 {
                     "iteration": iteration + 1,
                     "agent": "producer",
                     "input": producer_input,
-                    "output": current_output.final_response,
+                    "output": current_output,
                 }
             )
 
             # Execute critics in parallel
-            critique = await self._execute_critics_parallel(current_output.final_response, iteration + 1, interactions)
+            critique = await self._execute_critics_parallel(current_output, iteration + 1, interactions)
 
             # Check convergence criteria
             should_stop = False
             if self.config.quality_evaluator and self.config.min_quality_score is not None:
                 try:
-                    score = self.config.quality_evaluator(current_output.final_response, critique)
+                    score = self.config.quality_evaluator(current_output, critique)
                     if score >= self.config.min_quality_score:
                         should_stop = True
                 except Exception:
@@ -144,7 +145,7 @@ Please revise the content based on this feedback."""
                 break
 
         return WorkflowResult(
-            final_output=current_output.final_response or "",
+            final_output=current_output or "",
             iterations=iteration + 1,
             agent_interactions=interactions,
             metadata={
