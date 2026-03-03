@@ -605,17 +605,23 @@ def _normalize_tool_call_to_dict(tc: Any) -> dict[str, Any]:
     }
 
 
+def _tool_name_from_call(tool_call: Any) -> str:
+    """Extract tool name from a tool call object; always return a string (for ProcessEvent)."""
+    name = getattr(getattr(tool_call, "function", None), "name", None)
+    return name if isinstance(name, str) else (str(name) if name is not None else "")
+
+
 def _response_message_to_dict(msg: Any) -> dict[str, Any]:
     """Convert a provider response message to a dict for appending to messages.
 
     Providers may return a Pydantic model or an object (e.g. OpenAI ChatCompletionMessage).
     any_llm expects messages to be a list of dicts, so we normalize before appending.
+
+    We build the dict from role/content/tool_calls only, and do not use model_dump()
+    on the message. With structured output the message can have a `parsed` field
+    holding the user's Pydantic model; the provider's schema often expects `parsed`
+    to be None, so serializing it triggers Pydantic serializer warnings.
     """
-    if hasattr(msg, "model_dump"):
-        d = msg.model_dump()
-        raw_tool_calls = d.get("tool_calls") or []
-        d["tool_calls"] = [_normalize_tool_call_to_dict(tc) for tc in raw_tool_calls]
-        return d
     tool_calls_raw = getattr(msg, "tool_calls", None) or []
     return {
         "role": getattr(msg, "role", "assistant"),
@@ -1377,7 +1383,7 @@ class GlueLLM:
                         # Execute each tool call
                         for call_index, tool_call in enumerate(tool_calls, 1):
                             tool_calls_made += 1
-                            tool_name = tool_call.function.name
+                            tool_name = _tool_name_from_call(tool_call)
                             await emit_status(
                                 ProcessEvent(
                                     kind="tool_call_start",
@@ -1956,7 +1962,7 @@ class GlueLLM:
                             # Execute each tool call
                             for call_index, tool_call in enumerate(tool_calls, 1):
                                 tool_calls_made += 1
-                                tool_name = tool_call.function.name
+                                tool_name = _tool_name_from_call(tool_call)
                                 await emit_status(
                                     ProcessEvent(
                                         kind="tool_call_start",
@@ -2625,7 +2631,7 @@ class GlueLLM:
                 # Execute each tool call
                 for call_index, tool_call in enumerate(tool_calls, 1):
                     tool_calls_made += 1
-                    tool_name = tool_call.function.name
+                    tool_name = _tool_name_from_call(tool_call)
                     logger.debug(f"Executing tool call {tool_calls_made}: {tool_name}")
                     await emit_status(
                         ProcessEvent(
