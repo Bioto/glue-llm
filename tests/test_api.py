@@ -1018,7 +1018,7 @@ class TestExecutionResultSerialization:
         assert "parsed" not in dumped["raw_response"]["choices"][0]["message"]
         assert dumped["raw_response"]["choices"][0]["message"]["role"] == "assistant"
 
-    def test_model_dump_json_emits_no_warning_when_parsed_field_holds_user_model(self):
+    async def test_model_dump_json_emits_no_warning_when_parsed_field_holds_user_model(self):
         """model_dump_json() must also be silent - covers the JSON serialisation path."""
         import json
         import warnings
@@ -1049,7 +1049,7 @@ class TestExecutionResultSerialization:
         assert data["raw_response"]["id"] == "chatcmpl-test"
         assert "parsed" not in data["raw_response"]["choices"][0]["message"]
 
-    def test_serialize_chat_completion_to_dict_is_warning_free(self):
+    async def test_serialize_chat_completion_to_dict_is_warning_free(self):
         """The shared helper itself must produce a clean dict with no `parsed` key."""
         from gluellm.api import _serialize_chat_completion_to_dict
 
@@ -1064,6 +1064,224 @@ class TestExecutionResultSerialization:
         message = result["choices"][0]["message"]
         assert message["role"] == "assistant"
         assert "parsed" not in message
+
+
+class TestAnyLlmWarningsSuppressed:
+    """Regression tests: PydanticSerializationUnexpectedValue from any_llm must not reach callers.
+
+    any_llm calls response.model_dump() on a ParsedChatCompletion whose `message.parsed`
+    holds a user Pydantic model at runtime but is typed as None in the base schema.
+    _safe_llm_call must swallow that UserWarning before it surfaces to third-party code.
+    """
+
+    async def test_safe_llm_call_does_not_emit_pydantic_serialization_warning(self):
+        """_safe_llm_call must suppress PydanticSerializationUnexpectedValue from any_llm."""
+        import time
+        import warnings
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from any_llm.types.completion import (
+            ChatCompletion,
+            ChatCompletionMessage,
+            Choice,
+            CompletionUsage,
+        )
+        from pydantic import BaseModel
+
+        from gluellm.api import _safe_llm_call
+
+        class MyScore(BaseModel):
+            score: float
+
+        async def fake_acompletion(**kwargs):
+            warnings.warn(
+                "Expected `null` but got `MyScore` - serialized value may not be as expected "
+                "[type=PydanticSerializationUnexpectedValue]",
+                UserWarning,
+                stacklevel=2,
+            )
+            msg = ChatCompletionMessage(role="assistant", content='{"score": 0.9}')
+            choice = Choice(index=0, message=msg, finish_reason="stop")
+            usage = CompletionUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+            return ChatCompletion(
+                id="chatcmpl-test",
+                choices=[choice],
+                created=int(time.time()),
+                model="gpt-4o-mini",
+                object="chat.completion",
+                usage=usage,
+            )
+
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(side_effect=fake_acompletion)
+
+        with (
+            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
+            warnings.catch_warnings(),
+        ):
+            warnings.simplefilter("error", UserWarning)
+            # Must not raise — the PydanticSerializationUnexpectedValue warning must be suppressed
+            result = await _safe_llm_call(
+                messages=[{"role": "user", "content": "test"}],
+                model="openai:gpt-4o-mini",
+                response_format=MyScore,
+            )
+
+        assert result is not None
+
+
+class TestProviderCache:
+    """Regression tests for the provider cache that prevents 'Event loop is closed' errors.
+
+    The root cause of the error: every call to any_llm_acompletion() previously
+    created a new AsyncOpenAI client. On event loop shutdown those orphaned clients
+    were garbage-collected, triggering async cleanup on an already-closed loop.
+    The fix caches provider instances so a single httpx client is reused.
+    """
+
+    async def test_provider_cache_returns_same_instance_for_same_key(self):
+        """Same (model, api_key) must reuse the cached provider — not create a new one."""
+        from unittest.mock import MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+        fake_provider = MagicMock()
+
+        with patch("gluellm.api.AnyLLM.create", return_value=fake_provider) as mock_create:
+            p1, m1 = cache.get_provider("openai:gpt-4o-mini", "sk-test")
+            p2, m2 = cache.get_provider("openai:gpt-4o-mini", "sk-test")
+
+        # AnyLLM.create must be called exactly once; second call must hit the cache
+        mock_create.assert_called_once()
+        assert p1 is p2
+        assert m1 == "gpt-4o-mini"
+        assert m2 == "gpt-4o-mini"
+
+    async def test_provider_cache_creates_separate_instance_for_different_api_keys(self):
+        """Different API keys must each get their own provider instance."""
+        from unittest.mock import MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+        provider_a = MagicMock()
+        provider_b = MagicMock()
+
+        with patch("gluellm.api.AnyLLM.create", side_effect=[provider_a, provider_b]):
+            p1, _ = cache.get_provider("openai:gpt-4o-mini", "sk-key-a")
+            p2, _ = cache.get_provider("openai:gpt-4o-mini", "sk-key-b")
+
+        assert p1 is provider_a
+        assert p2 is provider_b
+        assert p1 is not p2
+
+    async def test_provider_cache_handles_slash_separator_for_embeddings(self):
+        """Embedding models use 'provider/model' format — the cache must parse it correctly."""
+        from unittest.mock import MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+        fake_provider = MagicMock()
+
+        with patch("gluellm.api.AnyLLM.create", return_value=fake_provider) as mock_create:
+            provider, model_id = cache.get_provider("openai/text-embedding-3-small", None)
+
+        assert provider is fake_provider
+        assert model_id == "text-embedding-3-small"
+        mock_create.assert_called_once_with("openai", api_key=mock_create.call_args[1]["api_key"])
+
+    async def test_close_all_calls_aclose_on_cached_clients(self):
+        """close_all() must call aclose() on every cached provider's HTTP client."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+
+        mock_client = MagicMock()
+        mock_client.aclose = AsyncMock()
+
+        fake_provider = MagicMock()
+        fake_provider.client = mock_client
+
+        with patch("gluellm.api.AnyLLM.create", return_value=fake_provider):
+            cache.get_provider("openai:gpt-4o-mini", "sk-test")
+
+        await cache.close_all()
+
+        mock_client.aclose.assert_called_once()
+        # Cache must be empty after close so no stale clients linger
+        assert len(cache._providers) == 0
+
+    async def test_close_providers_does_not_raise_event_loop_closed_error(self):
+        """close_providers() must gracefully handle providers with no client attribute."""
+        from unittest.mock import MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+        fake_provider = MagicMock(spec=[])  # no 'client' attribute
+
+        with patch("gluellm.api.AnyLLM.create", return_value=fake_provider):
+            cache.get_provider("openai:gpt-4o-mini", "sk-test")
+
+        # Must not raise even when the provider has no .client
+        await cache.close_all()
+
+    async def test_safe_llm_call_uses_cached_provider_not_new_instance(self):
+        """_safe_llm_call must route through the provider cache, not create a fresh client.
+
+        Regression test: before the fix every call created a new AsyncOpenAI(),
+        leaving orphaned clients that raised RuntimeError on GC after loop close.
+        """
+        import time
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from any_llm.types.completion import (
+            ChatCompletion,
+            ChatCompletionMessage,
+            Choice,
+            CompletionUsage,
+        )
+
+        from gluellm.api import _safe_llm_call
+
+        msg = ChatCompletionMessage(role="assistant", content="hello")
+        choice = Choice(index=0, message=msg, finish_reason="stop")
+        usage = CompletionUsage(prompt_tokens=5, completion_tokens=5, total_tokens=10)
+        fake_response = ChatCompletion(
+            id="chatcmpl-x",
+            choices=[choice],
+            created=int(time.time()),
+            model="gpt-4o-mini",
+            object="chat.completion",
+            usage=usage,
+        )
+
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(return_value=fake_response)
+        get_provider_calls = []
+
+        def fake_get_provider(model, api_key):
+            get_provider_calls.append((model, api_key))
+            return mock_provider, "gpt-4o-mini"
+
+        with patch("gluellm.api._provider_cache.get_provider", side_effect=fake_get_provider):
+            await _safe_llm_call(
+                messages=[{"role": "user", "content": "hi"}],
+                model="openai:gpt-4o-mini",
+            )
+            await _safe_llm_call(
+                messages=[{"role": "user", "content": "hi again"}],
+                model="openai:gpt-4o-mini",
+            )
+
+        # Both calls must have gone through the cache lookup
+        assert len(get_provider_calls) == 2
+        # The provider's acompletion must have been called twice (not a new client each time)
+        assert mock_provider.acompletion.call_count == 2
 
 
 if __name__ == "__main__":

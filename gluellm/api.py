@@ -53,7 +53,9 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
+import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -64,7 +66,7 @@ if TYPE_CHECKING:
     from gluellm.models.agent import Agent
     from gluellm.models.embedding import EmbeddingResult
 
-from any_llm import acompletion as any_llm_acompletion
+from any_llm import AnyLLM
 from any_llm.types.completion import ChatCompletion
 from pydantic import BaseModel, Field, field_serializer
 from pydantic.functional_validators import SkipValidation
@@ -120,6 +122,117 @@ PROVIDER_ENV_VAR_MAP: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "xai": "XAI_API_KEY",
 }
+
+
+# ============================================================================
+# Provider Cache
+# ============================================================================
+
+
+class _ProviderCache:
+    """Module-level cache of AnyLLM provider instances.
+
+    Each unique (provider_name, api_key) pair maps to a single AnyLLM instance
+    that owns an httpx AsyncClient. Reusing instances means the underlying HTTP
+    connection pool is shared across requests, which prevents the
+    'RuntimeError: Event loop is closed' error that occurs when abandoned
+    AsyncOpenAI clients are garbage-collected after the event loop exits.
+    """
+
+    def __init__(self) -> None:
+        self._providers: dict[tuple[str, str | None], AnyLLM] = {}
+        self._lock = threading.Lock()
+
+    def get_provider(self, model: str, api_key: str | None) -> tuple[AnyLLM, str]:
+        """Return a cached (provider, model_id) pair, creating one if needed.
+
+        Args:
+            model: Full model string in "provider:model_name" or "provider/model_name" format
+            api_key: Explicit API key, or None to resolve from env at first use
+
+        Returns:
+            Tuple of (provider_instance, model_id) ready for acompletion()/_aembedding()
+        """
+        if ":" in model:
+            provider_name, model_id = model.split(":", 1)
+        elif "/" in model:
+            provider_name, model_id = model.split("/", 1)
+        else:
+            provider_name, model_id = model, model
+
+        provider_name = provider_name.lower()
+
+        # Resolve the key that will actually be used so the cache key is stable
+        resolved_key = api_key
+        if resolved_key is None:
+            env_var = PROVIDER_ENV_VAR_MAP.get(provider_name)
+            if env_var:
+                resolved_key = os.environ.get(env_var)
+
+        cache_key = (provider_name, resolved_key)
+        with self._lock:
+            if cache_key not in self._providers:
+                self._providers[cache_key] = AnyLLM.create(
+                    provider_name,
+                    api_key=resolved_key,
+                )
+            provider = self._providers[cache_key]
+
+        return provider, model_id
+
+    async def close_all(self) -> None:
+        """Close all cached provider HTTP clients gracefully.
+
+        Call this during application shutdown to ensure httpx connections are
+        cleanly closed before the event loop exits, preventing the
+        'RuntimeError: Event loop is closed' warning from the GC.
+        """
+        with self._lock:
+            providers = list(self._providers.values())
+            self._providers.clear()
+
+        for provider in providers:
+            client = getattr(provider, "client", None)
+            if client is None:
+                continue
+            try:
+                aclose = getattr(client, "aclose", None)
+                if aclose is not None:
+                    await aclose()
+                else:
+                    close = getattr(client, "close", None)
+                    if close is not None:
+                        close()
+            except Exception:
+                logger.debug("Error closing provider client during shutdown", exc_info=True)
+
+
+_provider_cache = _ProviderCache()
+
+
+async def close_providers() -> None:
+    """Close all cached LLM provider HTTP clients.
+
+    Call this during application shutdown before the event loop closes.
+    GlueLLM registers this automatically when :func:`graceful_shutdown` is used,
+    but you should call it manually if you manage the event loop directly::
+
+        async def main():
+            try:
+                await my_app()
+            finally:
+                await close_providers()
+
+        asyncio.run(main())
+    """
+    await _provider_cache.close_all()
+
+
+# Register provider cleanup with the graceful shutdown system so that
+# close_providers() is called automatically when graceful_shutdown() runs.
+# This ensures httpx clients are closed before the event loop exits,
+# preventing 'RuntimeError: Event loop is closed' from the GC.
+register_shutdown_callback(close_providers)
 
 
 # ============================================================================
@@ -897,8 +1010,8 @@ async def _safe_llm_call(
 ) -> ChatCompletion | AsyncIterator[ChatCompletion]:
     """Make an LLM call with error classification and tracing.
 
-    This wraps the any_llm_acompletion call to catch and classify errors,
-    and optionally trace the call with OpenTelemetry.
+    Wraps provider.acompletion() (obtained from the module-level provider cache)
+    to catch and classify errors, and optionally trace the call with OpenTelemetry.
     Raises our custom exception types for better error handling.
 
     Args:
@@ -979,15 +1092,28 @@ async def _safe_llm_call(
             if correlation_id:
                 set_span_attributes(span, correlation_id=correlation_id)
 
-            # Use context manager for temporary API key
-            with _temporary_api_key(model, api_key):
-                # Make LLM call with timeout
-                # Use normalized model class if available, otherwise fall back to original Pydantic model
-                # The normalized class is a subclass, so response parsing still works correctly
+            # Resolve cached provider (reuses the same AsyncOpenAI/httpx client
+            # across calls, preventing 'Event loop is closed' on GC cleanup).
+            provider, model_id = _provider_cache.get_provider(model, api_key)
+
+            # Make LLM call with timeout.
+            # Use normalized model class if available, otherwise fall back to original Pydantic model.
+            # The normalized class is a subclass, so response parsing still works correctly.
+            # Suppress PydanticSerializationUnexpectedValue warnings emitted by
+            # any_llm when it calls response.model_dump() on a ParsedChatCompletion
+            # whose `message.parsed` field holds a structured-output model instance
+            # at runtime but is typed as None in the base schema. The warning is
+            # benign — serialization still succeeds — but would surface to callers.
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=".*PydanticSerializationUnexpectedValue.*",
+                    category=UserWarning,
+                )
                 response = await asyncio.wait_for(
-                    any_llm_acompletion(
+                    provider.acompletion(
+                        model=model_id,
                         messages=messages,
-                        model=model,
                         tools=tools if tools else None,
                         response_format=normalized_response_format if normalized_response_format else response_format,
                         stream=stream,

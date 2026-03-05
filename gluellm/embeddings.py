@@ -13,7 +13,6 @@ import time
 from contextlib import contextmanager
 from typing import Any
 
-from any_llm import aembedding as any_llm_aembedding
 from openai.types.create_embedding_response import CreateEmbeddingResponse
 from tenacity import (
     before_sleep_log,
@@ -26,6 +25,7 @@ from tenacity import (
 from gluellm.api import (
     APIConnectionError,
     RateLimitError,
+    _provider_cache,
     classify_llm_error,
 )
 from gluellm.config import settings
@@ -219,19 +219,18 @@ async def _safe_embedding_call(
             span = None
 
         try:
-            # Use context manager for temporary API key
-            with _temporary_api_key(model, api_key):
-                # Make embedding call with timeout
-                # Pass through any embedding-specific kwargs to the provider
-                embedding_kwargs_dict = embedding_kwargs or {}
-                response = await asyncio.wait_for(
-                    any_llm_aembedding(
-                        model=model,
-                        inputs=inputs,
-                        **embedding_kwargs_dict,
-                    ),
-                    timeout=timeout,
-                )
+            # Resolve cached provider (reuses the same AsyncOpenAI/httpx client
+            # across calls, preventing 'Event loop is closed' on GC cleanup).
+            embedding_provider, model_id = _provider_cache.get_provider(model, api_key)
+            embedding_kwargs_dict = embedding_kwargs or {}
+            response = await asyncio.wait_for(
+                embedding_provider._aembedding(
+                    model_id,
+                    inputs,
+                    **embedding_kwargs_dict,
+                ),
+                timeout=timeout,
+            )
 
             elapsed_time = time.time() - start_time
 

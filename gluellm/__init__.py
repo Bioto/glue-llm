@@ -81,6 +81,7 @@ from gluellm.api import (
     RateLimitError,
     StreamingChunk,
     TokenLimitError,
+    close_providers,
     complete,
     embed,
     get_session_summary,
@@ -180,6 +181,7 @@ _initialize_logging()
 __all__ = [
     # High-level API
     "GlueLLM",
+    "close_providers",
     "complete",
     "embed",
     "stream_complete",
