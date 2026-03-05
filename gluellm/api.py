@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 
 from any_llm import acompletion as any_llm_acompletion
 from any_llm.types.completion import ChatCompletion
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 from pydantic.functional_validators import SkipValidation
 from tenacity import (
     before_sleep_log,
@@ -307,46 +307,7 @@ async def _record_eval_data(
             raw_response_dict = None
             if result.raw_response:
                 try:
-                    # Convert ChatCompletion to dict
-                    raw_response_dict = {
-                        "id": getattr(result.raw_response, "id", None),
-                        "model": getattr(result.raw_response, "model", None),
-                        "choices": [
-                            {
-                                "index": getattr(choice, "index", None),
-                                "message": {
-                                    "role": getattr(choice.message, "role", None),
-                                    "content": getattr(choice.message, "content", None),
-                                    "tool_calls": [
-                                        {
-                                            "id": getattr(tc, "id", None),
-                                            "type": getattr(tc, "type", None),
-                                            "function": {
-                                                "name": getattr(tc.function, "name", None),
-                                                "arguments": getattr(tc.function, "arguments", None),
-                                            },
-                                        }
-                                        for tc in (getattr(choice.message, "tool_calls", None) or [])
-                                    ],
-                                },
-                                "finish_reason": getattr(choice, "finish_reason", None),
-                            }
-                            for choice in (getattr(result.raw_response, "choices", None) or [])
-                        ],
-                        "usage": {
-                            "prompt_tokens": getattr(result.raw_response.usage, "prompt_tokens", None)
-                            if hasattr(result.raw_response, "usage") and result.raw_response.usage
-                            else None,
-                            "completion_tokens": getattr(result.raw_response.usage, "completion_tokens", None)
-                            if hasattr(result.raw_response, "usage") and result.raw_response.usage
-                            else None,
-                            "total_tokens": getattr(result.raw_response.usage, "total_tokens", None)
-                            if hasattr(result.raw_response, "usage") and result.raw_response.usage
-                            else None,
-                        }
-                        if hasattr(result.raw_response, "usage") and result.raw_response.usage
-                        else None,
-                    }
+                    raw_response_dict = _serialize_chat_completion_to_dict(result.raw_response)
                 except Exception as e:
                     logger.debug(f"Failed to serialize raw_response: {e}")
 
@@ -627,6 +588,53 @@ def _response_message_to_dict(msg: Any) -> dict[str, Any]:
         "role": getattr(msg, "role", "assistant"),
         "content": getattr(msg, "content", None),
         "tool_calls": [_normalize_tool_call_to_dict(tc) for tc in tool_calls_raw],
+    }
+
+
+def _serialize_chat_completion_to_dict(completion: Any) -> dict[str, Any]:
+    """Serialize a ChatCompletion object to a plain dict, omitting the `parsed` field.
+
+    The OpenAI SDK's `ParsedChatCompletionMessage` adds a `parsed` field typed as
+    `Optional[ContentType]`. When Pydantic serializes this through the base schema
+    (which declares `parsed: None`), it emits a `PydanticSerializationUnexpectedValue`
+    warning because the runtime value is a user Pydantic model, not `None`.
+
+    This helper extracts only the safe, schema-stable fields so that serialization
+    (via `model_dump` / `model_dump_json`) is always warning-free.
+    """
+    usage = getattr(completion, "usage", None)
+    return {
+        "id": getattr(completion, "id", None),
+        "model": getattr(completion, "model", None),
+        "choices": [
+            {
+                "index": getattr(choice, "index", None),
+                "message": {
+                    "role": getattr(choice.message, "role", None),
+                    "content": getattr(choice.message, "content", None),
+                    "tool_calls": [
+                        {
+                            "id": getattr(tc, "id", None),
+                            "type": getattr(tc, "type", None),
+                            "function": {
+                                "name": getattr(tc.function, "name", None),
+                                "arguments": getattr(tc.function, "arguments", None),
+                            },
+                        }
+                        for tc in (getattr(choice.message, "tool_calls", None) or [])
+                    ],
+                },
+                "finish_reason": getattr(choice, "finish_reason", None),
+            }
+            for choice in (getattr(completion, "choices", None) or [])
+        ],
+        "usage": {
+            "prompt_tokens": getattr(usage, "prompt_tokens", None),
+            "completion_tokens": getattr(usage, "completion_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
+        }
+        if usage
+        else None,
     }
 
 
@@ -1176,6 +1184,19 @@ class ExecutionResult(BaseModel):
             default=None,
         ),
     ]
+
+    @field_serializer("raw_response")
+    @staticmethod
+    def serialize_raw_response(value: Any, _info: Any) -> dict[str, Any] | None:
+        """Serialize raw_response to a plain dict, omitting the provider SDK's `parsed` field.
+
+        Calling model_dump() on a ParsedChatCompletion triggers a Pydantic
+        PydanticSerializationUnexpectedValue warning because the base schema declares
+        `parsed: None` while the runtime object holds the user's Pydantic model.
+        """
+        if value is None:
+            return None
+        return _serialize_chat_completion_to_dict(value)
 
     def __len__(self) -> int:
         """Return the length of the final response or tool execution history."""

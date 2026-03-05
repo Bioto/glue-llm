@@ -961,5 +961,110 @@ class TestStreamingStructuredOutput:
             assert isinstance(last_chunk.structured_output.word, str)
 
 
+class TestExecutionResultSerialization:
+    """Tests that ExecutionResult.model_dump() never emits Pydantic serialization warnings.
+
+    Regression tests for the PydanticSerializationUnexpectedValue warning that occurs
+    when the OpenAI SDK returns a ParsedChatCompletion whose message carries a user's
+    Pydantic model in the `parsed` field, but the base schema declares `parsed: None`.
+    """
+
+    def _make_parsed_chat_completion(self, parsed_value: BaseModel) -> object:
+        """Build a minimal ParsedChatCompletion-like object carrying a user Pydantic model."""
+        from types import SimpleNamespace
+
+        message = SimpleNamespace(
+            role="assistant",
+            content='{"items": ["a", "b"], "missing_information_queries": []}',
+            tool_calls=None,
+            parsed=parsed_value,
+        )
+        choice = SimpleNamespace(index=0, message=message, finish_reason="stop")
+        usage = SimpleNamespace(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+        return SimpleNamespace(id="chatcmpl-test", model="gpt-4o", choices=[choice], usage=usage)
+
+    def test_model_dump_emits_no_warning_when_parsed_field_holds_user_model(self, recwarn):
+        """model_dump() must be silent even when raw_response carries a user Pydantic model in `parsed`."""
+
+        class ContextRelevancyCoverageScore(BaseModel):
+            items: list[str]
+            missing_information_queries: list[str]
+
+        user_model = ContextRelevancyCoverageScore(items=["a", "b"], missing_information_queries=[])
+        raw = self._make_parsed_chat_completion(user_model)
+
+        result = ExecutionResult(
+            final_response="test",
+            tool_calls_made=0,
+            tool_execution_history=[],
+            raw_response=raw,
+            tokens_used=None,
+            estimated_cost_usd=None,
+            model="openai:gpt-4o",
+            structured_output=user_model,
+        )
+
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            # This must not raise - previously it would emit PydanticSerializationUnexpectedValue
+            dumped = result.model_dump()
+
+        assert dumped["raw_response"]["id"] == "chatcmpl-test"
+        assert dumped["raw_response"]["model"] == "gpt-4o"
+        assert len(dumped["raw_response"]["choices"]) == 1
+        # `parsed` must NOT appear in the serialized output
+        assert "parsed" not in dumped["raw_response"]["choices"][0]["message"]
+        assert dumped["raw_response"]["choices"][0]["message"]["role"] == "assistant"
+
+    def test_model_dump_json_emits_no_warning_when_parsed_field_holds_user_model(self):
+        """model_dump_json() must also be silent - covers the JSON serialisation path."""
+        import json
+        import warnings
+
+        class ScoreModel(BaseModel):
+            score: float
+            label: str
+
+        user_model = ScoreModel(score=0.95, label="relevant")
+        raw = self._make_parsed_chat_completion(user_model)
+
+        result = ExecutionResult(
+            final_response="answer",
+            tool_calls_made=0,
+            tool_execution_history=[],
+            raw_response=raw,
+            tokens_used={"prompt": 10, "completion": 20, "total": 30},
+            estimated_cost_usd=0.001,
+            model="openai:gpt-4o-mini",
+            structured_output=user_model,
+        )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            json_str = result.model_dump_json()
+
+        data = json.loads(json_str)
+        assert data["raw_response"]["id"] == "chatcmpl-test"
+        assert "parsed" not in data["raw_response"]["choices"][0]["message"]
+
+    def test_serialize_chat_completion_to_dict_is_warning_free(self):
+        """The shared helper itself must produce a clean dict with no `parsed` key."""
+        from gluellm.api import _serialize_chat_completion_to_dict
+
+        class MyModel(BaseModel):
+            value: int
+
+        raw = self._make_parsed_chat_completion(MyModel(value=42))
+        result = _serialize_chat_completion_to_dict(raw)
+
+        assert result["id"] == "chatcmpl-test"
+        assert result["usage"]["prompt_tokens"] == 10
+        message = result["choices"][0]["message"]
+        assert message["role"] == "assistant"
+        assert "parsed" not in message
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

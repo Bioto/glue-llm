@@ -1,0 +1,23 @@
+---
+description: Always add regression tests when discussing a bug and its fix
+alwaysApply: true
+---
+
+# Regression Tests for Bug Fixes
+
+When a bug is identified and a fix is discussed or applied, always add one or more tests that cover the regression.
+
+## Requirements
+
+- **Always add a test** - no bug fix ships without a corresponding test
+- **Descriptive names** - use `test_<thing>_does_not_<bad_behaviour>` or `test_<thing>_<expected_behaviour>_when_<condition>` so the regression intent is self-evident
+- **Prefer existing test files** - add to the relevant existing test file (e.g. `tests/test_api.py`) rather than creating a new file unless truly warranted
+- **The test must catch the original bug** - it should fail against the pre-fix code and pass after the fix
+
+## Example
+
+```python
+# Bug: calling foo() with an empty list raised KeyError instead of returning []
+def test_foo_returns_empty_list_when_given_no_items():
+    assert foo([]) == []
+```
