@@ -630,6 +630,67 @@ def _response_message_to_dict(msg: Any) -> dict[str, Any]:
     }
 
 
+def _condense_tool_round(messages: list[dict[str, Any]]) -> None:
+    """Replace the last tool-call round in messages with a single condensed summary.
+
+    Finds the trailing sequence of ``role: "tool"`` messages preceded by a
+    ``role: "assistant"`` message that contains ``tool_calls``. If the assistant
+    message had no text content (a pure tool-call round), those N+1 messages are
+    replaced with one ``role: "assistant"`` message whose content summarises each
+    call and its result.
+
+    Rounds where the assistant produced visible text content alongside tool calls
+    are left untouched, because that text carries meaning the model needs to see.
+    """
+    # Collect trailing tool-response messages
+    tool_response_indices: list[int] = []
+    idx = len(messages) - 1
+    while idx >= 0 and messages[idx].get("role") == "tool":
+        tool_response_indices.append(idx)
+        idx -= 1
+    tool_response_indices.reverse()
+
+    if not tool_response_indices:
+        return
+
+    assistant_idx = idx
+    if assistant_idx < 0:
+        return
+
+    assistant_msg = messages[assistant_idx]
+    if assistant_msg.get("role") != "assistant":
+        return
+
+    tool_calls = assistant_msg.get("tool_calls") or []
+    if not tool_calls:
+        return
+
+    # Only condense pure tool-call rounds (no visible assistant text)
+    if assistant_msg.get("content"):
+        return
+
+    # Build a lookup from tool_call_id -> tool name for readable output
+    id_to_name: dict[str, str] = {}
+    for tc in tool_calls:
+        tc_id = tc.get("id", "")
+        fn = tc.get("function") or {}
+        name = fn.get("name", "unknown") if isinstance(fn, dict) else getattr(fn, "name", "unknown")
+        id_to_name[tc_id] = name
+
+    lines = ["[Tool Results]"]
+    for tool_msg in (messages[i] for i in tool_response_indices):
+        tc_id = tool_msg.get("tool_call_id", "")
+        name = id_to_name.get(tc_id, tc_id)
+        result = tool_msg.get("content", "")
+        lines.append(f"- {name}() -> {result}")
+
+    condensed_content = "\n".join(lines)
+
+    # Replace the N+1 messages with a single condensed assistant message
+    del messages[assistant_idx:]
+    messages.append({"role": "assistant", "content": condensed_content})
+
+
 async def _consume_stream_with_tools(
     stream_iter: AsyncIterator[Any],
 ) -> AsyncIterator[tuple[bool, str, SimpleNamespace | None]]:
@@ -1213,6 +1274,7 @@ class GlueLLM:
         max_tool_iterations: int | None = None,
         eval_store: EvalStore | None = None,
         guardrails: GuardrailsConfig | None = None,
+        condense_tool_messages: bool = True,
     ):
         """Initialize GlueLLM client.
 
@@ -1224,6 +1286,9 @@ class GlueLLM:
             max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
             eval_store: Optional evaluation store for recording request/response data (defaults to global store if set)
             guardrails: Optional guardrails configuration for input/output validation
+            condense_tool_messages: If True, each completed tool-call round is condensed into a
+                single assistant message summarising the calls and results, reducing context size
+                across multi-iteration tool loops. Defaults to True.
         """
         self.model = model or settings.default_model
         self.embedding_model = embedding_model or settings.default_embedding_model
@@ -1233,6 +1298,7 @@ class GlueLLM:
         self._conversation = Conversation()
         self.eval_store = eval_store or get_global_eval_store()
         self.guardrails = guardrails
+        self.condense_tool_messages = condense_tool_messages
 
     async def complete(
         self,
@@ -1244,6 +1310,7 @@ class GlueLLM:
         api_key: str | None = None,
         guardrails: GuardrailsConfig | None = None,
         on_status: OnStatusCallback = None,
+        condense_tool_messages: bool | None = None,
     ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
 
@@ -1255,6 +1322,7 @@ class GlueLLM:
             api_key: Optional API key override (for key pool usage)
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             on_status: Optional callback for process status events (LLM call start/end, tool start/end, complete)
+            condense_tool_messages: Override the instance-level condense_tool_messages setting for this call.
 
         Returns:
             ToolExecutionResult with final response and execution history
@@ -1275,6 +1343,9 @@ class GlueLLM:
 
         # Resolve guardrails config: per-call overrides instance
         effective_guardrails = guardrails if guardrails is not None else self.guardrails
+        effective_condense = (
+            condense_tool_messages if condense_tool_messages is not None else self.condense_tool_messages
+        )
 
         # Set correlation ID if provided
         if correlation_id:
@@ -1572,6 +1643,9 @@ class GlueLLM:
                                     }
                                 )
 
+                        if effective_condense:
+                            _condense_tool_round(messages)
+
                         # Continue loop to get next response
                         continue
 
@@ -1788,6 +1862,7 @@ class GlueLLM:
         api_key: str | None = None,
         guardrails: GuardrailsConfig | None = None,
         on_status: OnStatusCallback = None,
+        condense_tool_messages: bool | None = None,
     ) -> ExecutionResult:
         """Complete a request and return structured output.
 
@@ -1806,6 +1881,7 @@ class GlueLLM:
             api_key: Optional API key override (for key pool usage)
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             on_status: Optional callback for process status events
+            condense_tool_messages: Override the instance-level condense_tool_messages setting for this call.
 
         Returns:
             ExecutionResult with structured_output field containing instance of response_format
@@ -1826,6 +1902,9 @@ class GlueLLM:
 
         # Resolve guardrails config: per-call overrides instance
         effective_guardrails = guardrails if guardrails is not None else self.guardrails
+        effective_condense = (
+            condense_tool_messages if condense_tool_messages is not None else self.condense_tool_messages
+        )
 
         # Set correlation ID if provided
         if correlation_id:
@@ -2142,6 +2221,9 @@ class GlueLLM:
                                             "content": error_msg,
                                         }
                                     )
+
+                            if effective_condense:
+                                _condense_tool_round(messages)
                         # Continue to next iteration
                         else:
                             # LLM didn't call any tools - it has enough info, break out of tool loop
@@ -2400,6 +2482,7 @@ class GlueLLM:
         guardrails: GuardrailsConfig | None = None,
         response_format: type[BaseModel] | None = None,
         on_status: OnStatusCallback = None,
+        condense_tool_messages: bool | None = None,
     ) -> AsyncIterator[StreamingChunk]:
         """Stream completion with automatic tool execution.
 
@@ -2425,6 +2508,7 @@ class GlueLLM:
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             response_format: Optional Pydantic model; if set, the final chunk may include structured_output
             on_status: Optional callback for process status events
+            condense_tool_messages: Override the instance-level condense_tool_messages setting for this call.
 
         Yields:
             StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)
@@ -2439,6 +2523,9 @@ class GlueLLM:
         """
         # Resolve guardrails config: per-call overrides instance
         effective_guardrails = guardrails if guardrails is not None else self.guardrails
+        effective_condense = (
+            condense_tool_messages if condense_tool_messages is not None else self.condense_tool_messages
+        )
 
         # Run input guardrails before processing
         if effective_guardrails:
@@ -2784,6 +2871,9 @@ class GlueLLM:
                             }
                         )
 
+                if effective_condense:
+                    _condense_tool_round(messages)
+
                 # Continue loop to get next response (stream again)
                 continue
 
@@ -2983,6 +3073,7 @@ async def complete(
     timeout: float | None = None,
     guardrails: GuardrailsConfig | None = None,
     on_status: OnStatusCallback = None,
+    condense_tool_messages: bool = True,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
 
@@ -2997,6 +3088,8 @@ async def complete(
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
         guardrails: Optional guardrails configuration
         on_status: Optional callback for process status events
+        condense_tool_messages: If True, each completed tool-call round is condensed into a single
+            assistant message, reducing context size across multi-iteration tool loops.
 
     Returns:
         ToolExecutionResult with final response and execution history
@@ -3007,6 +3100,7 @@ async def complete(
         tools=tools,
         max_tool_iterations=max_tool_iterations,
         guardrails=guardrails,
+        condense_tool_messages=condense_tool_messages,
     )
     return await client.complete(
         user_message,
@@ -3029,6 +3123,7 @@ async def structured_complete(
     timeout: float | None = None,
     guardrails: GuardrailsConfig | None = None,
     on_status: OnStatusCallback = None,
+    condense_tool_messages: bool = True,
 ) -> ExecutionResult:
     """Quick structured completion with optional tool support.
 
@@ -3048,6 +3143,8 @@ async def structured_complete(
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
         guardrails: Optional guardrails configuration
         on_status: Optional callback for process status events
+        condense_tool_messages: If True, each completed tool-call round is condensed into a single
+            assistant message, reducing context size across multi-iteration tool loops.
 
     Returns:
         ExecutionResult with structured_output field containing instance of response_format
@@ -3092,6 +3189,7 @@ async def structured_complete(
         tools=tools,
         max_tool_iterations=max_tool_iterations,
         guardrails=guardrails,
+        condense_tool_messages=condense_tool_messages,
     )
     return await client.structured_complete(
         user_message,
@@ -3160,6 +3258,7 @@ async def stream_complete(
     guardrails: GuardrailsConfig | None = None,
     response_format: type[BaseModel] | None = None,
     on_status: OnStatusCallback = None,
+    condense_tool_messages: bool = True,
 ) -> AsyncIterator[StreamingChunk]:
     """Stream completion with automatic tool execution.
 
@@ -3185,6 +3284,8 @@ async def stream_complete(
         guardrails: Optional guardrails configuration
         response_format: Optional Pydantic model; final chunk may include structured_output
         on_status: Optional callback for process status events
+        condense_tool_messages: If True, each completed tool-call round is condensed into a single
+            assistant message, reducing context size across multi-iteration tool loops.
 
     Yields:
         StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)
@@ -3201,6 +3302,7 @@ async def stream_complete(
         tools=tools,
         max_tool_iterations=max_tool_iterations,
         guardrails=guardrails,
+        condense_tool_messages=condense_tool_messages,
     )
     async for chunk in client.stream_complete(
         user_message,
