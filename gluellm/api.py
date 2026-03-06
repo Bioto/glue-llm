@@ -202,7 +202,10 @@ class _ProviderCache:
                 else:
                     close = getattr(client, "close", None)
                     if close is not None:
-                        close()
+                        if asyncio.iscoroutinefunction(close):
+                            await close()
+                        else:
+                            close()
             except Exception:
                 logger.debug("Error closing provider client during shutdown", exc_info=True)
 

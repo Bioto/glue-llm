@@ -1230,6 +1230,52 @@ class TestProviderCache:
         # Must not raise even when the provider has no .client
         await cache.close_all()
 
+    async def test_close_all_awaits_async_close_when_aclose_is_absent(self):
+        """close_all() must await close() when it is a coroutine (e.g. openai.AsyncAPIClient).
+
+        Regression: the original code called close() synchronously, producing an
+        unawaited coroutine that was GC'd with RuntimeWarning.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+
+        mock_client = MagicMock(spec=["close"])  # no aclose, only async close
+        mock_client.close = AsyncMock()
+
+        fake_provider = MagicMock()
+        fake_provider.client = mock_client
+
+        with patch("gluellm.api.AnyLLM.create", return_value=fake_provider):
+            cache.get_provider("openai:gpt-4o-mini", "sk-test")
+
+        await cache.close_all()
+
+        mock_client.close.assert_awaited_once()
+
+    async def test_close_all_calls_sync_close_when_not_coroutine(self):
+        """close_all() must call close() synchronously when it is a plain function."""
+        from unittest.mock import MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+
+        mock_client = MagicMock(spec=["close"])  # no aclose, sync close
+        # MagicMock.close is not a coroutine function by default
+
+        fake_provider = MagicMock()
+        fake_provider.client = mock_client
+
+        with patch("gluellm.api.AnyLLM.create", return_value=fake_provider):
+            cache.get_provider("openai:gpt-4o-mini", "sk-test")
+
+        await cache.close_all()
+
+        mock_client.close.assert_called_once()
+
     async def test_safe_llm_call_uses_cached_provider_not_new_instance(self):
         """_safe_llm_call must route through the provider cache, not create a fresh client.
 
