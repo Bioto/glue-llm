@@ -2,7 +2,7 @@
 
 import os
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -359,44 +359,49 @@ class TestRateLimitingIntegration:
         """Test that rate limiting is applied in API calls."""
         from gluellm.api import _safe_llm_call
 
-        # Mock the actual LLM call to avoid real API calls
-        with patch("gluellm.api.any_llm_acompletion") as mock_llm:
-            mock_response = MagicMock()
-            mock_response.choices = [MagicMock()]
-            mock_response.choices[0].message.content = "Test response"
-            mock_response.choices[0].message.tool_calls = None
-            mock_response.usage = None
-            mock_llm.return_value = mock_response
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Test response"
+        mock_response.choices[0].message.tool_calls = None
+        mock_response.usage = None
 
-            with patch("gluellm.api.acquire_rate_limit") as mock_rate_limit:
-                await _safe_llm_call(
-                    messages=[{"role": "user", "content": "Hello"}],
-                    model="openai:gpt-4o-mini",
-                )
-                # Should have called rate limiting
-                assert mock_rate_limit.called
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(return_value=mock_response)
+        with (
+            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
+            patch("gluellm.api.acquire_rate_limit") as mock_rate_limit,
+        ):
+            await _safe_llm_call(
+                messages=[{"role": "user", "content": "Hello"}],
+                model="openai:gpt-4o-mini",
+            )
+            # Should have called rate limiting
+            assert mock_rate_limit.called
 
     @pytest.mark.asyncio
     async def test_rate_limiting_with_api_key(self):
         """Test rate limiting with API key override."""
         from gluellm.api import _safe_llm_call
 
-        with patch("gluellm.api.any_llm_acompletion") as mock_llm:
-            mock_response = MagicMock()
-            mock_response.choices = [MagicMock()]
-            mock_response.choices[0].message.content = "Test response"
-            mock_response.choices[0].message.tool_calls = None
-            mock_response.usage = None
-            mock_llm.return_value = mock_response
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Test response"
+        mock_response.choices[0].message.tool_calls = None
+        mock_response.usage = None
 
-            with patch("gluellm.api.acquire_rate_limit") as mock_rate_limit:
-                await _safe_llm_call(
-                    messages=[{"role": "user", "content": "Hello"}],
-                    model="openai:gpt-4o-mini",
-                    api_key="test-api-key",
-                )
-                # Should have called rate limiting
-                assert mock_rate_limit.called
-                # Check that rate limit key includes API key hash
-                call_args = mock_rate_limit.call_args[0][0]
-                assert "api_key:" in call_args
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(return_value=mock_response)
+        with (
+            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
+            patch("gluellm.api.acquire_rate_limit") as mock_rate_limit,
+        ):
+            await _safe_llm_call(
+                messages=[{"role": "user", "content": "Hello"}],
+                model="openai:gpt-4o-mini",
+                api_key="test-api-key",
+            )
+            # Should have called rate limiting
+            assert mock_rate_limit.called
+            # Check that rate limit key includes API key hash
+            call_args = mock_rate_limit.call_args[0][0]
+            assert "api_key:" in call_args

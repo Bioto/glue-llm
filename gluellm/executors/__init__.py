@@ -147,6 +147,7 @@ class AgentExecutor(Executor):
                 system_prompt=self.agent.system_prompt.content if self.agent.system_prompt else None,
                 tools=self.agent.tools,
                 max_tool_iterations=self.agent.max_tool_iterations,
+                max_tokens=self.agent.max_tokens,
             )
             return await client.complete(query)
         finally:
@@ -174,6 +175,7 @@ class AgentStructuredExecutor(Executor):
                 system_prompt=self.agent.system_prompt.content if self.agent.system_prompt else None,
                 tools=self.agent.tools,
                 max_tool_iterations=self.agent.max_tool_iterations,
+                max_tokens=self.agent.max_tokens,
             )
             return await client.structured_complete(query, self.response_format)
         finally:

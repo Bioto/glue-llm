@@ -14,9 +14,10 @@ class TestConfigurationLoading:
 
     def test_default_values(self):
         """Test that default values are set correctly."""
-        # Create a fresh instance without env vars
+        # Create a fresh instance without env vars and without reading the .env file,
+        # which may override values like log_level in local developer environments.
         with patch.dict(os.environ, {}, clear=True):
-            config = GlueLLMSettings()
+            config = GlueLLMSettings(_env_file="")
             assert config.default_model == "openai:gpt-4o-mini"
             assert config.default_system_prompt == "You are a helpful assistant."
             assert config.max_tool_iterations == 10
