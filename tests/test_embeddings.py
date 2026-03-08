@@ -17,7 +17,6 @@ class TestEmbeddingGeneration:
 
     async def test_simple_embedding_function(self):
         """Test the embed() convenience function."""
-        # Mock the any_llm_aembedding call
         mock_response = MagicMock()
         mock_response.data = [
             MagicMock(embedding=[0.1] * 1536, index=0),
@@ -25,9 +24,11 @@ class TestEmbeddingGeneration:
         mock_response.usage = MagicMock(prompt_tokens=2, total_tokens=2)
         mock_response.model = "openai/text-embedding-3-small"
 
-        with patch("gluellm.embeddings.any_llm_aembedding", new_callable=AsyncMock) as mock_embedding:
-            mock_embedding.return_value = mock_response
-
+        mock_provider = MagicMock()
+        mock_provider._aembedding = AsyncMock(return_value=mock_response)
+        with patch(
+            "gluellm.embeddings._provider_cache.get_provider", return_value=(mock_provider, "text-embedding-3-small")
+        ):
             result = await embed("Hello, world!")
 
             assert isinstance(result, EmbeddingResult)
@@ -40,7 +41,6 @@ class TestEmbeddingGeneration:
 
     async def test_batch_embedding_function(self):
         """Test batch embedding generation."""
-        # Mock the any_llm_aembedding call
         mock_response = MagicMock()
         mock_response.data = [
             MagicMock(embedding=[0.1] * 1536, index=0),
@@ -49,9 +49,11 @@ class TestEmbeddingGeneration:
         mock_response.usage = MagicMock(prompt_tokens=4, total_tokens=4)
         mock_response.model = "openai/text-embedding-3-small"
 
-        with patch("gluellm.embeddings.any_llm_aembedding", new_callable=AsyncMock) as mock_embedding:
-            mock_embedding.return_value = mock_response
-
+        mock_provider = MagicMock()
+        mock_provider._aembedding = AsyncMock(return_value=mock_response)
+        with patch(
+            "gluellm.embeddings._provider_cache.get_provider", return_value=(mock_provider, "text-embedding-3-small")
+        ):
             result = await embed(["Hello", "World"])
 
             assert isinstance(result, EmbeddingResult)
@@ -62,7 +64,6 @@ class TestEmbeddingGeneration:
 
     async def test_client_embedding(self):
         """Test embedding using GlueLLM client."""
-        # Mock the any_llm_aembedding call
         mock_response = MagicMock()
         mock_response.data = [
             MagicMock(embedding=[0.1] * 1536, index=0),
@@ -70,9 +71,11 @@ class TestEmbeddingGeneration:
         mock_response.usage = MagicMock(prompt_tokens=2, total_tokens=2)
         mock_response.model = "openai/text-embedding-3-small"
 
-        with patch("gluellm.embeddings.any_llm_aembedding", new_callable=AsyncMock) as mock_embedding:
-            mock_embedding.return_value = mock_response
-
+        mock_provider = MagicMock()
+        mock_provider._aembedding = AsyncMock(return_value=mock_response)
+        with patch(
+            "gluellm.embeddings._provider_cache.get_provider", return_value=(mock_provider, "text-embedding-3-small")
+        ):
             client = GlueLLM()
             result = await client.embed("Hello, world!")
 
@@ -82,7 +85,6 @@ class TestEmbeddingGeneration:
 
     async def test_client_custom_embedding_model(self):
         """Test client with custom embedding model."""
-        # Mock the any_llm_aembedding call
         mock_response = MagicMock()
         mock_response.data = [
             MagicMock(embedding=[0.1] * 3072, index=0),  # text-embedding-3-large has 3072 dimensions
@@ -90,9 +92,11 @@ class TestEmbeddingGeneration:
         mock_response.usage = MagicMock(prompt_tokens=2, total_tokens=2)
         mock_response.model = "openai/text-embedding-3-large"
 
-        with patch("gluellm.embeddings.any_llm_aembedding", new_callable=AsyncMock) as mock_embedding:
-            mock_embedding.return_value = mock_response
-
+        mock_provider = MagicMock()
+        mock_provider._aembedding = AsyncMock(return_value=mock_response)
+        with patch(
+            "gluellm.embeddings._provider_cache.get_provider", return_value=(mock_provider, "text-embedding-3-large")
+        ):
             client = GlueLLM(embedding_model="openai/text-embedding-3-large")
             result = await client.embed("Hello, world!")
 
@@ -139,7 +143,6 @@ class TestEmbeddingGeneration:
 
     async def test_embedding_with_correlation_id(self):
         """Test embedding with correlation ID."""
-        # Mock the any_llm_aembedding call
         mock_response = MagicMock()
         mock_response.data = [
             MagicMock(embedding=[0.1] * 1536, index=0),
@@ -147,9 +150,11 @@ class TestEmbeddingGeneration:
         mock_response.usage = MagicMock(prompt_tokens=2, total_tokens=2)
         mock_response.model = "openai/text-embedding-3-small"
 
-        with patch("gluellm.embeddings.any_llm_aembedding", new_callable=AsyncMock) as mock_embedding:
-            mock_embedding.return_value = mock_response
-
+        mock_provider = MagicMock()
+        mock_provider._aembedding = AsyncMock(return_value=mock_response)
+        with patch(
+            "gluellm.embeddings._provider_cache.get_provider", return_value=(mock_provider, "text-embedding-3-small")
+        ):
             result = await embed("Hello", correlation_id="test-correlation-123")
 
             assert isinstance(result, EmbeddingResult)
@@ -157,7 +162,6 @@ class TestEmbeddingGeneration:
 
     async def test_embedding_with_encoding_format(self):
         """Test embedding with encoding_format parameter."""
-        # Mock the any_llm_aembedding call
         mock_response = MagicMock()
         mock_response.data = [
             MagicMock(embedding=[0.1] * 1536, index=0),
@@ -165,14 +169,16 @@ class TestEmbeddingGeneration:
         mock_response.usage = MagicMock(prompt_tokens=2, total_tokens=2)
         mock_response.model = "openai/text-embedding-3-small"
 
-        with patch("gluellm.embeddings.any_llm_aembedding", new_callable=AsyncMock) as mock_embedding:
-            mock_embedding.return_value = mock_response
-
+        mock_provider = MagicMock()
+        mock_provider._aembedding = AsyncMock(return_value=mock_response)
+        with patch(
+            "gluellm.embeddings._provider_cache.get_provider", return_value=(mock_provider, "text-embedding-3-small")
+        ):
             result = await embed("Hello", encoding_format="float")
 
-            # Verify the mock was called with encoding_format parameter
-            mock_embedding.assert_called_once()
-            call_kwargs = mock_embedding.call_args[1]  # Get keyword arguments
+            # Verify _aembedding was called with encoding_format in kwargs
+            mock_provider._aembedding.assert_called_once()
+            call_kwargs = mock_provider._aembedding.call_args.kwargs
             assert call_kwargs.get("encoding_format") == "float"
 
             assert isinstance(result, EmbeddingResult)
@@ -180,7 +186,6 @@ class TestEmbeddingGeneration:
 
     async def test_embedding_with_kwargs_pass_through(self):
         """Test that additional kwargs are passed through to the provider."""
-        # Mock the any_llm_aembedding call
         mock_response = MagicMock()
         mock_response.data = [
             MagicMock(embedding=[0.1] * 1536, index=0),
@@ -188,14 +193,16 @@ class TestEmbeddingGeneration:
         mock_response.usage = MagicMock(prompt_tokens=2, total_tokens=2)
         mock_response.model = "openai/text-embedding-3-small"
 
-        with patch("gluellm.embeddings.any_llm_aembedding", new_callable=AsyncMock) as mock_embedding:
-            mock_embedding.return_value = mock_response
-
+        mock_provider = MagicMock()
+        mock_provider._aembedding = AsyncMock(return_value=mock_response)
+        with patch(
+            "gluellm.embeddings._provider_cache.get_provider", return_value=(mock_provider, "text-embedding-3-small")
+        ):
             result = await embed("Hello", user="test-user-123")
 
-            # Verify the mock was called with user parameter
-            mock_embedding.assert_called_once()
-            call_kwargs = mock_embedding.call_args[1]  # Get keyword arguments
+            # Verify _aembedding was called with user in kwargs
+            mock_provider._aembedding.assert_called_once()
+            call_kwargs = mock_provider._aembedding.call_args.kwargs
             assert call_kwargs.get("user") == "test-user-123"
 
             assert isinstance(result, EmbeddingResult)
@@ -203,7 +210,6 @@ class TestEmbeddingGeneration:
 
     async def test_embedding_with_multiple_options(self):
         """Test embedding with multiple options (encoding_format and kwargs)."""
-        # Mock the any_llm_aembedding call
         mock_response = MagicMock()
         mock_response.data = [
             MagicMock(embedding=[0.1] * 1536, index=0),
@@ -211,14 +217,16 @@ class TestEmbeddingGeneration:
         mock_response.usage = MagicMock(prompt_tokens=2, total_tokens=2)
         mock_response.model = "openai/text-embedding-3-small"
 
-        with patch("gluellm.embeddings.any_llm_aembedding", new_callable=AsyncMock) as mock_embedding:
-            mock_embedding.return_value = mock_response
-
+        mock_provider = MagicMock()
+        mock_provider._aembedding = AsyncMock(return_value=mock_response)
+        with patch(
+            "gluellm.embeddings._provider_cache.get_provider", return_value=(mock_provider, "text-embedding-3-small")
+        ):
             result = await embed("Hello", encoding_format="float", user="test-user")
 
-            # Verify the mock was called with all parameters
-            mock_embedding.assert_called_once()
-            call_kwargs = mock_embedding.call_args[1]  # Get keyword arguments
+            # Verify _aembedding was called with all kwargs
+            mock_provider._aembedding.assert_called_once()
+            call_kwargs = mock_provider._aembedding.call_args.kwargs
             assert call_kwargs.get("encoding_format") == "float"
             assert call_kwargs.get("user") == "test-user"
 

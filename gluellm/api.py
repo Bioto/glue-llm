@@ -1010,6 +1010,7 @@ async def _safe_llm_call(
     stream: bool = False,
     timeout: float | None = None,
     api_key: str | None = None,
+    max_tokens: int | None = None,
 ) -> ChatCompletion | AsyncIterator[ChatCompletion]:
     """Make an LLM call with error classification and tracing.
 
@@ -1025,6 +1026,7 @@ async def _safe_llm_call(
         stream: Whether to stream the response
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
         api_key: Optional API key override (for key pool usage)
+        max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
 
     Returns:
         ChatCompletion if stream=False, AsyncIterator[ChatCompletion] if stream=True
@@ -1120,6 +1122,7 @@ async def _safe_llm_call(
                         tools=tools if tools else None,
                         response_format=normalized_response_format if normalized_response_format else response_format,
                         stream=stream,
+                        max_tokens=max_tokens,
                     ),
                     timeout=timeout,
                 )
@@ -1241,6 +1244,7 @@ async def _llm_call_with_retry(
     response_format: type[BaseModel] | None = None,
     timeout: float | None = None,
     api_key: str | None = None,
+    max_tokens: int | None = None,
 ) -> ChatCompletion:
     """Make an LLM call with automatic retry on transient errors.
 
@@ -1261,6 +1265,7 @@ async def _llm_call_with_retry(
         response_format: Optional Pydantic model for structured output
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
         api_key: Optional API key override (for key pool usage)
+        max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
     """
     return await _safe_llm_call(
         messages=messages,
@@ -1269,6 +1274,7 @@ async def _llm_call_with_retry(
         response_format=response_format,
         timeout=timeout,
         api_key=api_key,
+        max_tokens=max_tokens,
     )
 
 
@@ -1363,6 +1369,7 @@ class GlueLLM:
         max_tool_iterations: int | None = None,
         eval_store: EvalStore | None = None,
         guardrails: GuardrailsConfig | None = None,
+        max_tokens: int | None = None,
     ):
         """Initialize GlueLLM client.
 
@@ -1374,6 +1381,7 @@ class GlueLLM:
             max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
             eval_store: Optional evaluation store for recording request/response data (defaults to global store if set)
             guardrails: Optional guardrails configuration for input/output validation
+            max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
         """
         self.model = model or settings.default_model
         self.embedding_model = embedding_model or settings.default_embedding_model
@@ -1383,6 +1391,7 @@ class GlueLLM:
         self._conversation = Conversation()
         self.eval_store = eval_store or get_global_eval_store()
         self.guardrails = guardrails
+        self.max_tokens = max_tokens
 
     async def complete(
         self,
@@ -1394,6 +1403,7 @@ class GlueLLM:
         api_key: str | None = None,
         guardrails: GuardrailsConfig | None = None,
         on_status: OnStatusCallback = None,
+        max_tokens: int | None = None,
     ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
 
@@ -1405,6 +1415,7 @@ class GlueLLM:
             api_key: Optional API key override (for key pool usage)
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             on_status: Optional callback for process status events (LLM call start/end, tool start/end, complete)
+            max_tokens: Maximum number of tokens to generate. Overrides instance-level max_tokens if provided.
 
         Returns:
             ToolExecutionResult with final response and execution history
@@ -1425,6 +1436,8 @@ class GlueLLM:
 
         # Resolve guardrails config: per-call overrides instance
         effective_guardrails = guardrails if guardrails is not None else self.guardrails
+        # Per-call max_tokens takes precedence over instance-level setting
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
 
         # Set correlation ID if provided
         if correlation_id:
@@ -1492,6 +1505,7 @@ class GlueLLM:
                             tools=self.tools if self.tools else None,
                             timeout=timeout,
                             api_key=api_key,
+                            max_tokens=effective_max_tokens,
                         )
                     except LLMError as e:
                         # Log the error and re-raise with context
@@ -1788,6 +1802,7 @@ class GlueLLM:
                                         tools=None,  # No tools on retry
                                         timeout=timeout,
                                         api_key=api_key,
+                                        max_tokens=effective_max_tokens,
                                     )
                                 except LLMError as llm_error:
                                     # LLM call failed during retry, raise blocked error
@@ -1938,6 +1953,7 @@ class GlueLLM:
         api_key: str | None = None,
         guardrails: GuardrailsConfig | None = None,
         on_status: OnStatusCallback = None,
+        max_tokens: int | None = None,
     ) -> ExecutionResult:
         """Complete a request and return structured output.
 
@@ -1956,6 +1972,7 @@ class GlueLLM:
             api_key: Optional API key override (for key pool usage)
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             on_status: Optional callback for process status events
+            max_tokens: Maximum number of tokens to generate. Overrides instance-level max_tokens if provided.
 
         Returns:
             ExecutionResult with structured_output field containing instance of response_format
@@ -1976,6 +1993,8 @@ class GlueLLM:
 
         # Resolve guardrails config: per-call overrides instance
         effective_guardrails = guardrails if guardrails is not None else self.guardrails
+        # Per-call max_tokens takes precedence over instance-level setting
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
 
         # Set correlation ID if provided
         if correlation_id:
@@ -2079,6 +2098,7 @@ class GlueLLM:
                                 # No response_format during tool phase
                                 timeout=timeout,
                                 api_key=api_key,
+                                max_tokens=effective_max_tokens,
                             )
                             await emit_status(
                                 ProcessEvent(
@@ -2330,6 +2350,7 @@ class GlueLLM:
                         # No tools during structured output phase
                         timeout=timeout,
                         api_key=api_key,
+                        max_tokens=effective_max_tokens,
                     )
                     await emit_status(
                         ProcessEvent(
@@ -2412,6 +2433,7 @@ class GlueLLM:
                                     response_format=response_format,  # Still request structured output
                                     timeout=timeout,
                                     api_key=api_key,
+                                    max_tokens=effective_max_tokens,
                                 )
                             except LLMError as llm_error:
                                 # LLM call failed during retry, raise blocked error
@@ -2550,6 +2572,7 @@ class GlueLLM:
         guardrails: GuardrailsConfig | None = None,
         response_format: type[BaseModel] | None = None,
         on_status: OnStatusCallback = None,
+        max_tokens: int | None = None,
     ) -> AsyncIterator[StreamingChunk]:
         """Stream completion with automatic tool execution.
 
@@ -2575,6 +2598,7 @@ class GlueLLM:
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             response_format: Optional Pydantic model; if set, the final chunk may include structured_output
             on_status: Optional callback for process status events
+            max_tokens: Maximum number of tokens to generate. Overrides instance-level max_tokens if provided.
 
         Yields:
             StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)
@@ -2589,6 +2613,8 @@ class GlueLLM:
         """
         # Resolve guardrails config: per-call overrides instance
         effective_guardrails = guardrails if guardrails is not None else self.guardrails
+        # Per-call max_tokens takes precedence over instance-level setting
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
 
         # Run input guardrails before processing
         if effective_guardrails:
@@ -2633,6 +2659,7 @@ class GlueLLM:
                         tools=None,
                         response_format=None,
                         stream=True,
+                        max_tokens=effective_max_tokens,
                     ):
                         if hasattr(chunk_response, "choices") and chunk_response.choices:
                             delta = chunk_response.choices[0].delta
@@ -2719,6 +2746,7 @@ class GlueLLM:
                     tools=self.tools if self.tools else None,
                     response_format=None,
                     stream=True,
+                    max_tokens=effective_max_tokens,
                 )
                 accumulated_content = ""
                 assistant_message = None
@@ -2990,6 +3018,7 @@ class GlueLLM:
                                 messages=messages,
                                 model=model or self.model,
                                 tools=None,  # No tools on retry
+                                max_tokens=effective_max_tokens,
                             )
                         except LLMError as llm_error:
                             # LLM call failed during retry, raise blocked error
@@ -3133,6 +3162,7 @@ async def complete(
     timeout: float | None = None,
     guardrails: GuardrailsConfig | None = None,
     on_status: OnStatusCallback = None,
+    max_tokens: int | None = None,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
 
@@ -3147,6 +3177,7 @@ async def complete(
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
         guardrails: Optional guardrails configuration
         on_status: Optional callback for process status events
+        max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
 
     Returns:
         ToolExecutionResult with final response and execution history
@@ -3157,6 +3188,7 @@ async def complete(
         tools=tools,
         max_tool_iterations=max_tool_iterations,
         guardrails=guardrails,
+        max_tokens=max_tokens,
     )
     return await client.complete(
         user_message,
@@ -3179,6 +3211,7 @@ async def structured_complete(
     timeout: float | None = None,
     guardrails: GuardrailsConfig | None = None,
     on_status: OnStatusCallback = None,
+    max_tokens: int | None = None,
 ) -> ExecutionResult:
     """Quick structured completion with optional tool support.
 
@@ -3198,6 +3231,7 @@ async def structured_complete(
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
         guardrails: Optional guardrails configuration
         on_status: Optional callback for process status events
+        max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
 
     Returns:
         ExecutionResult with structured_output field containing instance of response_format
@@ -3242,6 +3276,7 @@ async def structured_complete(
         tools=tools,
         max_tool_iterations=max_tool_iterations,
         guardrails=guardrails,
+        max_tokens=max_tokens,
     )
     return await client.structured_complete(
         user_message,
@@ -3310,6 +3345,7 @@ async def stream_complete(
     guardrails: GuardrailsConfig | None = None,
     response_format: type[BaseModel] | None = None,
     on_status: OnStatusCallback = None,
+    max_tokens: int | None = None,
 ) -> AsyncIterator[StreamingChunk]:
     """Stream completion with automatic tool execution.
 
@@ -3351,6 +3387,7 @@ async def stream_complete(
         tools=tools,
         max_tool_iterations=max_tool_iterations,
         guardrails=guardrails,
+        max_tokens=max_tokens,
     )
     async for chunk in client.stream_complete(
         user_message,
