@@ -1154,7 +1154,7 @@ async def _safe_llm_call(
                     logger.info(
                         f"LLM call completed: model={model}, latency={elapsed_time:.3f}s, "
                         f"tokens={tokens_used['total']} (prompt={tokens_used['prompt']}, "
-                        f"completion={tokens_used['completion']}){cost_str}"
+                        f"completion={tokens_used['completion']}){cost_str}, correlation_id={correlation_id}"
                     )
 
             # Record response metadata
@@ -1171,7 +1171,10 @@ async def _safe_llm_call(
                 )
                 logger.debug(f"Response metadata: finish_reason={finish_reason}, has_tool_calls={has_tool_calls}")
             elif stream:
-                logger.debug(f"LLM call streaming started: model={model}, latency={elapsed_time:.3f}s")
+                logger.debug(
+                    f"LLM call streaming started: model={model}, latency={elapsed_time:.3f}s, "
+                    f"correlation_id={correlation_id}"
+                )
 
             # Log metrics to MLflow
             log_llm_metrics(
