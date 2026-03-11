@@ -48,6 +48,8 @@ GlueLLM is a high-level SDK that makes working with LLMs actually pleasant:
 - **Embeddings**: same ergonomics + error handling
 - **Batch processing**: concurrency control, retry strategies, key pools
 - **Observability hooks**: logging + optional tracing
+- **Context condensing** *(opt-in)*: compress completed tool rounds to reduce prompt tokens across long tool chains
+- **Dynamic tool routing** *(opt-in)*: route to relevant tools on demand instead of sending all schemas every call
 
 ## Why you might not
 
@@ -162,6 +164,63 @@ async for chunk in stream_complete(
         print(chunk.structured_output.word)  # hello
 ```
 
+### Context condensing (opt-in)
+
+When a tool round completes, `condense_tool_messages=True` replaces the raw `assistant(tool_calls) + tool(results)` messages with a single compact summary. This keeps the prompt from growing linearly with every tool call — useful for long multi-step chains.
+
+**Off by default.** Enable per-call or on the client:
+
+```python
+# Per-call
+result = await complete(
+    "Do ten things with tools...",
+    tools=[...],
+    condense_tool_messages=True,  # opt-in
+)
+
+# On the client (applies to all calls)
+client = GlueLLM(tools=[...], condense_tool_messages=True)
+result = await client.complete("Do ten things with tools...")
+```
+
+Without condensing, context grows by 2 messages per tool round (assistant + tool). With condensing, each completed round collapses to 1 message regardless of how many tools ran in parallel.
+
+### Dynamic tool routing (opt-in)
+
+In standard mode every LLM call sees the full list of tool schemas in the system prompt. With a large toolset this wastes tokens and increases latency. `tool_mode="dynamic"` replaces the upfront schema dump with a lightweight router call: the LLM is first asked *which* tools it needs, then only those schemas are injected for the actual tool execution.
+
+**Off by default (`tool_mode="standard"`).** Enable per-call or on the client:
+
+```python
+# Per-call
+result = await complete(
+    "Check the weather and search flights...",
+    tools=[get_weather, search_flights, book_hotel, calculate, ...],
+    tool_mode="dynamic",  # opt-in
+)
+
+# On the client
+client = GlueLLM(
+    tools=[...],
+    tool_mode="dynamic",
+    tool_route_model="openai:gpt-4o-mini",  # fast cheap model for routing
+)
+result = await client.complete("Check the weather and search flights...")
+```
+
+Dynamic routing is most effective when you have 6+ tools and the task only uses a few of them per call. For small toolsets or when every call uses most tools, standard mode is simpler and equally efficient.
+
+Both `condense_tool_messages` and `tool_mode` can be combined:
+
+```python
+result = await complete(
+    "Plan a trip with 9 sequential steps...",
+    tools=[...],
+    condense_tool_messages=True,
+    tool_mode="dynamic",
+)
+```
+
 ### Process status events
 
 Use the optional `on_status` callback to observe what’s happening (LLM call start/end, tool execution, stream start/chunk/end, completion). Handy for progress UIs or logging.
@@ -217,6 +276,7 @@ GlueLLM keeps deeper docs in `docs/` so the README stays readable:
 - [`docs/BATCH_PROCESSING.md`](docs/BATCH_PROCESSING.md)
 - [`docs/CONNECTION_POOLING.md`](docs/CONNECTION_POOLING.md)
 - [`docs/WORKFLOW_PATTERNS.md`](docs/WORKFLOW_PATTERNS.md)
+- [`docs/CONTEXT_OPTIMIZATION.md`](docs/CONTEXT_OPTIMIZATION.md) — condensing + dynamic routing deep-dive
 
 More runnable examples live in [`examples/`](examples/).
 

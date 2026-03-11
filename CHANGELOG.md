@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `log_console_output` configuration setting and `GLUELLM_LOG_CONSOLE_OUTPUT` environment variable
 - **New `GLUELLM_DISABLE_LOGGING` environment variable** to completely disable GlueLLM's logging setup for full application control
 - **Tool support for structured completions**: `structured_complete()` and `GlueLLM.structured_complete()` now accept `tools`, `execute_tools`, and `max_tool_iterations` parameters, allowing the LLM to call tools to gather information before returning structured output
+- **Context condensing** (`condense_tool_messages=False` by default, opt-in): each completed tool-call round is replaced with a single condensed `user` message summarising the calls and results before the next LLM call. Prevents linear context growth in long multi-step tool chains. Available on `GlueLLM.__init__`, `complete()`, `structured_complete()`, and `stream_complete()`.
+- **Dynamic tool routing** (`tool_mode="standard"` by default, opt-in): set `tool_mode="dynamic"` to use a lightweight router call to discover which tools are needed before injecting only those schemas. Reduces per-call prompt tokens for large toolsets. Configurable with `tool_route_model` to use a fast/cheap model for the routing step. Fires a `tool_route` process event with matched tool names.
+- **`max_tokens` parameter**: new optional `max_tokens: int | None` on `GlueLLM.__init__`, `complete()`, `structured_complete()`, and `stream_complete()`. Passed through to the underlying provider. `None` (default) uses the provider default. Not all models support this parameter — unsupported models are handled gracefully by the `any-llm` layer.
 
 ### Changed
 - **BREAKING**: Console logging is now disabled by default in `setup_logging()` to avoid conflicts when GlueLLM is used as a library. Set `console_output=True` or `GLUELLM_LOG_CONSOLE_OUTPUT=true` to enable console output.
