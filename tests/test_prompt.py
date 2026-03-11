@@ -56,7 +56,7 @@ class TestSystemPromptFormatting:
         assert "<system_instructions>" in formatted
 
     def test_formatting_with_tools(self):
-        """Test prompt formatting with tools."""
+        """Test prompt formatting with tools — tools are no longer rendered in the system prompt."""
 
         def get_weather(location: str) -> str:
             """Get weather for a location."""
@@ -65,8 +65,7 @@ class TestSystemPromptFormatting:
         prompt = SystemPrompt(content="You are a weather assistant.")
         formatted = prompt.to_formatted_string(tools=[get_weather])
         assert "You are a weather assistant." in formatted
-        assert "get_weather" in formatted
-        assert "Get weather for a location" in formatted
+        assert "get_weather" not in formatted
 
     def test_formatting_with_empty_tools_list(self):
         """Test formatting with empty tools list."""
@@ -76,7 +75,7 @@ class TestSystemPromptFormatting:
         assert "<tools>" not in formatted
 
     def test_formatting_with_multiple_tools(self):
-        """Test formatting with multiple tools."""
+        """Test formatting with multiple tools — tools are sent via API parameter, not system prompt."""
 
         def tool1(x: str) -> str:
             """Tool 1."""
@@ -88,10 +87,9 @@ class TestSystemPromptFormatting:
 
         prompt = SystemPrompt(content="Test")
         formatted = prompt.to_formatted_string(tools=[tool1, tool2])
-        assert "tool1" in formatted
-        assert "tool2" in formatted
-        assert "Tool 1" in formatted
-        assert "Tool 2" in formatted
+        assert "tool1" not in formatted
+        assert "tool2" not in formatted
+        assert "<tools>" not in formatted
 
 
 class TestXMLInjectionPrevention:
@@ -114,7 +112,7 @@ class TestXMLInjectionPrevention:
         assert "Follow these" in formatted
 
     def test_xml_special_characters_in_tool_docstring(self):
-        """Test XML special characters in tool docstrings."""
+        """Test XML special characters in tool docstrings — tools no longer in system prompt."""
 
         def tool_with_xml(x: str) -> str:
             """Tool with <special> & characters."""
@@ -122,8 +120,7 @@ class TestXMLInjectionPrevention:
 
         prompt = SystemPrompt(content="Test")
         formatted = prompt.to_formatted_string(tools=[tool_with_xml])
-        # Should handle special characters in docstring
-        assert "tool_with_xml" in formatted
+        assert "tool_with_xml" not in formatted
 
     def test_ampersand_in_content(self):
         """Test ampersand handling in content."""
@@ -134,72 +131,33 @@ class TestXMLInjectionPrevention:
 
 
 class TestToolDocstringHandling:
-    """Test handling of various tool docstring scenarios."""
+    """Test that tools are no longer rendered in the system prompt.
 
-    def test_tool_with_none_docstring(self):
-        """Test tool with None docstring."""
+    Tool schemas are now sent exclusively via the API tools parameter.
+    """
+
+    def test_tools_not_rendered_in_prompt(self):
+        """Tools should not appear in the system prompt regardless of docstring content."""
+
+        def tool_normal(x: str) -> str:
+            """Normal docstring."""
+            return x
 
         def tool_no_doc(x: str) -> str:
             return x
-
-        # Remove docstring
         tool_no_doc.__doc__ = None
-
-        prompt = SystemPrompt(content="Test")
-        formatted = prompt.to_formatted_string(tools=[tool_no_doc])
-        assert "tool_no_doc" in formatted
-        # None docstring should be handled gracefully
-        assert "None" not in formatted or formatted.count("None") == 0
-
-    def test_tool_with_empty_docstring(self):
-        """Test tool with empty docstring."""
-
-        def tool_empty_doc(x: str) -> str:
-            """"""
-            return x
-
-        prompt = SystemPrompt(content="Test")
-        formatted = prompt.to_formatted_string(tools=[tool_empty_doc])
-        assert "tool_empty_doc" in formatted
-
-    def test_tool_with_xml_tags_in_docstring(self):
-        """Test tool docstring containing XML tags."""
-
-        def tool_xml_doc(x: str) -> str:
-            """Tool that uses <tag>format</tag>."""
-            return x
-
-        prompt = SystemPrompt(content="Test")
-        formatted = prompt.to_formatted_string(tools=[tool_xml_doc])
-        assert "tool_xml_doc" in formatted
-        # XML in docstring should be handled/escaped
-
-    def test_tool_with_very_long_docstring(self):
-        """Test tool with very long docstring."""
-
-        def tool_long_doc(x: str) -> str:
-            """Tool with a very long docstring. """ + "x" * 1000
-            return x
-
-        prompt = SystemPrompt(content="Test")
-        formatted = prompt.to_formatted_string(tools=[tool_long_doc])
-        assert "tool_long_doc" in formatted
-        # Should handle long docstrings without error
-
-    def test_tool_with_multiline_docstring(self):
-        """Test tool with multiline docstring."""
 
         def tool_multiline(x: str) -> str:
             """Tool with
             multiple
-            lines
-            in docstring."""
+            lines."""
             return x
 
         prompt = SystemPrompt(content="Test")
-        formatted = prompt.to_formatted_string(tools=[tool_multiline])
-        assert "tool_multiline" in formatted
-        assert "multiple" in formatted or "lines" in formatted
+        for tool in [tool_normal, tool_no_doc, tool_multiline]:
+            formatted = prompt.to_formatted_string(tools=[tool])
+            assert "<tools>" not in formatted
+            assert "<tool>" not in formatted
 
 
 class TestTemplateEdgeCases:
@@ -222,17 +180,18 @@ class TestTemplateEdgeCases:
         assert "<tools>" not in formatted
 
     def test_template_with_lambda_function(self):
-        """Test template with lambda function as tool."""
+        """Test template with lambda function — tools no longer in prompt."""
         lambda_tool = lambda x: x  # noqa: E731
         lambda_tool.__name__ = "lambda_tool"
         lambda_tool.__doc__ = "Lambda tool"
 
         prompt = SystemPrompt(content="Test")
         formatted = prompt.to_formatted_string(tools=[lambda_tool])
-        assert "lambda_tool" in formatted
+        assert "lambda_tool" not in formatted
+        assert "<system_prompt>" in formatted
 
     def test_template_with_partial_function(self):
-        """Test template with partial function as tool."""
+        """Test template with partial function — tools no longer in prompt."""
 
         def base_tool(x: str, y: int = 5) -> str:
             """Base tool."""
@@ -244,7 +203,8 @@ class TestTemplateEdgeCases:
 
         prompt = SystemPrompt(content="Test")
         formatted = prompt.to_formatted_string(tools=[partial_tool])
-        assert "partial_tool" in formatted
+        assert "partial_tool" not in formatted
+        assert "<system_prompt>" in formatted
 
 
 class TestSystemPromptEdgeCases:

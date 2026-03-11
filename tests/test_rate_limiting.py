@@ -16,6 +16,8 @@ from gluellm.rate_limiting.api_key_pool import (
 )
 from gluellm.rate_limiting.rate_limiter import acquire_rate_limit, clear_rate_limiter_cache, get_rate_limiter
 
+pytestmark = pytest.mark.rate_limit
+
 
 class TestExtractProviderFromModel:
     """Tests for provider extraction from model strings."""
