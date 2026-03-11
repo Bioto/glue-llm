@@ -81,7 +81,7 @@ class TestIsRouterCall:
         tc1 = SimpleNamespace(
             id="call_1",
             type="function",
-            function=SimpleNamespace(name="dummy_tool", arguments='{}'),
+            function=SimpleNamespace(name="dummy_tool", arguments="{}"),
         )
         tc2 = SimpleNamespace(
             id="call_2",

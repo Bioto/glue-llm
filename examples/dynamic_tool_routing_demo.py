@@ -21,11 +21,10 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-from gluellm.api import GlueLLM, complete
+from gluellm.api import GlueLLM
 from gluellm.events import ProcessEvent
 from gluellm.models.prompt import BASE_SYSTEM_PROMPT
 from gluellm.tool_router import build_router_tool
-
 
 # -----------------------------------------------------------------------------
 # Demo tools (enough to show context bloat)
@@ -333,7 +332,7 @@ def print_live_results(
 
         print(f"  {label}:")
         if stats.tool_route_query:
-            print(f"    Router query:  \"{stats.tool_route_query}\"")
+            print(f'    Router query:  "{stats.tool_route_query}"')
             print(f"    Matched tools: {stats.matched_tools}")
         print(f"    Tool calls:    {result.tool_calls_made}")
         if stats.round_message_counts:
@@ -408,7 +407,7 @@ async def main() -> None:
 
     if args.live:
         # Scenario 1: short/batchable (3 tools, can be called in one round)
-        EXPECTED_SCENARIO1 = ["get_weather", "get_forecast", "calculate"]
+        expected_scenario1 = ["get_weather", "get_forecast", "calculate"]
         print("Running Scenario 1: SHORT CHAIN (batchable tools)...\n")
         results1 = {
             "std_raw":  await run_live_demo(system_prompt, user_message, "standard", condense_tool_messages=False),
@@ -416,10 +415,10 @@ async def main() -> None:
             "dyn_raw":  await run_live_demo(system_prompt, user_message, "dynamic", condense_tool_messages=False),
             "dyn_cond": await run_live_demo(system_prompt, user_message, "dynamic", condense_tool_messages=True),
         }
-        print_live_results(results1, user_message, expected_tools=EXPECTED_SCENARIO1)
+        print_live_results(results1, user_message, expected_tools=expected_scenario1)
 
         # Scenario 2: long sequential chain (each step depends on prior results)
-        EXPECTED_SCENARIO2 = [
+        expected_scenario2 = [
             "get_weather",
             "get_forecast",
             "search_flights",
@@ -447,7 +446,7 @@ async def main() -> None:
             "dyn_raw":  await run_live_demo(system_prompt, long_message, "dynamic", condense_tool_messages=False),
             "dyn_cond": await run_live_demo(system_prompt, long_message, "dynamic", condense_tool_messages=True),
         }
-        print_live_results(results2, long_message, expected_tools=EXPECTED_SCENARIO2)
+        print_live_results(results2, long_message, expected_tools=expected_scenario2)
 
 
 if __name__ == "__main__":
