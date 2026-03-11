@@ -1205,6 +1205,12 @@ async def _safe_llm_call(
                     message=".*PydanticSerializationUnexpectedValue.*",
                     category=UserWarning,
                 )
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"(?s).*Pydantic serializer warnings:.*PydanticSerializationUnexpectedValue.*field_name='parsed'.*",
+                    category=UserWarning,
+                    module=r"pydantic\.main",
+                )
                 response = await asyncio.wait_for(
                     provider.acompletion(
                         model=model_id,
