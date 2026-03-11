@@ -294,6 +294,7 @@ GlueLLM keeps deeper docs in `docs/` so the README stays readable:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - [`docs/BATCH_PROCESSING.md`](docs/BATCH_PROCESSING.md)
 - [`docs/RETRY.md`](docs/RETRY.md) — retry configuration, `RetryConfig`, callbacks
+- [`docs/ERROR_HANDLING.md`](docs/ERROR_HANDLING.md) — exception hierarchy, classification, handling patterns
 - [`docs/CONNECTION_POOLING.md`](docs/CONNECTION_POOLING.md)
 - [`docs/WORKFLOW_PATTERNS.md`](docs/WORKFLOW_PATTERNS.md)
 - [`docs/CONTEXT_OPTIMIZATION.md`](docs/CONTEXT_OPTIMIZATION.md) — condensing + dynamic routing deep-dive

@@ -64,14 +64,18 @@ Exceptions:
     - LLMError: Base exception
     - TokenLimitError: Token limit exceeded
     - RateLimitError: Rate limit hit
-    - APIConnectionError: Connection/network error
+    - APIConnectionError: Connection/network error (subclass: APITimeoutError)
+    - APITimeoutError: API request timed out
     - InvalidRequestError: Invalid request parameters
     - AuthenticationError: Authentication failed
+    - GuardrailBlockedError: Guardrail blocked content (no retry)
+    - GuardrailRejectedError: Output guardrail rejected content (triggers retry)
 """
 
 from gluellm._version import get_version
 from gluellm.api import (
     APIConnectionError,
+    APITimeoutError,
     AuthenticationError,
     ExecutionResult,
     GlueLLM,
@@ -212,6 +216,7 @@ __all__ = [
     "TokenLimitError",
     "RateLimitError",
     "APIConnectionError",
+    "APITimeoutError",
     "InvalidRequestError",
     "AuthenticationError",
     "RetryConfig",

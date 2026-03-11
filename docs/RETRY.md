@@ -286,6 +286,8 @@ LLMError (base)
 └── AuthenticationError # Not retried by default
 ```
 
+For full exception documentation (classification, handling patterns, subtype checking, guardrail errors), see [ERROR_HANDLING.md](ERROR_HANDLING.md).
+
 ---
 
 ## Relation to Batch Retry
