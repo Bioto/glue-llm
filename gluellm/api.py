@@ -1432,7 +1432,7 @@ class GlueLLM:
         eval_store: EvalStore | None = None,
         guardrails: GuardrailsConfig | None = None,
         max_tokens: int | None = None,
-        condense_tool_messages: bool = True,
+        condense_tool_messages: bool = False,
     ):
         """Initialize GlueLLM client.
 
@@ -1447,7 +1447,7 @@ class GlueLLM:
             max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
             condense_tool_messages: If True, each completed tool-call round is condensed into a
                 single assistant message summarising the calls and results, reducing context size
-                across multi-iteration tool loops. Defaults to True.
+                across multi-iteration tool loops. Defaults to False.
         """
         self.model = model or settings.default_model
         self.embedding_model = embedding_model or settings.default_embedding_model
@@ -3254,7 +3254,7 @@ async def complete(
     guardrails: GuardrailsConfig | None = None,
     on_status: OnStatusCallback = None,
     max_tokens: int | None = None,
-    condense_tool_messages: bool = True,
+    condense_tool_messages: bool = False,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
 
@@ -3271,7 +3271,7 @@ async def complete(
         on_status: Optional callback for process status events
         max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
         condense_tool_messages: If True, each completed tool-call round is condensed into a single
-            assistant message, reducing context size across multi-iteration tool loops.
+            assistant message, reducing context size across multi-iteration tool loops. Defaults to False.
 
     Returns:
         ToolExecutionResult with final response and execution history
@@ -3307,7 +3307,7 @@ async def structured_complete(
     guardrails: GuardrailsConfig | None = None,
     on_status: OnStatusCallback = None,
     max_tokens: int | None = None,
-    condense_tool_messages: bool = True,
+    condense_tool_messages: bool = False,
 ) -> ExecutionResult:
     """Quick structured completion with optional tool support.
 
@@ -3329,7 +3329,7 @@ async def structured_complete(
         on_status: Optional callback for process status events
         max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
         condense_tool_messages: If True, each completed tool-call round is condensed into a single
-            assistant message, reducing context size across multi-iteration tool loops.
+            assistant message, reducing context size across multi-iteration tool loops. Defaults to False.
 
     Returns:
         ExecutionResult with structured_output field containing instance of response_format
@@ -3445,7 +3445,7 @@ async def stream_complete(
     response_format: type[BaseModel] | None = None,
     on_status: OnStatusCallback = None,
     max_tokens: int | None = None,
-    condense_tool_messages: bool = True,
+    condense_tool_messages: bool = False,
 ) -> AsyncIterator[StreamingChunk]:
     """Stream completion with automatic tool execution.
 
@@ -3472,7 +3472,7 @@ async def stream_complete(
         response_format: Optional Pydantic model; final chunk may include structured_output
         on_status: Optional callback for process status events
         condense_tool_messages: If True, each completed tool-call round is condensed into a single
-            assistant message, reducing context size across multi-iteration tool loops.
+            assistant message, reducing context size across multi-iteration tool loops. Defaults to False.
 
     Yields:
         StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)

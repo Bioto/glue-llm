@@ -1470,15 +1470,15 @@ class TestCondenseToolRound:
         assert messages[4]["role"] == "assistant"
         assert "lookup()" in messages[4]["content"]
 
-    def test_condense_tool_messages_enabled_by_default(self):
-        """condense_tool_messages defaults to True on GlueLLM and module-level helpers."""
+    def test_condense_tool_messages_disabled_by_default(self):
+        """condense_tool_messages defaults to False on GlueLLM and module-level helpers."""
         client = GlueLLM()
-        assert client.condense_tool_messages is True
-
-    def test_condense_tool_messages_can_be_disabled_on_client(self):
-        """condense_tool_messages=False can be set on the GlueLLM instance."""
-        client = GlueLLM(condense_tool_messages=False)
         assert client.condense_tool_messages is False
+
+    def test_condense_tool_messages_can_be_enabled_on_client(self):
+        """condense_tool_messages=True can be set on the GlueLLM instance."""
+        client = GlueLLM(condense_tool_messages=True)
+        assert client.condense_tool_messages is True
 
 
 def _make_tool_response(content: str, finish_reason: str = "stop") -> SimpleNamespace:
