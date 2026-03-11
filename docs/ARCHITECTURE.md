@@ -452,7 +452,7 @@ flowchart TD
 
 - **Rate Limiting:** Token bucket algorithm with configurable burst
 - **Connection Pooling:** Handled by any-llm SDK
-- **Retry Logic:** Exponential backoff with jitter
+- **Retry Logic:** Exponential backoff with jitter. For per-call and per-client customisation (`RetryConfig`, `retry_on`, callback), see [`docs/RETRY.md`](RETRY.md).
 - **Parallel Execution:** Workflows use `asyncio.gather()` for parallel agent execution
 - **Token Tracking:** Minimal overhead, optional MLflow integration
 - **Context Condensing** *(opt-in)*: each completed tool round collapsed to 1 message, preventing linear context growth in long chains. Enable with `condense_tool_messages=True`.

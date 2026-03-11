@@ -1,6 +1,9 @@
 """Pytest configuration for GlueLLM tests."""
 
+import inspect
+
 import pytest
+import pytest_asyncio
 
 
 @pytest.fixture(autouse=True)
@@ -35,3 +38,59 @@ def clear_global_eval_store():
     yield
     # Clear after test
     set_global_eval_store(None)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def close_cached_provider_clients():
+    """Close GlueLLM cached provider clients after each test."""
+    yield
+
+    from gluellm.api import close_providers
+
+    await close_providers()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def close_any_llm_created_clients(monkeypatch):
+    """Track and close any AnyLLM providers created during a test.
+
+    Some tests call `any_llm.completion()` directly, which instantiates provider
+    clients outside GlueLLM's cache. If those AsyncOpenAI clients are not
+    explicitly closed, pytest may emit `ResourceWarning: unclosed transport`.
+    """
+    from any_llm.any_llm import AnyLLM
+
+    created_providers = []
+    original_create = AnyLLM.create.__func__
+
+    def create_with_tracking(cls, *args, **kwargs):
+        provider = original_create(cls, *args, **kwargs)
+        created_providers.append(provider)
+        return provider
+
+    monkeypatch.setattr(AnyLLM, "create", classmethod(create_with_tracking))
+    yield
+
+    seen_provider_ids = set()
+    for provider in created_providers:
+        provider_id = id(provider)
+        if provider_id in seen_provider_ids:
+            continue
+        seen_provider_ids.add(provider_id)
+
+        client = getattr(provider, "client", None)
+        if client is None:
+            continue
+
+        aclose = getattr(client, "aclose", None)
+        if callable(aclose):
+            result = aclose()
+            if inspect.isawaitable(result):
+                await result
+            continue
+
+        close = getattr(client, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result

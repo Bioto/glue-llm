@@ -217,6 +217,48 @@ result = await complete(
 
 `on_status` is supported on `complete()`, `stream_complete()`, and `structured_complete()` (and the `GlueLLM` client methods).
 
+### Retry configuration
+
+Retries are enabled by default (exponential backoff for rate limits and connection errors). You can customise or disable them per client or per call with `retry_config` and `retry_enabled`:
+
+```python
+from gluellm import complete, GlueLLM, RetryConfig
+
+# Disable retries for a single call
+result = await complete("What is 2+2?", retry_enabled=False)
+
+# Or pass a RetryConfig
+result = await complete(
+    "What is 2+2?",
+    retry_config=RetryConfig(retry_enabled=False),
+)
+
+# Per-client: disable retries for all calls
+client = GlueLLM(retry_config=RetryConfig(retry_enabled=False))
+
+# Filter by exception type (only retry RateLimitError)
+from gluellm import RateLimitError
+result = await complete(
+    "...",
+    retry_config=RetryConfig(retry_on=[RateLimitError]),
+)
+
+# Custom callback: decide per error and inject params for next attempt
+def on_retry(err: Exception, attempt: int) -> tuple[bool, dict | None]:
+    if attempt >= 2:
+        return False, None  # stop retrying
+    return True, {"temperature": 0.0}  # lower temp on retry
+
+result = await complete(
+    "...",
+    retry_config=RetryConfig(callback=on_retry),
+)
+```
+
+When `callback` is set, it takes precedence over `retry_on`; the callback receives `(error, attempt)` and returns `(should_retry, next_params | None)`.
+
+For full details (precedence rules, backoff formula, exception hierarchy), see [`docs/RETRY.md`](docs/RETRY.md).
+
 ### Embeddings
 
 ```python
@@ -251,6 +293,7 @@ GlueLLM keeps deeper docs in `docs/` so the README stays readable:
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - [`docs/BATCH_PROCESSING.md`](docs/BATCH_PROCESSING.md)
+- [`docs/RETRY.md`](docs/RETRY.md) — retry configuration, `RetryConfig`, callbacks
 - [`docs/CONNECTION_POOLING.md`](docs/CONNECTION_POOLING.md)
 - [`docs/WORKFLOW_PATTERNS.md`](docs/WORKFLOW_PATTERNS.md)
 - [`docs/CONTEXT_OPTIMIZATION.md`](docs/CONTEXT_OPTIMIZATION.md) — condensing + dynamic routing deep-dive
