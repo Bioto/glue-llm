@@ -77,6 +77,10 @@ classDiagram
         -system_prompt: str
         -tools: list[Callable]
         -max_tool_iterations: int
+        -condense_tool_messages: bool
+        -tool_mode: str
+        -tool_route_model: str
+        -max_tokens: int
         -_conversation: Conversation
         +complete() ToolExecutionResult
         +structured_complete~T~() T
@@ -97,14 +101,23 @@ classDiagram
 
 ```mermaid
 flowchart TD
-    Start([Start]) --> BuildMessages[Build Messages<br/>System + History]
+    Start([Start]) --> ToolMode{tool_mode?}
+    ToolMode -->|standard| BuildMessages[Build Messages<br/>System + All Tool Schemas]
+    ToolMode -->|dynamic| RouterCall[Router Call<br/>which tools needed?]
+    RouterCall --> MatchedSchemas[Inject matched<br/>tool schemas only]
+    MatchedSchemas --> BuildMessages
     BuildMessages --> CallLLM[Call LLM with<br/>Retry Logic]
     CallLLM --> ToolCalls{Tool Calls?}
     ToolCalls -->|Yes| ExecuteTools[Execute Tools]
     ToolCalls -->|No| Return([Return Result])
-    ExecuteTools --> AppendResults[Append Tool Results]
-    AppendResults --> CallLLM
+    ExecuteTools --> Condense{condense_tool_messages?}
+    Condense -->|False| AppendRaw[Append raw assistant<br/>+ tool messages]
+    Condense -->|True| AppendCondensed[Replace with single<br/>condensed user message]
+    AppendRaw --> CallLLM
+    AppendCondensed --> CallLLM
 ```
+
+Both optimizations are **opt-in and off by default**. See [`docs/CONTEXT_OPTIMIZATION.md`](CONTEXT_OPTIMIZATION.md) for full details.
 
 ### 3. Workflow System
 
@@ -442,6 +455,10 @@ flowchart TD
 - **Retry Logic:** Exponential backoff with jitter
 - **Parallel Execution:** Workflows use `asyncio.gather()` for parallel agent execution
 - **Token Tracking:** Minimal overhead, optional MLflow integration
+- **Context Condensing** *(opt-in)*: each completed tool round collapsed to 1 message, preventing linear context growth in long chains. Enable with `condense_tool_messages=True`.
+- **Dynamic Tool Routing** *(opt-in)*: only inject schemas for tools the model actually needs, reducing per-call prompt tokens for large toolsets. Enable with `tool_mode="dynamic"`.
+
+See [`docs/CONTEXT_OPTIMIZATION.md`](CONTEXT_OPTIMIZATION.md) for benchmarks and usage guidance.
 
 ## Security Considerations
 

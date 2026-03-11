@@ -79,6 +79,12 @@ from tenacity import (
 )
 
 from gluellm.config import settings
+from gluellm.tool_router import (
+    ToolMode,
+    build_router_tool,
+    is_router_call,
+    resolve_tool_route,
+)
 from gluellm.costing.pricing_data import calculate_cost
 from gluellm.eval import get_global_eval_store
 from gluellm.eval.store import EvalStore
@@ -752,6 +758,66 @@ def _serialize_chat_completion_to_dict(completion: Any) -> dict[str, Any]:
         if usage
         else None,
     }
+def _condense_tool_round(messages: list[dict[str, Any]]) -> None:
+    """Replace the last tool-call round in messages with a single condensed summary.
+
+    Finds the trailing sequence of ``role: "tool"`` messages preceded by a
+    ``role: "assistant"`` message that contains ``tool_calls``. If the assistant
+    message had no text content (a pure tool-call round), those N+1 messages are
+    replaced with one ``role: "user"`` message whose content summarises each
+    call and its result. User role keeps the conversation in a state the LLM
+    naturally continues from.
+
+    Rounds where the assistant produced visible text content alongside tool calls
+    are left untouched, because that text carries meaning the model needs to see.
+    """
+    # Collect trailing tool-response messages
+    tool_response_indices: list[int] = []
+    idx = len(messages) - 1
+    while idx >= 0 and messages[idx].get("role") == "tool":
+        tool_response_indices.append(idx)
+        idx -= 1
+    tool_response_indices.reverse()
+
+    if not tool_response_indices:
+        return
+
+    assistant_idx = idx
+    if assistant_idx < 0:
+        return
+
+    assistant_msg = messages[assistant_idx]
+    if assistant_msg.get("role") != "assistant":
+        return
+
+    tool_calls = assistant_msg.get("tool_calls") or []
+    if not tool_calls:
+        return
+
+    # Only condense pure tool-call rounds (no visible assistant text)
+    if assistant_msg.get("content"):
+        return
+
+    # Build a lookup from tool_call_id -> tool name for readable output
+    id_to_name: dict[str, str] = {}
+    for tc in tool_calls:
+        tc_id = tc.get("id", "")
+        fn = tc.get("function") or {}
+        name = fn.get("name", "unknown") if isinstance(fn, dict) else getattr(fn, "name", "unknown")
+        id_to_name[tc_id] = name
+
+    lines = ["[Tool Results]"]
+    for tool_msg in (messages[i] for i in tool_response_indices):
+        tc_id = tool_msg.get("tool_call_id", "")
+        name = id_to_name.get(tc_id, tc_id)
+        result = tool_msg.get("content", "")
+        lines.append(f"- {name}() -> {result}")
+
+    condensed_content = "\n".join(lines)
+
+    # Replace the N+1 messages with a single condensed user message (ends on user so LLM continues)
+    del messages[assistant_idx:]
+    messages.append({"role": "user", "content": condensed_content})
 
 
 async def _consume_stream_with_tools(
@@ -1002,6 +1068,27 @@ def should_retry_error(error: Exception) -> bool:
 # ============================================================================
 
 
+def _trim_tool_docstrings(tools: list[Callable]) -> list[Callable]:
+    """Return copies of tools with __doc__ trimmed to the first non-empty line.
+
+    This reduces token overhead since any_llm sends the full docstring as the
+    function description in the OpenAI tools schema.
+    """
+    import functools
+
+    trimmed: list[Callable] = []
+    for tool in tools:
+        doc = (tool.__doc__ or "").strip()
+        first_line = next((line.strip() for line in doc.split("\n") if line.strip()), "")
+        if first_line == doc:
+            trimmed.append(tool)
+            continue
+        wrapper = functools.wraps(tool)(lambda *a, _t=tool, **kw: _t(*a, **kw))
+        wrapper.__doc__ = first_line
+        trimmed.append(wrapper)
+    return trimmed
+
+
 async def _safe_llm_call(
     messages: list[dict],
     model: str,
@@ -1075,6 +1162,9 @@ async def _safe_llm_call(
                 exc_info=True,
             )
             normalized_response_format = None
+
+    if tools:
+        tools = _trim_tool_docstrings(tools)
 
     start_time = time.time()
     logger.debug(
@@ -1372,6 +1462,9 @@ class GlueLLM:
         max_tool_iterations: int | None = None,
         eval_store: EvalStore | None = None,
         guardrails: GuardrailsConfig | None = None,
+        condense_tool_messages: bool = False,
+        tool_mode: ToolMode = "standard",
+        tool_route_model: str | None = None,
         max_tokens: int | None = None,
     ):
         """Initialize GlueLLM client.
@@ -1385,6 +1478,12 @@ class GlueLLM:
             eval_store: Optional evaluation store for recording request/response data (defaults to global store if set)
             guardrails: Optional guardrails configuration for input/output validation
             max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
+            condense_tool_messages: If True, each completed tool-call round is condensed into a
+                single assistant message summarising the calls and results, reducing context size
+                across multi-iteration tool loops. Defaults to False.
+            tool_mode: "standard" (all tools in system prompt) or "dynamic" (router tool discovers tools on demand)
+            tool_route_model: Fast model used for tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model)
+            max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this)
         """
         self.model = model or settings.default_model
         self.embedding_model = embedding_model or settings.default_embedding_model
@@ -1394,6 +1493,10 @@ class GlueLLM:
         self._conversation = Conversation()
         self.eval_store = eval_store or get_global_eval_store()
         self.guardrails = guardrails
+        self.max_tokens = max_tokens
+        self.condense_tool_messages = condense_tool_messages
+        self.tool_mode = tool_mode
+        self.tool_route_model = tool_route_model or settings.tool_route_model
         self.max_tokens = max_tokens
 
     async def complete(
@@ -1407,6 +1510,8 @@ class GlueLLM:
         guardrails: GuardrailsConfig | None = None,
         on_status: OnStatusCallback = None,
         max_tokens: int | None = None,
+        condense_tool_messages: bool | None = None,
+        tool_mode: ToolMode | None = None,
     ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
 
@@ -1419,6 +1524,9 @@ class GlueLLM:
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             on_status: Optional callback for process status events (LLM call start/end, tool start/end, complete)
             max_tokens: Maximum number of tokens to generate. Overrides instance-level max_tokens if provided.
+            condense_tool_messages: Override the instance-level condense_tool_messages setting for this call.
+            tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
+            max_tokens: Override the instance-level max_tokens for this call (None = provider default; not all models support this).
 
         Returns:
             ToolExecutionResult with final response and execution history
@@ -1441,6 +1549,13 @@ class GlueLLM:
         effective_guardrails = guardrails if guardrails is not None else self.guardrails
         # Per-call max_tokens takes precedence over instance-level setting
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+        effective_condense = (
+            condense_tool_messages if condense_tool_messages is not None else self.condense_tool_messages
+        )
+        effective_tool_mode: ToolMode = (
+            tool_mode if tool_mode is not None else self.tool_mode
+        )
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
 
         # Set correlation ID if provided
         if correlation_id:
@@ -1461,7 +1576,14 @@ class GlueLLM:
 
         # Capture start time for evaluation recording
         start_time = time.time()
-        system_prompt_content = self._format_system_prompt()
+        # Resolve active_tools for dynamic vs standard mode
+        router_tool = None
+        if effective_tool_mode == "dynamic" and self.tools:
+            router_tool = build_router_tool(self.tools)
+            active_tools: list[Callable] = [router_tool]
+        else:
+            active_tools = self.tools
+        system_prompt_content = self._format_system_prompt(tools=active_tools)
         messages_snapshot: list[dict] = []
         result: ExecutionResult | None = None
         error: Exception | None = None
@@ -1486,7 +1608,7 @@ class GlueLLM:
                 # Tool execution loop
                 logger.debug(
                     f"Starting tool execution loop: max_iterations={self.max_tool_iterations}, "
-                    f"tools_available={len(self.tools) if self.tools else 0}"
+                    f"tools_available={len(active_tools) if active_tools else 0}, tool_mode={effective_tool_mode}"
                 )
                 for iteration in range(self.max_tool_iterations):
                     logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
@@ -1505,7 +1627,7 @@ class GlueLLM:
                         response = await _llm_call_with_retry(
                             messages=messages,
                             model=model or self.model,
-                            tools=self.tools if self.tools else None,
+                            tools=active_tools if active_tools else None,
                             timeout=timeout,
                             api_key=api_key,
                             max_tokens=effective_max_tokens,
@@ -1532,7 +1654,7 @@ class GlueLLM:
                             iteration=iteration + 1,
                             model=model or self.model,
                             has_tool_calls=bool(
-                                execute_tools and self.tools and response.choices[0].message.tool_calls
+                                execute_tools and active_tools and response.choices[0].message.tool_calls
                             ),
                             token_usage=tokens_used,
                         ),
@@ -1540,9 +1662,40 @@ class GlueLLM:
                     )
 
                     # Check if model wants to call tools
-                    if execute_tools and self.tools and response.choices[0].message.tool_calls:
+                    if execute_tools and active_tools and response.choices[0].message.tool_calls:
                         tool_calls = response.choices[0].message.tool_calls
                         logger.info(f"Iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
+
+                        # Handle router call: resolve tools, do NOT append messages, continue
+                        if router_tool is not None and is_router_call(tool_calls):
+                            query = json.loads(tool_calls[0].function.arguments)["query"]
+                            user_context = next(
+                                (m.get("content", "") or "" for m in messages if m.get("role") == "user"),
+                                query,
+                            )
+                            if isinstance(user_context, list):
+                                user_context = query
+                            matched = await resolve_tool_route(
+                                user_context,
+                                self.tools,
+                                model=self.tool_route_model,
+                                api_key=api_key,
+                                timeout=timeout,
+                            )
+                            active_tools = matched
+                            await emit_status(
+                                ProcessEvent(
+                                    kind="tool_route",
+                                    correlation_id=correlation_id,
+                                    timestamp=time.time(),
+                                    route_query=query,
+                                    matched_tools=[t.__name__ for t in matched],
+                                ),
+                                on_status,
+                            )
+                            # Update system prompt to reflect matched tools (no longer router)
+                            messages[0]["content"] = self._format_system_prompt(tools=active_tools)
+                            continue
 
                         # Add assistant message with tool calls to history (dict for any_llm validation)
                         messages.append(_response_message_to_dict(response.choices[0].message))
@@ -1600,7 +1753,7 @@ class GlueLLM:
                                 continue
 
                             # Find and execute the tool
-                            tool_func = self._find_tool(tool_name)
+                            tool_func = self._find_tool(tool_name, tools=active_tools)
                             if tool_func:
                                 tool_start_time = time.time()
                                 try:
@@ -1738,6 +1891,9 @@ class GlueLLM:
                                         "content": error_msg,
                                     }
                                 )
+
+                        if effective_condense:
+                            _condense_tool_round(messages)
 
                         # Continue loop to get next response
                         continue
@@ -1957,6 +2113,8 @@ class GlueLLM:
         guardrails: GuardrailsConfig | None = None,
         on_status: OnStatusCallback = None,
         max_tokens: int | None = None,
+        condense_tool_messages: bool | None = None,
+        tool_mode: ToolMode | None = None,
     ) -> ExecutionResult:
         """Complete a request and return structured output.
 
@@ -1976,6 +2134,9 @@ class GlueLLM:
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             on_status: Optional callback for process status events
             max_tokens: Maximum number of tokens to generate. Overrides instance-level max_tokens if provided.
+            condense_tool_messages: Override the instance-level condense_tool_messages setting for this call.
+            tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
+            max_tokens: Override the instance-level max_tokens for this call (None = provider default; not all models support this).
 
         Returns:
             ExecutionResult with structured_output field containing instance of response_format
@@ -1997,6 +2158,13 @@ class GlueLLM:
         # Resolve guardrails config: per-call overrides instance
         effective_guardrails = guardrails if guardrails is not None else self.guardrails
         # Per-call max_tokens takes precedence over instance-level setting
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+        effective_condense = (
+            condense_tool_messages if condense_tool_messages is not None else self.condense_tool_messages
+        )
+        effective_tool_mode: ToolMode = (
+            tool_mode if tool_mode is not None else self.tool_mode
+        )
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
 
         # Set correlation ID if provided
@@ -2021,13 +2189,19 @@ class GlueLLM:
 
         # Capture start time for evaluation recording
         start_time = time.time()
-        system_prompt_content = self._format_system_prompt()
+        # Determine which tools to use: parameter overrides instance tools
+        tools_to_use = tools if tools is not None else self.tools
+        # Resolve active_tools for dynamic vs standard mode
+        router_tool = None
+        if effective_tool_mode == "dynamic" and tools_to_use:
+            router_tool = build_router_tool(tools_to_use)
+            active_tools: list[Callable] = [router_tool]
+        else:
+            active_tools = tools_to_use
+        system_prompt_content = self._format_system_prompt(tools=active_tools)
         messages_snapshot: list[dict] = []
         result: ExecutionResult | None = None
         error: Exception | None = None
-
-        # Determine which tools to use: parameter overrides instance tools
-        tools_to_use = tools if tools is not None else self.tools
 
         # Use shutdown context to track in-flight requests for entire execution
         try:
@@ -2074,10 +2248,10 @@ class GlueLLM:
                         total_cost += iteration_cost
 
                 # PHASE 1: Tool execution loop (if tools are provided and execute_tools is True)
-                if tools_to_use and execute_tools:
+                if active_tools and execute_tools:
                     logger.debug(
                         f"Starting tool execution phase: max_iterations={self.max_tool_iterations}, "
-                        f"tools_available={len(tools_to_use)}"
+                        f"tools_available={len(active_tools)}, tool_mode={effective_tool_mode}"
                     )
                     for iteration in range(self.max_tool_iterations):
                         logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
@@ -2097,7 +2271,7 @@ class GlueLLM:
                             response = await _llm_call_with_retry(
                                 messages=messages,
                                 model=model or self.model,
-                                tools=tools_to_use,
+                                tools=active_tools,
                                 # No response_format during tool phase
                                 timeout=timeout,
                                 api_key=api_key,
@@ -2128,6 +2302,37 @@ class GlueLLM:
                         if response.choices[0].message.tool_calls:
                             tool_calls = response.choices[0].message.tool_calls
                             logger.info(f"Iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
+
+                            # Handle router call: resolve tools, do NOT append messages, continue
+                            if router_tool is not None and is_router_call(tool_calls):
+                                query = json.loads(tool_calls[0].function.arguments)["query"]
+                                user_context = next(
+                                    (m.get("content", "") or "" for m in messages if m.get("role") == "user"),
+                                    query,
+                                )
+                                if isinstance(user_context, list):
+                                    user_context = query
+                                matched = await resolve_tool_route(
+                                    user_context,
+                                    tools_to_use,
+                                    model=self.tool_route_model,
+                                    api_key=api_key,
+                                    timeout=timeout,
+                                )
+                                active_tools = matched
+                                await emit_status(
+                                    ProcessEvent(
+                                        kind="tool_route",
+                                        correlation_id=correlation_id,
+                                        timestamp=time.time(),
+                                        route_query=query,
+                                        matched_tools=[t.__name__ for t in matched],
+                                    ),
+                                    on_status,
+                                )
+                                # Update system prompt to reflect matched tools (no longer router)
+                                messages[0]["content"] = self._format_system_prompt(tools=active_tools)
+                                continue
 
                             # Add assistant message with tool calls to history (dict for any_llm validation)
                             messages.append(_response_message_to_dict(response.choices[0].message))
@@ -2184,7 +2389,7 @@ class GlueLLM:
                                     continue
 
                                 # Find and execute the tool
-                                tool_func = self._find_tool(tool_name, tools_to_use)
+                                tool_func = self._find_tool(tool_name, tools=active_tools)
                                 if tool_func:
                                     tool_start_time = time.time()
                                     try:
@@ -2315,6 +2520,9 @@ class GlueLLM:
                                             "content": error_msg,
                                         }
                                     )
+
+                            if effective_condense:
+                                _condense_tool_round(messages)
                         # Continue to next iteration
                         else:
                             # LLM didn't call any tools - it has enough info, break out of tool loop
@@ -2542,13 +2750,12 @@ class GlueLLM:
             # Clear correlation ID after request completes
             clear_correlation_id()
 
-    def _format_system_prompt(self) -> str:
-        """Format system prompt with tools if available."""
+    def _format_system_prompt(self, tools: list[Callable] | None = None) -> str:
+        """Format system prompt. Tool schemas are sent via the API tools parameter, not here."""
         from gluellm.models.prompt import BASE_SYSTEM_PROMPT
 
         return BASE_SYSTEM_PROMPT.render(
             instructions=self.system_prompt,
-            tools=self.tools,
         ).strip()
 
     def _find_tool(self, tool_name: str, tools: list[Callable] | None = None) -> Callable | None:
@@ -2576,6 +2783,8 @@ class GlueLLM:
         response_format: type[BaseModel] | None = None,
         on_status: OnStatusCallback = None,
         max_tokens: int | None = None,
+        condense_tool_messages: bool | None = None,
+        tool_mode: ToolMode | None = None,
     ) -> AsyncIterator[StreamingChunk]:
         """Stream completion with automatic tool execution.
 
@@ -2602,6 +2811,9 @@ class GlueLLM:
             response_format: Optional Pydantic model; if set, the final chunk may include structured_output
             on_status: Optional callback for process status events
             max_tokens: Maximum number of tokens to generate. Overrides instance-level max_tokens if provided.
+            condense_tool_messages: Override the instance-level condense_tool_messages setting for this call.
+            tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
+            max_tokens: Override the instance-level max_tokens for this call (None = provider default; not all models support this).
 
         Yields:
             StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)
@@ -2618,6 +2830,21 @@ class GlueLLM:
         effective_guardrails = guardrails if guardrails is not None else self.guardrails
         # Per-call max_tokens takes precedence over instance-level setting
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+        effective_condense = (
+            condense_tool_messages if condense_tool_messages is not None else self.condense_tool_messages
+        )
+        effective_tool_mode: ToolMode = (
+            tool_mode if tool_mode is not None else self.tool_mode
+        )
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+
+        # Resolve active_tools for dynamic vs standard mode
+        router_tool = None
+        if effective_tool_mode == "dynamic" and self.tools:
+            router_tool = build_router_tool(self.tools)
+            active_tools: list[Callable] = [router_tool]
+        else:
+            active_tools = self.tools
 
         # Run input guardrails before processing
         if effective_guardrails:
@@ -2632,7 +2859,7 @@ class GlueLLM:
         # Build initial messages
         system_message = {
             "role": "system",
-            "content": self._format_system_prompt(),
+            "content": self._format_system_prompt(tools=active_tools),
         }
         messages = [system_message] + self._conversation.messages_dict
 
@@ -2644,7 +2871,7 @@ class GlueLLM:
         for iteration in range(self.max_tool_iterations):
             try:
                 # Try streaming first (if no tools or tools disabled, stream directly)
-                if not execute_tools or not self.tools:
+                if not execute_tools or not active_tools:
                     # Simple streaming without tool execution
                     await emit_status(
                         ProcessEvent(
@@ -2746,7 +2973,7 @@ class GlueLLM:
                 stream_iter = await _safe_llm_call(
                     messages=messages,
                     model=model or self.model,
-                    tools=self.tools if self.tools else None,
+                    tools=active_tools if active_tools else None,
                     response_format=None,
                     stream=True,
                     max_tokens=effective_max_tokens,
@@ -2793,9 +3020,40 @@ class GlueLLM:
                 raise type(e)(f"{error_msg}: {e}") from e
 
             # Check if model wants to call tools (from streamed response)
-            if execute_tools and self.tools and assistant_message and getattr(assistant_message, "tool_calls", None):
+            if execute_tools and active_tools and assistant_message and getattr(assistant_message, "tool_calls", None):
                 tool_calls = assistant_message.tool_calls
                 logger.info(f"Stream iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
+
+                # Handle router call: resolve tools, do NOT append messages, continue
+                if router_tool is not None and is_router_call(tool_calls):
+                    query = json.loads(tool_calls[0].function.arguments)["query"]
+                    user_context = next(
+                        (m.get("content", "") or "" for m in messages if m.get("role") == "user"),
+                        query,
+                    )
+                    if isinstance(user_context, list):
+                        user_context = query
+                    matched = await resolve_tool_route(
+                        user_context,
+                        self.tools,
+                        model=self.tool_route_model,
+                        api_key=None,
+                        timeout=None,
+                    )
+                    active_tools = matched
+                    await emit_status(
+                        ProcessEvent(
+                            kind="tool_route",
+                            correlation_id=get_correlation_id(),
+                            timestamp=time.time(),
+                            route_query=query,
+                            matched_tools=[t.__name__ for t in matched],
+                        ),
+                        on_status,
+                    )
+                    # Update system prompt to reflect matched tools (no longer router)
+                    messages[0]["content"] = self._format_system_prompt(tools=active_tools)
+                    continue
 
                 # Yield a chunk indicating tool execution is happening
                 yield StreamingChunk(
@@ -2863,7 +3121,7 @@ class GlueLLM:
                         continue
 
                     # Find and execute the tool
-                    tool_func = self._find_tool(tool_name)
+                    tool_func = self._find_tool(tool_name, tools=active_tools)
                     if tool_func:
                         tool_start_time = time.time()
                         try:
@@ -2964,6 +3222,9 @@ class GlueLLM:
                                 "content": error_msg,
                             }
                         )
+
+                if effective_condense:
+                    _condense_tool_round(messages)
 
                 # Continue loop to get next response (stream again)
                 continue
@@ -3166,6 +3427,8 @@ async def complete(
     guardrails: GuardrailsConfig | None = None,
     on_status: OnStatusCallback = None,
     max_tokens: int | None = None,
+    condense_tool_messages: bool = False,
+    tool_mode: ToolMode | None = None,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
 
@@ -3181,10 +3444,15 @@ async def complete(
         guardrails: Optional guardrails configuration
         on_status: Optional callback for process status events
         max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
+        condense_tool_messages: If True, each completed tool-call round is condensed into a single
+            assistant message, reducing context size across multi-iteration tool loops. Defaults to False.
+        tool_mode: "standard" (all tools in prompt) or "dynamic" (router discovers tools). Defaults to settings.default_tool_mode.
+        max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this).
 
     Returns:
         ToolExecutionResult with final response and execution history
     """
+    effective_tool_mode = tool_mode if tool_mode is not None else settings.default_tool_mode
     client = GlueLLM(
         model=model,
         system_prompt=system_prompt,
@@ -3192,6 +3460,8 @@ async def complete(
         max_tool_iterations=max_tool_iterations,
         guardrails=guardrails,
         max_tokens=max_tokens,
+        condense_tool_messages=condense_tool_messages,
+        tool_mode=effective_tool_mode,
     )
     return await client.complete(
         user_message,
@@ -3199,6 +3469,8 @@ async def complete(
         correlation_id=correlation_id,
         timeout=timeout,
         on_status=on_status,
+        tool_mode=tool_mode,
+        max_tokens=max_tokens,
     )
 
 
@@ -3215,6 +3487,8 @@ async def structured_complete(
     guardrails: GuardrailsConfig | None = None,
     on_status: OnStatusCallback = None,
     max_tokens: int | None = None,
+    condense_tool_messages: bool = False,
+    tool_mode: ToolMode | None = None,
 ) -> ExecutionResult:
     """Quick structured completion with optional tool support.
 
@@ -3235,6 +3509,10 @@ async def structured_complete(
         guardrails: Optional guardrails configuration
         on_status: Optional callback for process status events
         max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
+        condense_tool_messages: If True, each completed tool-call round is condensed into a single
+            assistant message, reducing context size across multi-iteration tool loops. Defaults to False.
+        tool_mode: "standard" (all tools in prompt) or "dynamic" (router discovers tools). Defaults to settings.default_tool_mode.
+        max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this).
 
     Returns:
         ExecutionResult with structured_output field containing instance of response_format
@@ -3273,6 +3551,7 @@ async def structured_complete(
         >>>
         >>> asyncio.run(main())
     """
+    effective_tool_mode = tool_mode if tool_mode is not None else settings.default_tool_mode
     client = GlueLLM(
         model=model,
         system_prompt=system_prompt,
@@ -3280,6 +3559,8 @@ async def structured_complete(
         max_tool_iterations=max_tool_iterations,
         guardrails=guardrails,
         max_tokens=max_tokens,
+        condense_tool_messages=condense_tool_messages,
+        tool_mode=effective_tool_mode,
     )
     return await client.structured_complete(
         user_message,
@@ -3289,6 +3570,8 @@ async def structured_complete(
         correlation_id=correlation_id,
         timeout=timeout,
         on_status=on_status,
+        tool_mode=tool_mode,
+        max_tokens=max_tokens,
     )
 
 
@@ -3349,6 +3632,8 @@ async def stream_complete(
     response_format: type[BaseModel] | None = None,
     on_status: OnStatusCallback = None,
     max_tokens: int | None = None,
+    condense_tool_messages: bool = False,
+    tool_mode: ToolMode | None = None,
 ) -> AsyncIterator[StreamingChunk]:
     """Stream completion with automatic tool execution.
 
@@ -3374,6 +3659,10 @@ async def stream_complete(
         guardrails: Optional guardrails configuration
         response_format: Optional Pydantic model; final chunk may include structured_output
         on_status: Optional callback for process status events
+        condense_tool_messages: If True, each completed tool-call round is condensed into a single
+            assistant message, reducing context size across multi-iteration tool loops. Defaults to False.
+        tool_mode: "standard" (all tools in prompt) or "dynamic" (router discovers tools). Defaults to settings.default_tool_mode.
+        max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this).
 
     Yields:
         StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)
@@ -3384,6 +3673,7 @@ async def stream_complete(
         ...     if chunk.done:
         ...         print(f"\\nTool calls: {chunk.tool_calls_made}")
     """
+    effective_tool_mode = tool_mode if tool_mode is not None else settings.default_tool_mode
     client = GlueLLM(
         model=model,
         system_prompt=system_prompt,
@@ -3391,11 +3681,15 @@ async def stream_complete(
         max_tool_iterations=max_tool_iterations,
         guardrails=guardrails,
         max_tokens=max_tokens,
+        condense_tool_messages=condense_tool_messages,
+        tool_mode=effective_tool_mode,
     )
     async for chunk in client.stream_complete(
         user_message,
         execute_tools=execute_tools,
         response_format=response_format,
         on_status=on_status,
+        tool_mode=tool_mode,
+        max_tokens=max_tokens,
     ):
         yield chunk
