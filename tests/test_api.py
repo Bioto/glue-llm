@@ -1074,8 +1074,9 @@ class TestAnyLlmParsedSerializationFix:
         """Converter must avoid warnings and keep message.parsed accessible to callers."""
         import warnings
 
-        from gluellm.api import _convert_openai_chat_completion_without_parsed
         from pydantic import BaseModel
+
+        from gluellm.api import _convert_openai_chat_completion_without_parsed
 
         class ScoreModel(BaseModel):
             score: float
