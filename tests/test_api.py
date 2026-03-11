@@ -1342,7 +1342,7 @@ class TestCondenseToolRound:
     def _make_tool_response(self, tool_call_id: str, content: str) -> dict:
         return {"role": "tool", "tool_call_id": tool_call_id, "content": content}
 
-    def test_single_tool_call_condensed(self):
+    async def test_single_tool_call_condensed(self):
         """One assistant + one tool response becomes a single condensed user message."""
         messages = [
             {"role": "system", "content": "You are helpful."},
@@ -1368,7 +1368,7 @@ class TestCondenseToolRound:
         assert "get_weather()" in condensed["content"]
         assert "Sunny, 72°F" in condensed["content"]
 
-    def test_multiple_tool_calls_condensed(self):
+    async def test_multiple_tool_calls_condensed(self):
         """Multiple tool calls in one round all appear in the single condensed user message."""
         messages = [
             {"role": "user", "content": "Get data"},
@@ -1392,7 +1392,7 @@ class TestCondenseToolRound:
         assert "tool_b()" in condensed["content"]
         assert "Result B" in condensed["content"]
 
-    def test_no_condensation_when_assistant_has_content(self):
+    async def test_no_condensation_when_assistant_has_content(self):
         """Rounds where the assistant produced visible text alongside tool calls are left untouched."""
         original_messages = [
             {"role": "user", "content": "Do stuff"},
@@ -1411,7 +1411,7 @@ class TestCondenseToolRound:
 
         assert messages == original_messages
 
-    def test_no_condensation_when_no_tool_messages(self):
+    async def test_no_condensation_when_no_tool_messages(self):
         """If the last message is not a tool response, nothing changes."""
         messages = [
             {"role": "user", "content": "Hello"},
@@ -1424,13 +1424,13 @@ class TestCondenseToolRound:
         assert messages[-1]["role"] == "assistant"
         assert messages[-1]["content"] == "Hi there"
 
-    def test_no_condensation_when_empty_messages(self):
+    async def test_no_condensation_when_empty_messages(self):
         """Empty messages list is handled gracefully."""
         messages: list = []
         _condense_tool_round(messages)
         assert messages == []
 
-    def test_error_tool_result_included(self):
+    async def test_error_tool_result_included(self):
         """Error results from tool calls appear in the condensed summary."""
         messages = [
             {"role": "user", "content": "Run the tool"},
@@ -1447,7 +1447,7 @@ class TestCondenseToolRound:
         assert "flaky_tool()" in condensed["content"]
         assert "TimeoutError" in condensed["content"]
 
-    def test_preserves_earlier_messages(self):
+    async def test_preserves_earlier_messages(self):
         """Messages before the condensed round are left intact."""
         messages = [
             {"role": "system", "content": "System"},
@@ -1470,12 +1470,12 @@ class TestCondenseToolRound:
         assert messages[4]["role"] == "user"
         assert "lookup()" in messages[4]["content"]
 
-    def test_condense_tool_messages_disabled_by_default(self):
+    async def test_condense_tool_messages_disabled_by_default(self):
         """condense_tool_messages defaults to False on GlueLLM and module-level helpers."""
         client = GlueLLM()
         assert client.condense_tool_messages is False
 
-    def test_condense_tool_messages_can_be_enabled_on_client(self):
+    async def test_condense_tool_messages_can_be_enabled_on_client(self):
         """condense_tool_messages=True can be set on the GlueLLM instance."""
         client = GlueLLM(condense_tool_messages=True)
         assert client.condense_tool_messages is True
@@ -1875,7 +1875,7 @@ class TestCondenseToolMessagesIntegration:
 class TestTrimToolDocstrings:
     """Tests for _trim_tool_docstrings — ensures tool descriptions sent to the LLM are first-line only."""
 
-    def test_multiline_docstring_trimmed_to_first_line(self):
+    async def test_multiline_docstring_trimmed_to_first_line(self):
         from gluellm.api import _trim_tool_docstrings
 
         def my_tool(x: str) -> str:
@@ -1894,7 +1894,7 @@ class TestTrimToolDocstrings:
         assert trimmed[0].__name__ == "my_tool"
         assert trimmed[0](x="hi") == "hi"
 
-    def test_single_line_docstring_unchanged(self):
+    async def test_single_line_docstring_unchanged(self):
         from gluellm.api import _trim_tool_docstrings
 
         def simple_tool(x: str) -> str:
@@ -1905,7 +1905,7 @@ class TestTrimToolDocstrings:
         assert trimmed[0].__doc__ == "Simple tool."
         assert trimmed[0] is simple_tool
 
-    def test_no_docstring_handled(self):
+    async def test_no_docstring_handled(self):
         from gluellm.api import _trim_tool_docstrings
 
         def no_doc(x: str) -> str:
@@ -1915,7 +1915,7 @@ class TestTrimToolDocstrings:
         trimmed = _trim_tool_docstrings([no_doc])
         assert trimmed[0].__doc__ is None or trimmed[0].__doc__ == ""
 
-    def test_preserves_original_tool_docstring(self):
+    async def test_preserves_original_tool_docstring(self):
         from gluellm.api import _trim_tool_docstrings
 
         def original(x: str) -> str:

@@ -70,14 +70,6 @@ from any_llm import AnyLLM
 from any_llm.types.completion import ChatCompletion
 from pydantic import BaseModel, Field, field_serializer
 from pydantic.functional_validators import SkipValidation
-from tenacity import (
-    before_sleep_log,
-    retry,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
-
 from gluellm.config import settings
 from gluellm.tool_router import (
     ToolMode,
@@ -109,6 +101,53 @@ from gluellm.telemetry import (
 
 # Callback for process status events (sync or async)
 type OnStatusCallback = Callable[[ProcessEvent], None] | Callable[[ProcessEvent], Awaitable[None]] | None
+
+
+# ============================================================================
+# Retry Configuration
+# ============================================================================
+
+
+# Callback invoked on retryable error: (error, attempt) -> (should_retry, next_params | None)
+# next_params is merged into model kwargs for the next attempt (e.g. {"temperature": 0.8})
+type RetryCallback = (
+    Callable[[Exception, int], tuple[bool, dict[str, Any] | None]]
+    | Callable[[Exception, int], Awaitable[tuple[bool, dict[str, Any] | None]]]
+    | None
+)
+
+
+class RetryConfig(BaseModel):
+    """Configuration for retry behavior on LLM calls.
+
+    Attributes:
+        retry_enabled: If False, no retries are performed (single attempt only).
+        max_attempts: Maximum number of attempts including the first call.
+        min_wait: Minimum wait time in seconds between retries.
+        max_wait: Maximum wait time in seconds between retries.
+        multiplier: Exponential backoff multiplier.
+        retry_on: Optional list of exception types to retry on. When set,
+            only errors that are instances of one of these types trigger a
+            retry; all others are re-raised immediately. Takes precedence
+            over the default (RateLimitError + APIConnectionError) but is
+            ignored when callback is also set.
+        callback: Optional function called on each retryable error.
+            Signature: (error, attempt) -> (should_retry, next_params | None)
+            - should_retry: if False, stop retrying and re-raise the error.
+            - next_params: dict merged into model kwargs for the next attempt
+              (e.g. {"temperature": 0.0}). Pass None to keep current params.
+            Can be sync or async. When set, retry_on is ignored.
+    """
+
+    retry_enabled: bool = True
+    max_attempts: Annotated[int, Field(gt=0)] = 3
+    min_wait: Annotated[float, Field(ge=0)] = 2.0
+    max_wait: Annotated[float, Field(ge=0)] = 30.0
+    multiplier: Annotated[float, Field(ge=0)] = 1.0
+    retry_on: list[type[Exception]] | None = None
+    callback: RetryCallback = None
+
+    model_config = {"arbitrary_types_allowed": True}
 
 # Configure logging
 logger = get_logger(__name__)
@@ -948,6 +987,12 @@ class APIConnectionError(LLMError):
     pass
 
 
+class APITimeoutError(APIConnectionError):
+    """Raised when the API request times out."""
+
+    pass
+
+
 class InvalidRequestError(LLMError):
     """Raised when the request is invalid (bad params, etc)."""
 
@@ -1003,12 +1048,18 @@ def classify_llm_error(error: Exception) -> Exception:
     ):
         return RateLimitError(f"Rate limit hit: {error}")
 
+    # Timeout errors
+    if (
+        any(k in error_msg for k in ["timeout", "timed out"])
+        or error_type == "APITimeoutError"
+    ):
+        return APITimeoutError(f"API request timed out: {error}")
+
     # Connection/network errors
     if any(
         keyword in error_msg
         for keyword in [
             "connection",
-            "timeout",
             "network",
             "unreachable",
             "503",
@@ -1098,6 +1149,7 @@ async def _safe_llm_call(
     timeout: float | None = None,
     api_key: str | None = None,
     max_tokens: int | None = None,
+    **model_kwargs: Any,
 ) -> ChatCompletion | AsyncIterator[ChatCompletion]:
     """Make an LLM call with error classification and tracing.
 
@@ -1114,6 +1166,7 @@ async def _safe_llm_call(
         timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
         api_key: Optional API key override (for key pool usage)
         max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
+        **model_kwargs: Additional parameters passed to provider.acompletion (e.g. temperature, top_p).
 
     Returns:
         ChatCompletion if stream=False, AsyncIterator[ChatCompletion] if stream=True
@@ -1219,6 +1272,7 @@ async def _safe_llm_call(
                         response_format=normalized_response_format if normalized_response_format else response_format,
                         stream=stream,
                         max_tokens=max_tokens,
+                        **model_kwargs,
                     ),
                     timeout=timeout,
                 )
@@ -1327,15 +1381,6 @@ async def _safe_llm_call(
         raise classified_error from e
 
 
-@retry(
-    retry=retry_if_exception_type((RateLimitError, APIConnectionError)),
-    stop=stop_after_attempt(settings.retry_max_attempts),
-    wait=wait_exponential(
-        multiplier=settings.retry_multiplier, min=settings.retry_min_wait, max=settings.retry_max_wait
-    ),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
-    reraise=True,
-)
 async def _llm_call_with_retry(
     messages: list[dict],
     model: str,
@@ -1344,37 +1389,77 @@ async def _llm_call_with_retry(
     timeout: float | None = None,
     api_key: str | None = None,
     max_tokens: int | None = None,
+    retry_config: RetryConfig | None = None,
+    **model_kwargs: Any,
 ) -> ChatCompletion:
-    """Make an LLM call with automatic retry on transient errors.
+    """Make an LLM call with configurable retry on transient errors.
 
-    Retries up to 3 times with exponential backoff for:
-    - Rate limit errors (429)
-    - Connection errors (5xx)
-
-    Does NOT retry for:
-    - Token limit errors (need to reduce input)
-    - Authentication errors (bad credentials)
-    - Invalid request errors (bad parameters)
-    - Timeout errors
+    When retry_config.retry_enabled is False, performs a single attempt.
+    Otherwise retries according to retry_config.callback (or default behavior
+    for RateLimitError/APIConnectionError when no callback is set).
 
     Args:
         messages: List of message dictionaries
         model: Model identifier
         tools: Optional list of tools
         response_format: Optional Pydantic model for structured output
-        timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
-        api_key: Optional API key override (for key pool usage)
-        max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
+        timeout: Request timeout in seconds
+        api_key: Optional API key override
+        max_tokens: Maximum number of tokens to generate
+        retry_config: Retry configuration including optional callback
+        **model_kwargs: Additional params for acompletion (e.g. temperature)
     """
-    return await _safe_llm_call(
-        messages=messages,
-        model=model,
-        tools=tools,
-        response_format=response_format,
-        timeout=timeout,
-        api_key=api_key,
-        max_tokens=max_tokens,
+    cfg = retry_config or RetryConfig(
+        retry_enabled=True,
+        max_attempts=settings.retry_max_attempts,
+        min_wait=float(settings.retry_min_wait),
+        max_wait=float(settings.retry_max_wait),
+        multiplier=float(settings.retry_multiplier),
     )
+    effective_max = 1 if not cfg.retry_enabled else cfg.max_attempts
+    kwargs = dict(model_kwargs)
+
+    for attempt in range(effective_max):
+        try:
+            final_max_tokens = kwargs.pop("max_tokens", None) or max_tokens
+            return await _safe_llm_call(
+                messages=messages,
+                model=model,
+                tools=tools,
+                response_format=response_format,
+                timeout=timeout,
+                api_key=api_key,
+                max_tokens=final_max_tokens,
+                **kwargs,
+            )
+        except Exception as e:
+            if attempt + 1 >= effective_max:
+                raise
+
+            if cfg.callback is not None:
+                if asyncio.iscoroutinefunction(cfg.callback):
+                    should_retry, next_params = await cfg.callback(e, attempt + 1)
+                else:
+                    should_retry, next_params = cfg.callback(e, attempt + 1)
+                if not should_retry:
+                    raise
+                if next_params:
+                    kwargs.update(next_params)
+            elif cfg.retry_on is not None:
+                if not isinstance(e, tuple(cfg.retry_on)):
+                    raise
+            else:
+                if not should_retry_error(e):
+                    raise
+
+            wait_time = min(
+                cfg.max_wait,
+                cfg.min_wait * (cfg.multiplier**attempt),
+            )
+            logger.warning(
+                f"LLM call failed (attempt {attempt + 1}/{effective_max}), retrying in {wait_time:.2f}s: {e}"
+            )
+            await asyncio.sleep(wait_time)
 
 
 class ExecutionResult(BaseModel):
@@ -1472,6 +1557,8 @@ class GlueLLM:
         tool_mode: ToolMode = "standard",
         tool_route_model: str | None = None,
         max_tokens: int | None = None,
+        retry_config: RetryConfig | None = None,
+        model_kwargs: dict[str, Any] | None = None,
     ):
         """Initialize GlueLLM client.
 
@@ -1490,6 +1577,10 @@ class GlueLLM:
             tool_mode: "standard" (all tools in system prompt) or "dynamic" (router tool discovers tools on demand)
             tool_route_model: Fast model used for tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model)
             max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this)
+            retry_config: Optional retry configuration. Set retry_config.callback to customise retry
+                decisions and modify model params per attempt. Set retry_config.retry_enabled=False
+                to disable retries entirely.
+            model_kwargs: Optional dict of extra params for acompletion (e.g. temperature, top_p).
         """
         self.model = model or settings.default_model
         self.embedding_model = embedding_model or settings.default_embedding_model
@@ -1504,6 +1595,8 @@ class GlueLLM:
         self.tool_mode = tool_mode
         self.tool_route_model = tool_route_model or settings.tool_route_model
         self.max_tokens = max_tokens
+        self.retry_config = retry_config
+        self.model_kwargs = model_kwargs or {}
 
     async def complete(
         self,
@@ -1518,6 +1611,9 @@ class GlueLLM:
         max_tokens: int | None = None,
         condense_tool_messages: bool | None = None,
         tool_mode: ToolMode | None = None,
+        retry_enabled: bool | None = None,
+        retry_config: RetryConfig | None = None,
+        **model_kwargs: Any,
     ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
 
@@ -1532,7 +1628,9 @@ class GlueLLM:
             max_tokens: Maximum number of tokens to generate. Overrides instance-level max_tokens if provided.
             condense_tool_messages: Override the instance-level condense_tool_messages setting for this call.
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
-            max_tokens: Override the instance-level max_tokens for this call (None = provider default; not all models support this).
+            retry_enabled: If False, disables retries for this call (shorthand for retry_config.retry_enabled=False).
+            retry_config: Per-call retry configuration override (includes optional callback).
+            **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
             ToolExecutionResult with final response and execution history
@@ -1561,7 +1659,15 @@ class GlueLLM:
         effective_tool_mode: ToolMode = (
             tool_mode if tool_mode is not None else self.tool_mode
         )
-        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+        effective_retry_config = retry_config if retry_config is not None else self.retry_config
+        if retry_enabled is not None and not retry_enabled:
+            cfg = effective_retry_config
+            effective_retry_config = (
+                RetryConfig(retry_enabled=False)
+                if cfg is None
+                else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
+            )
+        effective_model_kwargs = {**self.model_kwargs, **model_kwargs}
 
         # Set correlation ID if provided
         if correlation_id:
@@ -1637,6 +1743,9 @@ class GlueLLM:
                             timeout=timeout,
                             api_key=api_key,
                             max_tokens=effective_max_tokens,
+                            retry_config=effective_retry_config,
+                            
+                            **effective_model_kwargs,
                         )
                     except LLMError as e:
                         # Log the error and re-raise with context
@@ -1968,6 +2077,9 @@ class GlueLLM:
                                         timeout=timeout,
                                         api_key=api_key,
                                         max_tokens=effective_max_tokens,
+                                        retry_config=effective_retry_config,
+                                        
+                                        **effective_model_kwargs,
                                     )
                                 except LLMError as llm_error:
                                     # LLM call failed during retry, raise blocked error
@@ -2121,6 +2233,9 @@ class GlueLLM:
         max_tokens: int | None = None,
         condense_tool_messages: bool | None = None,
         tool_mode: ToolMode | None = None,
+        retry_enabled: bool | None = None,
+        retry_config: RetryConfig | None = None,
+        **model_kwargs: Any,
     ) -> ExecutionResult:
         """Complete a request and return structured output.
 
@@ -2142,7 +2257,9 @@ class GlueLLM:
             max_tokens: Maximum number of tokens to generate. Overrides instance-level max_tokens if provided.
             condense_tool_messages: Override the instance-level condense_tool_messages setting for this call.
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
-            max_tokens: Override the instance-level max_tokens for this call (None = provider default; not all models support this).
+            retry_enabled: If False, disables retries for this call (shorthand for retry_config.retry_enabled=False).
+            retry_config: Per-call retry configuration override (includes optional callback).
+            **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
             ExecutionResult with structured_output field containing instance of response_format
@@ -2171,7 +2288,15 @@ class GlueLLM:
         effective_tool_mode: ToolMode = (
             tool_mode if tool_mode is not None else self.tool_mode
         )
-        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+        effective_retry_config = retry_config if retry_config is not None else self.retry_config
+        if retry_enabled is not None and not retry_enabled:
+            cfg = effective_retry_config
+            effective_retry_config = (
+                RetryConfig(retry_enabled=False)
+                if cfg is None
+                else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
+            )
+        effective_model_kwargs = {**self.model_kwargs, **model_kwargs}
 
         # Set correlation ID if provided
         if correlation_id:
@@ -2282,6 +2407,9 @@ class GlueLLM:
                                 timeout=timeout,
                                 api_key=api_key,
                                 max_tokens=effective_max_tokens,
+                                retry_config=effective_retry_config,
+                                
+                                **effective_model_kwargs,
                             )
                             await emit_status(
                                 ProcessEvent(
@@ -2568,6 +2696,9 @@ class GlueLLM:
                         timeout=timeout,
                         api_key=api_key,
                         max_tokens=effective_max_tokens,
+                        retry_config=effective_retry_config,
+                        
+                        **effective_model_kwargs,
                     )
                     await emit_status(
                         ProcessEvent(
@@ -2651,6 +2782,9 @@ class GlueLLM:
                                     timeout=timeout,
                                     api_key=api_key,
                                     max_tokens=effective_max_tokens,
+                                    retry_config=effective_retry_config,
+                                    
+                                    **effective_model_kwargs,
                                 )
                             except LLMError as llm_error:
                                 # LLM call failed during retry, raise blocked error
@@ -3435,6 +3569,9 @@ async def complete(
     max_tokens: int | None = None,
     condense_tool_messages: bool = False,
     tool_mode: ToolMode | None = None,
+    retry_enabled: bool | None = None,
+    retry_config: RetryConfig | None = None,
+    **model_kwargs: Any,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
 
@@ -3453,7 +3590,9 @@ async def complete(
         condense_tool_messages: If True, each completed tool-call round is condensed into a single
             assistant message, reducing context size across multi-iteration tool loops. Defaults to False.
         tool_mode: "standard" (all tools in prompt) or "dynamic" (router discovers tools). Defaults to settings.default_tool_mode.
-        max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this).
+        retry_enabled: If False, disables retries for this call.
+        retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
+        **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
     Returns:
         ToolExecutionResult with final response and execution history
@@ -3468,6 +3607,8 @@ async def complete(
         max_tokens=max_tokens,
         condense_tool_messages=condense_tool_messages,
         tool_mode=effective_tool_mode,
+        retry_config=retry_config,
+        model_kwargs=model_kwargs if model_kwargs else None,
     )
     return await client.complete(
         user_message,
@@ -3477,6 +3618,9 @@ async def complete(
         on_status=on_status,
         tool_mode=tool_mode,
         max_tokens=max_tokens,
+        retry_enabled=retry_enabled,
+        retry_config=retry_config,
+        **model_kwargs,
     )
 
 
@@ -3495,6 +3639,9 @@ async def structured_complete(
     max_tokens: int | None = None,
     condense_tool_messages: bool = False,
     tool_mode: ToolMode | None = None,
+    retry_enabled: bool | None = None,
+    retry_config: RetryConfig | None = None,
+    **model_kwargs: Any,
 ) -> ExecutionResult:
     """Quick structured completion with optional tool support.
 
@@ -3518,7 +3665,9 @@ async def structured_complete(
         condense_tool_messages: If True, each completed tool-call round is condensed into a single
             assistant message, reducing context size across multi-iteration tool loops. Defaults to False.
         tool_mode: "standard" (all tools in prompt) or "dynamic" (router discovers tools). Defaults to settings.default_tool_mode.
-        max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this).
+        retry_enabled: If False, disables retries for this call.
+        retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
+        **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
     Returns:
         ExecutionResult with structured_output field containing instance of response_format
@@ -3567,6 +3716,8 @@ async def structured_complete(
         max_tokens=max_tokens,
         condense_tool_messages=condense_tool_messages,
         tool_mode=effective_tool_mode,
+        retry_config=retry_config,
+        model_kwargs=model_kwargs if model_kwargs else None,
     )
     return await client.structured_complete(
         user_message,
@@ -3578,6 +3729,9 @@ async def structured_complete(
         on_status=on_status,
         tool_mode=tool_mode,
         max_tokens=max_tokens,
+        retry_enabled=retry_enabled,
+        retry_config=retry_config,
+        **model_kwargs,
     )
 
 

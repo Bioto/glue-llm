@@ -92,9 +92,9 @@ def setup_logging(
     if os.getenv("GLUELLM_DISABLE_LOGGING", "false").lower() in ("true", "1", "yes"):
         return
 
-    # Check if logging is already configured
-    root_logger = logging.getLogger()
-    if root_logger.handlers and not force:
+    # Check if logging is already configured for the 'gluellm' logger
+    library_logger = logging.getLogger("gluellm")
+    if library_logger.handlers and not force:
         # Logging already configured, skip
         return
 
@@ -103,8 +103,14 @@ def setup_logging(
     log_file_level = os.getenv("GLUELLM_LOG_FILE_LEVEL", log_file_level).upper()
     log_dir = os.getenv("GLUELLM_LOG_DIR", log_dir)
     log_file_name = os.getenv("GLUELLM_LOG_FILE_NAME", log_file_name)
-    log_json_format = os.getenv("GLUELLM_LOG_JSON_FORMAT", str(log_json_format)).lower() in ("true", "1", "yes")
-    console_output = os.getenv("GLUELLM_CONSOLE_OUTPUT", str(console_output)).lower() in ("true", "1", "yes")
+    log_json_format = (
+        os.getenv("GLUELLM_LOG_JSON_FORMAT", str(log_json_format)).lower()
+        in ("true", "1", "yes")
+    )
+    console_output = (
+        os.getenv("GLUELLM_CONSOLE_OUTPUT", str(console_output)).lower()
+        in ("true", "1", "yes")
+    )
     try:
         log_max_bytes = int(os.getenv("GLUELLM_LOG_MAX_BYTES", log_max_bytes))
     except ValueError:
@@ -129,13 +135,17 @@ def setup_logging(
     numeric_level = getattr(logging, log_level, logging.INFO)
     numeric_file_level = getattr(logging, log_file_level, logging.DEBUG)
 
-    # Configure root logger
-    root_logger.setLevel(logging.DEBUG)  # Set to lowest level, handlers will filter
+    # Configure library logger
+    library_logger.setLevel(logging.DEBUG)  # Set to lowest level, handlers will filter
 
     # Remove existing handlers and filters if forcing reconfiguration
     if force:
-        root_logger.handlers.clear()
-        root_logger.filters.clear()
+        library_logger.handlers.clear()
+        library_logger.filters.clear()
+
+    # Prevent propagation to root logger to avoid duplicate logs and interference
+    # with the parent application's logging setup (e.g., Celery)
+    library_logger.propagate = False
 
     # Console handler with colorlog (only if explicitly enabled)
     if console_output:
@@ -162,7 +172,7 @@ def setup_logging(
             style="%",
         )
         console_handler.setFormatter(color_formatter)
-        root_logger.addHandler(console_handler)
+        library_logger.addHandler(console_handler)
 
     # File handler with rotation
     log_file_path = log_dir / log_file_name
@@ -193,10 +203,7 @@ def setup_logging(
         )
         file_handler.setFormatter(file_formatter)
 
-    root_logger.addHandler(file_handler)
-
-    # Prevent propagation to avoid duplicate logs
-    root_logger.propagate = False
+    library_logger.addHandler(file_handler)
 
     # Log the configuration
     logger = logging.getLogger(__name__)
@@ -230,8 +237,9 @@ def get_logger(name: str) -> logging.Logger:
     # Check if automatic logging setup is disabled
     if os.getenv("GLUELLM_DISABLE_LOGGING", "false").lower() not in ("true", "1", "yes"):
         # Only auto-configure if not explicitly disabled
-        root_logger = logging.getLogger()
-        if not root_logger.handlers:
+        gluellm_logger = logging.getLogger("gluellm")
+        if not gluellm_logger.handlers:
             setup_logging()
 
     return logging.getLogger(name)
+

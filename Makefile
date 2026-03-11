@@ -25,12 +25,7 @@ release: build publish
 		--notes "Release v$(VERSION)"
 
 bump-version:
-	python3 -c 'import pathlib,re,tomllib; p=pathlib.Path("pyproject.toml"); t=p.read_text(); v=tomllib.loads(t)["project"]["version"]; ma,mi,pa=map(int,v.split(".")); part="$(PART)"; \
-if part=="major": ma,mi,pa=ma+1,0,0; \
-elif part=="minor": mi,pa=mi+1,0; \
-elif part=="patch": pa=pa+1; \
-else: raise SystemExit(f"Invalid PART: {part}. Use patch, minor, or major."); \
-nv=f"{ma}.{mi}.{pa}"; p.write_text(re.sub(r"(?m)^version = \"\\d+\\.\\d+\\.\\d+\"$$", f"version = \"{nv}\"", t, count=1)); print(f"Bumped: {v} -> {nv}")'
+	python3 -c 'import pathlib,re,tomllib; p=pathlib.Path("pyproject.toml"); t=p.read_text(); v=tomllib.loads(t)["project"]["version"]; ma,mi,pa=map(int,v.split(".")); part="$(PART)"; d={"major":(ma+1,0,0),"minor":(ma,mi+1,0),"patch":(ma,mi,pa+1)}; assert part in d, f"Invalid PART: {part}. Use patch, minor, or major."; ma,mi,pa=d[part]; nv=f"{ma}.{mi}.{pa}"; p.write_text(re.sub(r"(?m)^version = \"\\d+\\.\\d+\\.\\d+\"$$", f"version = \"{nv}\"", t, count=1)); print(f"Bumped: {v} -> {nv}")'
 
 bump-patch: PART=patch
 bump-patch: bump-version

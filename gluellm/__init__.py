@@ -76,9 +76,10 @@ from gluellm.api import (
     ExecutionResult,
     GlueLLM,
     InvalidRequestError,
-    # Exceptions
     LLMError,
     RateLimitError,
+    RetryConfig,
+    RetryCallback,
     StreamingChunk,
     TokenLimitError,
     close_providers,
@@ -213,6 +214,8 @@ __all__ = [
     "APIConnectionError",
     "InvalidRequestError",
     "AuthenticationError",
+    "RetryConfig",
+    "RetryCallback",
     # Guardrails
     "GuardrailsConfig",
     "PromptGuidedConfig",

@@ -53,10 +53,22 @@ class TestErrorClassification:
             classified = classify_llm_error(error)
             assert isinstance(classified, RateLimitError), f"Failed for: {error}"
 
+    async def test_timeout_error_classification(self):
+        """Test that timeout errors are correctly classified."""
+        from gluellm.api import APITimeoutError
+        errors = [
+            Exception("connection timeout"),
+            Exception("Request timed out."),
+            Exception("timed out"),
+        ]
+
+        for error in errors:
+            classified = classify_llm_error(error)
+            assert isinstance(classified, APITimeoutError), f"Failed for: {error}"
+
     async def test_connection_error_classification(self):
         """Test that connection errors are correctly classified."""
         errors = [
-            Exception("connection timeout"),
             Exception("network error"),
             Exception("503 service unavailable"),
             Exception("502 bad gateway"),
@@ -66,6 +78,10 @@ class TestErrorClassification:
         for error in errors:
             classified = classify_llm_error(error)
             assert isinstance(classified, APIConnectionError), f"Failed for: {error}"
+            # Ensure it's not specifically a timeout error unless it matches
+            if "timeout" not in str(error).lower() and "timed out" not in str(error).lower():
+                from gluellm.api import APITimeoutError
+                assert not isinstance(classified, APITimeoutError), f"Should not be APITimeoutError: {error}"
 
     async def test_auth_error_classification(self):
         """Test that authentication errors are correctly classified."""
