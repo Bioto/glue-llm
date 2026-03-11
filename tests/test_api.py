@@ -1343,7 +1343,7 @@ class TestCondenseToolRound:
         return {"role": "tool", "tool_call_id": tool_call_id, "content": content}
 
     def test_single_tool_call_condensed(self):
-        """One assistant + one tool response becomes a single condensed assistant message."""
+        """One assistant + one tool response becomes a single condensed user message."""
         messages = [
             {"role": "system", "content": "You are helpful."},
             {"role": "user", "content": "What is the weather?"},
@@ -1363,13 +1363,13 @@ class TestCondenseToolRound:
 
         assert len(messages) == 3
         condensed = messages[-1]
-        assert condensed["role"] == "assistant"
+        assert condensed["role"] == "user"
         assert "[Tool Results]" in condensed["content"]
         assert "get_weather()" in condensed["content"]
         assert "Sunny, 72°F" in condensed["content"]
 
     def test_multiple_tool_calls_condensed(self):
-        """Multiple tool calls in one round all appear in the single condensed message."""
+        """Multiple tool calls in one round all appear in the single condensed user message."""
         messages = [
             {"role": "user", "content": "Get data"},
             self._make_assistant_with_tool_calls(
@@ -1386,7 +1386,7 @@ class TestCondenseToolRound:
 
         assert len(messages) == 2
         condensed = messages[-1]
-        assert condensed["role"] == "assistant"
+        assert condensed["role"] == "user"
         assert "tool_a()" in condensed["content"]
         assert "Result A" in condensed["content"]
         assert "tool_b()" in condensed["content"]
@@ -1467,7 +1467,7 @@ class TestCondenseToolRound:
         assert messages[1]["content"] == "Turn 1"
         assert messages[2]["content"] == "Turn 1 reply"
         assert messages[3]["content"] == "Turn 2"
-        assert messages[4]["role"] == "assistant"
+        assert messages[4]["role"] == "user"
         assert "lookup()" in messages[4]["content"]
 
     def test_condense_tool_messages_disabled_by_default(self):
@@ -1534,7 +1534,7 @@ class TestCondenseToolMessagesIntegration:
 
     async def test_condensed_message_replaces_tool_round(self):
         """After a tool round with condense=True, the next LLM call receives a single
-        condensed assistant message instead of the raw assistant+tool pair."""
+        condensed user message instead of the raw assistant+tool pair."""
         messages_on_second_call: list[dict] = []
         call_count = 0
 
@@ -1561,9 +1561,11 @@ class TestCondenseToolMessagesIntegration:
         roles = [m["role"] for m in messages_on_second_call]
         assert "tool" not in roles, "Raw tool messages should have been condensed away"
 
-        # There should be exactly one assistant message from the tool round
-        assistant_msgs = [m for m in messages_on_second_call if m["role"] == "assistant"]
-        condensed = next((m for m in assistant_msgs if "[Tool Results]" in (m.get("content") or "")), None)
+        # Condensed summary is a user message (so LLM naturally continues)
+        condensed = next(
+            (m for m in messages_on_second_call if m.get("role") == "user" and "[Tool Results]" in (m.get("content") or "")),
+            None,
+        )
         assert condensed is not None, "Condensed summary message not found"
         assert "dummy_tool()" in condensed["content"]
         assert "Tool received: hello" in condensed["content"]
@@ -1622,14 +1624,14 @@ class TestCondenseToolMessagesIntegration:
         assert call_count == 3
         assert result.tool_calls_made == 2
 
-        # After round 1: messages for call 2 should have one condensed assistant message
-        # After round 2: messages for call 3 should have two condensed assistant messages
+        # After round 1: messages for call 2 should have one condensed user message
+        # After round 2: messages for call 3 should have two condensed user messages
         call3_messages = messages_per_call[2]
         tool_messages = [m for m in call3_messages if m["role"] == "tool"]
         assert len(tool_messages) == 0, "No raw tool messages should remain after two condensed rounds"
 
         condensed_summaries = [
-            m for m in call3_messages if m["role"] == "assistant" and "[Tool Results]" in (m.get("content") or "")
+            m for m in call3_messages if m["role"] == "user" and "[Tool Results]" in (m.get("content") or "")
         ]
         assert len(condensed_summaries) == 2, (
             f"Expected two condensed summaries (one per round), got {len(condensed_summaries)}"
@@ -1868,6 +1870,63 @@ class TestCondenseToolMessagesIntegration:
             assert not any("[Tool Results]" in (m.get("content") or "") for m in non_system), (
                 f"Turn {turn_number}: condensed tool summaries leaked into conversation history"
             )
+
+
+class TestTrimToolDocstrings:
+    """Tests for _trim_tool_docstrings — ensures tool descriptions sent to the LLM are first-line only."""
+
+    def test_multiline_docstring_trimmed_to_first_line(self):
+        from gluellm.api import _trim_tool_docstrings
+
+        def my_tool(x: str) -> str:
+            """First line summary.
+
+            Args:
+                x: Some value
+            Returns:
+                A string
+            """
+            return x
+
+        trimmed = _trim_tool_docstrings([my_tool])
+        assert len(trimmed) == 1
+        assert trimmed[0].__doc__ == "First line summary."
+        assert trimmed[0].__name__ == "my_tool"
+        assert trimmed[0](x="hi") == "hi"
+
+    def test_single_line_docstring_unchanged(self):
+        from gluellm.api import _trim_tool_docstrings
+
+        def simple_tool(x: str) -> str:
+            """Simple tool."""
+            return x
+
+        trimmed = _trim_tool_docstrings([simple_tool])
+        assert trimmed[0].__doc__ == "Simple tool."
+        assert trimmed[0] is simple_tool
+
+    def test_no_docstring_handled(self):
+        from gluellm.api import _trim_tool_docstrings
+
+        def no_doc(x: str) -> str:
+            return x
+        no_doc.__doc__ = None
+
+        trimmed = _trim_tool_docstrings([no_doc])
+        assert trimmed[0].__doc__ is None or trimmed[0].__doc__ == ""
+
+    def test_preserves_original_tool_docstring(self):
+        from gluellm.api import _trim_tool_docstrings
+
+        def original(x: str) -> str:
+            """Line one.
+
+            Extra detail here.
+            """
+            return x
+
+        _trim_tool_docstrings([original])
+        assert "Extra detail" in original.__doc__
 
 
 if __name__ == "__main__":

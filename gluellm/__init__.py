@@ -95,6 +95,7 @@ from gluellm.batch import (
     batch_complete_simple,
 )
 from gluellm.config import GlueLLMSettings, get_settings, reload_settings, settings
+from gluellm.tool_router import ToolMode
 from gluellm.eval import (
     CallbackStore,
     EvalRecord,
@@ -235,6 +236,8 @@ __all__ = [
     "enable_callback_recording",
     "set_global_eval_store",
     "get_global_eval_store",
+    # Tool routing
+    "ToolMode",
     # Configuration
     "GlueLLMSettings",
     "settings",

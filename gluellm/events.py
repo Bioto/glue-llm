@@ -17,6 +17,7 @@ ProcessEventKind = Literal[
     "llm_call_end",
     "tool_call_start",
     "tool_call_end",
+    "tool_route",
     "stream_start",
     "stream_chunk",
     "stream_end",
@@ -44,6 +45,10 @@ class ProcessEvent(BaseModel):
 
     # tool_call_start / tool_call_end
     tool_name: str | None = Field(default=None, description="Name of the tool")
+
+    # tool_route
+    route_query: str | None = Field(default=None, description="Query used for tool routing")
+    matched_tools: list[str] | None = Field(default=None, description="Tool names matched by router")
     call_index: int | None = Field(default=None, description="1-based index of this tool call in the round")
     success: bool | None = Field(default=None, description="Whether the tool call succeeded")
     duration_seconds: float | None = Field(default=None, description="Tool execution duration")
