@@ -7,7 +7,15 @@ build:
 	uv build
 
 publish:
-	uv publish
+	@output="$$(uv publish 2>&1)"; status=$$?; \
+	echo "$$output"; \
+	if [ $$status -ne 0 ]; then \
+		if printf '%s\n' "$$output" | rg -q "File already exists"; then \
+			echo "PyPI artifacts already exist; continuing with GitHub release."; \
+		else \
+			exit $$status; \
+		fi; \
+	fi
 
 release: build publish
 	gh release create v$(VERSION) \
