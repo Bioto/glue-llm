@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from gluellm.api import (
     ExecutionResult,
     GlueLLM,
+    _condense_tool_round,
     complete,
     stream_complete,
     structured_complete,
@@ -1328,6 +1329,545 @@ class TestProviderCache:
         assert len(get_provider_calls) == 2
         # The provider's acompletion must have been called twice (not a new client each time)
         assert mock_provider.acompletion.call_count == 2
+
+class TestCondenseToolRound:
+    """Unit tests for the _condense_tool_round() utility.
+
+    These tests operate directly on the messages list and require no LLM calls.
+    """
+
+    def _make_assistant_with_tool_calls(self, tool_calls: list[dict]) -> dict:
+        return {"role": "assistant", "content": None, "tool_calls": tool_calls}
+
+    def _make_tool_response(self, tool_call_id: str, content: str) -> dict:
+        return {"role": "tool", "tool_call_id": tool_call_id, "content": content}
+
+    def test_single_tool_call_condensed(self):
+        """One assistant + one tool response becomes a single condensed assistant message."""
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "What is the weather?"},
+            self._make_assistant_with_tool_calls(
+                [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"city":"NYC"}'},
+                    }
+                ]
+            ),
+            self._make_tool_response("call_1", "Sunny, 72°F"),
+        ]
+
+        _condense_tool_round(messages)
+
+        assert len(messages) == 3
+        condensed = messages[-1]
+        assert condensed["role"] == "assistant"
+        assert "[Tool Results]" in condensed["content"]
+        assert "get_weather()" in condensed["content"]
+        assert "Sunny, 72°F" in condensed["content"]
+
+    def test_multiple_tool_calls_condensed(self):
+        """Multiple tool calls in one round all appear in the single condensed message."""
+        messages = [
+            {"role": "user", "content": "Get data"},
+            self._make_assistant_with_tool_calls(
+                [
+                    {"id": "call_1", "type": "function", "function": {"name": "tool_a", "arguments": "{}"}},
+                    {"id": "call_2", "type": "function", "function": {"name": "tool_b", "arguments": "{}"}},
+                ]
+            ),
+            self._make_tool_response("call_1", "Result A"),
+            self._make_tool_response("call_2", "Result B"),
+        ]
+
+        _condense_tool_round(messages)
+
+        assert len(messages) == 2
+        condensed = messages[-1]
+        assert condensed["role"] == "assistant"
+        assert "tool_a()" in condensed["content"]
+        assert "Result A" in condensed["content"]
+        assert "tool_b()" in condensed["content"]
+        assert "Result B" in condensed["content"]
+
+    def test_no_condensation_when_assistant_has_content(self):
+        """Rounds where the assistant produced visible text alongside tool calls are left untouched."""
+        original_messages = [
+            {"role": "user", "content": "Do stuff"},
+            {
+                "role": "assistant",
+                "content": "I will call the tool now.",
+                "tool_calls": [
+                    {"id": "call_1", "type": "function", "function": {"name": "some_tool", "arguments": "{}"}}
+                ],
+            },
+            self._make_tool_response("call_1", "Tool result"),
+        ]
+        messages = list(original_messages)
+
+        _condense_tool_round(messages)
+
+        assert messages == original_messages
+
+    def test_no_condensation_when_no_tool_messages(self):
+        """If the last message is not a tool response, nothing changes."""
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there"},
+        ]
+
+        _condense_tool_round(messages)
+
+        assert len(messages) == 2
+        assert messages[-1]["role"] == "assistant"
+        assert messages[-1]["content"] == "Hi there"
+
+    def test_no_condensation_when_empty_messages(self):
+        """Empty messages list is handled gracefully."""
+        messages: list = []
+        _condense_tool_round(messages)
+        assert messages == []
+
+    def test_error_tool_result_included(self):
+        """Error results from tool calls appear in the condensed summary."""
+        messages = [
+            {"role": "user", "content": "Run the tool"},
+            self._make_assistant_with_tool_calls(
+                [{"id": "call_err", "type": "function", "function": {"name": "flaky_tool", "arguments": "{}"}}]
+            ),
+            self._make_tool_response("call_err", "Error executing tool: TimeoutError: timed out"),
+        ]
+
+        _condense_tool_round(messages)
+
+        assert len(messages) == 2
+        condensed = messages[-1]
+        assert "flaky_tool()" in condensed["content"]
+        assert "TimeoutError" in condensed["content"]
+
+    def test_preserves_earlier_messages(self):
+        """Messages before the condensed round are left intact."""
+        messages = [
+            {"role": "system", "content": "System"},
+            {"role": "user", "content": "Turn 1"},
+            {"role": "assistant", "content": "Turn 1 reply"},
+            {"role": "user", "content": "Turn 2"},
+            self._make_assistant_with_tool_calls(
+                [{"id": "call_x", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]
+            ),
+            self._make_tool_response("call_x", "Lookup result"),
+        ]
+
+        _condense_tool_round(messages)
+
+        assert len(messages) == 5
+        assert messages[0]["content"] == "System"
+        assert messages[1]["content"] == "Turn 1"
+        assert messages[2]["content"] == "Turn 1 reply"
+        assert messages[3]["content"] == "Turn 2"
+        assert messages[4]["role"] == "assistant"
+        assert "lookup()" in messages[4]["content"]
+
+    def test_condense_tool_messages_enabled_by_default(self):
+        """condense_tool_messages defaults to True on GlueLLM and module-level helpers."""
+        client = GlueLLM()
+        assert client.condense_tool_messages is True
+
+    def test_condense_tool_messages_can_be_disabled_on_client(self):
+        """condense_tool_messages=False can be set on the GlueLLM instance."""
+        client = GlueLLM(condense_tool_messages=False)
+        assert client.condense_tool_messages is False
+
+
+def _make_tool_response(content: str, finish_reason: str = "stop") -> SimpleNamespace:
+    """Build a fake non-streaming LLM response with plain text content."""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    role="assistant",
+                    content=content,
+                    tool_calls=None,
+                ),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        model="openai:gpt-4o-mini",
+    )
+
+
+def _make_tool_call_response(tool_name: str, arguments: str, call_id: str = "call_1") -> SimpleNamespace:
+    """Build a fake non-streaming LLM response that requests a tool call."""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    role="assistant",
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id=call_id,
+                            type="function",
+                            function=SimpleNamespace(name=tool_name, arguments=arguments),
+                        )
+                    ],
+                ),
+                finish_reason="tool_calls",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        model="openai:gpt-4o-mini",
+    )
+
+
+class TestCondenseToolMessagesIntegration:
+    """Integration tests for condense_tool_messages using mocked LLM calls.
+
+    These tests verify the condensation feature end-to-end through the tool loop
+    without making real API calls. They patch _llm_call_with_retry (the function
+    called inside complete() / structured_complete()) and inspect the messages
+    that each subsequent LLM call receives.
+    """
+
+    async def test_condensed_message_replaces_tool_round(self):
+        """After a tool round with condense=True, the next LLM call receives a single
+        condensed assistant message instead of the raw assistant+tool pair."""
+        messages_on_second_call: list[dict] = []
+        call_count = 0
+
+        async def fake_llm(*, messages, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_tool_call_response("dummy_tool", '{"value": "hello"}')
+            messages_on_second_call.extend(messages)
+            return _make_tool_response("All done")
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            result = await complete(
+                user_message="Use the tool",
+                system_prompt="Use tools.",
+                tools=[dummy_tool],
+                condense_tool_messages=True,
+            )
+
+        assert result.tool_calls_made == 1
+        assert call_count == 2
+
+        # The second call should NOT contain raw role:"tool" messages
+        roles = [m["role"] for m in messages_on_second_call]
+        assert "tool" not in roles, "Raw tool messages should have been condensed away"
+
+        # There should be exactly one assistant message from the tool round
+        assistant_msgs = [m for m in messages_on_second_call if m["role"] == "assistant"]
+        condensed = next((m for m in assistant_msgs if "[Tool Results]" in (m.get("content") or "")), None)
+        assert condensed is not None, "Condensed summary message not found"
+        assert "dummy_tool()" in condensed["content"]
+        assert "Tool received: hello" in condensed["content"]
+
+    async def test_no_condensation_when_disabled(self):
+        """With condense=False, the next LLM call sees the raw assistant+tool messages."""
+        messages_on_second_call: list[dict] = []
+        call_count = 0
+
+        async def fake_llm(*, messages, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_tool_call_response("dummy_tool", '{"value": "hello"}')
+            messages_on_second_call.extend(messages)
+            return _make_tool_response("All done")
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            await complete(
+                user_message="Use the tool",
+                system_prompt="Use tools.",
+                tools=[dummy_tool],
+                condense_tool_messages=False,
+            )
+
+        roles = [m["role"] for m in messages_on_second_call]
+        assert "tool" in roles, "Raw tool messages should be present when condensation is off"
+        assert any(m.get("tool_calls") for m in messages_on_second_call if m["role"] == "assistant"), (
+            "Raw assistant message with tool_calls should be present"
+        )
+
+    async def test_multiple_tool_iterations_each_condensed(self):
+        """With two consecutive tool rounds, each round is condensed independently
+        so the context grows by one message per round, not N+1."""
+        messages_per_call: list[list[dict]] = []
+        call_count = 0
+
+        async def fake_llm(*, messages, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            messages_per_call.append(list(messages))
+            if call_count == 1:
+                return _make_tool_call_response("dummy_tool", '{"value": "round1"}', call_id="call_r1")
+            if call_count == 2:
+                return _make_tool_call_response("math_tool", '{"a": 3, "b": 4, "operation": "add"}', call_id="call_r2")
+            return _make_tool_response("Both rounds done")
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            result = await complete(
+                user_message="Do two tool rounds",
+                system_prompt="Use tools.",
+                tools=[dummy_tool, math_tool],
+                condense_tool_messages=True,
+            )
+
+        assert call_count == 3
+        assert result.tool_calls_made == 2
+
+        # After round 1: messages for call 2 should have one condensed assistant message
+        # After round 2: messages for call 3 should have two condensed assistant messages
+        call3_messages = messages_per_call[2]
+        tool_messages = [m for m in call3_messages if m["role"] == "tool"]
+        assert len(tool_messages) == 0, "No raw tool messages should remain after two condensed rounds"
+
+        condensed_summaries = [
+            m for m in call3_messages if m["role"] == "assistant" and "[Tool Results]" in (m.get("content") or "")
+        ]
+        assert len(condensed_summaries) == 2, (
+            f"Expected two condensed summaries (one per round), got {len(condensed_summaries)}"
+        )
+        # First summary references round 1 tool
+        assert "dummy_tool()" in condensed_summaries[0]["content"]
+        # Second summary references round 2 tool
+        assert "math_tool()" in condensed_summaries[1]["content"]
+
+    async def test_multi_turn_conversation_final_response_carries_forward(self):
+        """Across two separate client.complete() calls, the final assistant text from turn 1
+        is carried into the messages for turn 2 — not the condensed tool summary.
+
+        The condensed tool summaries live only in the ephemeral messages list within a single
+        complete() call's tool loop. Only the final text response is persisted in the
+        Conversation and replayed on the next turn.
+        """
+        turn2_messages: list[dict] = []
+        call_count = 0
+
+        async def fake_llm(*, messages, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_tool_call_response("dummy_tool", '{"value": "ctx_data"}')
+            if call_count == 2:
+                return _make_tool_response("Turn 1 final answer")
+            # Turn 2: single LLM call - record what history it received
+            turn2_messages.extend(messages)
+            return _make_tool_response("Turn 2 final answer")
+
+        client = GlueLLM(
+            system_prompt="Use tools.",
+            tools=[dummy_tool],
+            condense_tool_messages=True,
+        )
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            result1 = await client.complete("Turn 1: use the tool")
+            result2 = await client.complete("Turn 2: follow up")
+
+        assert result1.final_response == "Turn 1 final answer"
+        assert result2.final_response == "Turn 2 final answer"
+
+        # Turn 2 gets the final text from turn 1 — NOT the condensed tool summary
+        assistant_msgs = [m for m in turn2_messages if m["role"] == "assistant"]
+        assert any("Turn 1 final answer" in (m.get("content") or "") for m in assistant_msgs), (
+            "Turn 2 should see the final text response from turn 1"
+        )
+        # Condensed summaries should NOT bleed across turns
+        assert not any("[Tool Results]" in (m.get("content") or "") for m in turn2_messages), (
+            "Condensed tool summaries should not appear in a subsequent turn's message history"
+        )
+        # No raw tool messages in turn 2 either
+        assert "tool" not in [m["role"] for m in turn2_messages]
+
+    async def test_error_tool_result_appears_in_condensed_summary(self):
+        """When a tool raises an error, the error text is included in the condensed message."""
+        messages_on_second_call: list[dict] = []
+        call_count = 0
+
+        async def fake_llm(*, messages, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_tool_call_response("dummy_tool", "not valid json", call_id="call_bad")
+            messages_on_second_call.extend(messages)
+            return _make_tool_response("Handled error")
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            result = await complete(
+                user_message="Use the tool",
+                system_prompt="Use tools.",
+                tools=[dummy_tool],
+                condense_tool_messages=True,
+            )
+
+        assert call_count == 2
+        condensed = next(
+            (m for m in messages_on_second_call if "[Tool Results]" in (m.get("content") or "")),
+            None,
+        )
+        assert condensed is not None
+        # The error text from malformed JSON should be in the summary
+        assert "dummy_tool()" in condensed["content"]
+
+    async def test_stream_complete_condensed_message_on_second_iteration(self):
+        """stream_complete with condense=True passes a condensed message to the second
+        streaming LLM call instead of raw assistant+tool messages."""
+        messages_on_second_call: list[dict] = []
+        call_count = 0
+
+        async def fake_safe_llm_call(*, messages, stream, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+
+                async def first_stream():
+                    yield SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(
+                                    content=None,
+                                    tool_calls=[
+                                        SimpleNamespace(
+                                            index=0,
+                                            id="call_s1",
+                                            function=SimpleNamespace(
+                                                name="dummy_tool", arguments='{"value":"streamed"}'
+                                            ),
+                                        )
+                                    ],
+                                )
+                            )
+                        ]
+                    )
+
+                return first_stream()
+            messages_on_second_call.extend(messages)
+
+            async def second_stream():
+                yield SimpleNamespace(
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="Stream done", tool_calls=None))]
+                )
+
+            return second_stream()
+
+        with patch("gluellm.api._safe_llm_call", side_effect=fake_safe_llm_call):
+            chunks = []
+            async for ch in stream_complete(
+                user_message="Use the tool",
+                system_prompt="Use tools.",
+                tools=[dummy_tool],
+                execute_tools=True,
+                condense_tool_messages=True,
+            ):
+                chunks.append(ch)
+
+        assert call_count == 2
+        roles = [m["role"] for m in messages_on_second_call]
+        assert "tool" not in roles, "Raw tool messages should be condensed in stream path"
+        condensed = next(
+            (m for m in messages_on_second_call if "[Tool Results]" in (m.get("content") or "")),
+            None,
+        )
+        assert condensed is not None, "Condensed summary missing from second streaming call"
+        assert "dummy_tool()" in condensed["content"]
+
+    async def test_ten_turns_with_tool_use(self):
+        """10 consecutive turns on the same client, each with one tool call.
+
+        Verifies that across a long conversation:
+        - Every turn's tool call is condensed within that turn's loop
+        - The conversation history seen by each subsequent LLM call contains
+          exactly the correct number of prior user+assistant message pairs
+        - No raw tool messages or condensed summaries from previous turns
+          bleed into later turns (only final text responses persist)
+        - The conversation grows linearly (2 messages per turn: user + assistant)
+          rather than quadratically (which would happen if tool messages leaked)
+        """
+        num_turns = 10
+        call_count = 0
+        # messages seen by the *first* LLM call of each turn (before any tools run)
+        first_call_messages_per_turn: list[list[dict]] = []
+
+        async def fake_llm(*, messages, **kwargs):
+            nonlocal call_count
+            call_count += 1
+
+            # Each even-numbered call (1, 3, 5, …) is the first call of a new turn
+            # and should request a tool. Each odd-numbered call (2, 4, 6, …) is the
+            # follow-up after the tool ran and returns the final text.
+            is_first_call_of_turn = call_count % 2 == 1
+
+            if is_first_call_of_turn:
+                first_call_messages_per_turn.append(list(messages))
+                turn_number = (call_count + 1) // 2
+                return _make_tool_call_response(
+                    "dummy_tool",
+                    f'{{"value": "turn{turn_number}"}}',
+                    call_id=f"call_t{turn_number}",
+                )
+            turn_number = call_count // 2
+            return _make_tool_response(f"Final answer for turn {turn_number}")
+
+        client = GlueLLM(
+            system_prompt="Use tools.",
+            tools=[dummy_tool],
+            condense_tool_messages=True,
+        )
+
+        results = []
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            for i in range(1, num_turns + 1):
+                result = await client.complete(f"Turn {i}: use the dummy tool")
+                results.append(result)
+
+        # Every turn made exactly 2 LLM calls (tool call + final response)
+        assert call_count == num_turns * 2
+
+        # Every turn got its tool executed and a final text response
+        for i, result in enumerate(results, 1):
+            assert result.tool_calls_made == 1, f"Turn {i} should have made 1 tool call"
+            assert result.final_response == f"Final answer for turn {i}"
+
+        # Verify conversation growth is linear: each turn adds exactly 2 messages
+        # (user + assistant final text). Raw tool messages and condensed summaries
+        # must NOT accumulate in the stored conversation.
+        stored_messages = client._conversation.messages
+        assert len(stored_messages) == num_turns * 2, (
+            f"Expected {num_turns * 2} stored messages (user+assistant per turn), got {len(stored_messages)}"
+        )
+        for i in range(num_turns):
+            user_msg = stored_messages[i * 2]
+            assistant_msg = stored_messages[i * 2 + 1]
+            assert user_msg.role.value == "user"
+            assert assistant_msg.role.value == "assistant"
+            assert f"Final answer for turn {i + 1}" in assistant_msg.content
+
+        # Verify the messages seen by the first call of each turn:
+        # turn N should see exactly (N-1)*2 prior messages (excluding system)
+        for turn_idx, msgs in enumerate(first_call_messages_per_turn):
+            turn_number = turn_idx + 1
+            # Exclude the system message
+            non_system = [m for m in msgs if m["role"] != "system"]
+            expected_prior_messages = (turn_number - 1) * 2  # user + assistant per prior turn
+            assert len(non_system) == expected_prior_messages + 1, (
+                f"Turn {turn_number}: expected {expected_prior_messages} prior messages "
+                f"+ 1 current user message = {expected_prior_messages + 1} total, "
+                f"got {len(non_system)}"
+            )
+            # No raw tool messages or condensed summaries in stored history
+            assert "tool" not in [m["role"] for m in non_system], (
+                f"Turn {turn_number}: raw tool messages leaked into conversation history"
+            )
+            assert not any("[Tool Results]" in (m.get("content") or "") for m in non_system), (
+                f"Turn {turn_number}: condensed tool summaries leaked into conversation history"
+            )
 
 
 if __name__ == "__main__":
