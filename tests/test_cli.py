@@ -179,7 +179,8 @@ class TestTestToolCallCommand:
         messages = call_kwargs["messages"]
 
         assert messages[0]["role"] == "system"
-        assert "get_weather" in messages[0]["content"]
+        # System prompt includes instructions (tools are passed separately, not in prompt)
+        assert "You are a helpful assistant" in messages[0]["content"]
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key-123"})
     @patch("any_llm.completion")
