@@ -565,13 +565,14 @@ wheels = [
 
 [[package]]
 name = "gluellm"
-version = "1.1.21"
+version = "1.1.22"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
     { name = "any-llm-sdk" },
     { name = "click" },
     { name = "colorlog" },
+    { name = "httpx" },
     { name = "jinja2" },
     { name = "mlflow" },
     { name = "opentelemetry-api" },
@@ -605,6 +606,7 @@ requires-dist = [
     { name = "any-llm-sdk", extras = ["openai"], specifier = ">=1.5.0" },
     { name = "click", specifier = ">=8.3.1" },
     { name = "colorlog", specifier = ">=6.8.0" },
+    { name = "httpx", specifier = ">=0.28.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
     { name = "mlflow", specifier = ">=3.6.0" },
     { name = "opentelemetry-api", specifier = ">=1.20.0" },

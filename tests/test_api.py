@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 from typing import Annotated
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic import BaseModel, Field
@@ -12,6 +12,8 @@ from gluellm.api import (
     GlueLLM,
     _condense_tool_round,
     complete,
+    get_session_summary,
+    reset_session_tracker,
     stream_complete,
     structured_complete,
 )
@@ -2109,6 +2111,211 @@ class TestDualTimeoutParameters:
             )
 
         assert captured_model_kwargs["timeout"].connect == 30.0
+
+
+class TestPerCallConfigGaps:
+    """Regression tests for per-call config options (tool_route_model, condense, retry, track_costs, eval_recording)."""
+
+    async def test_complete_tool_route_model_per_call_overrides_settings(self):
+        """tool_route_model passed to free complete() is used for dynamic tool routing."""
+        from gluellm.tool_router import ROUTER_TOOL_NAME
+
+        from unittest.mock import AsyncMock, patch
+
+        captured_model = None
+
+        async def fake_resolve(user_context, tools, *, model, **kwargs):
+            nonlocal captured_model
+            captured_model = model
+            return list(tools) if tools else []
+
+        call_count = 0
+
+        def make_router_tool_call():
+            return SimpleNamespace(
+                index=0,
+                id="call_router",
+                function=SimpleNamespace(
+                    name=ROUTER_TOOL_NAME,
+                    arguments='{"query": "help"}',
+                ),
+            )
+
+        async def fake_llm(*, messages, model, stream=False, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if stream:
+                async def s():
+                    yield SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(content="Hi", tool_calls=None),
+                            )
+                        ]
+                    )
+                return s()
+            # First call: return router tool call so resolve_tool_route is invoked
+            if call_count == 1:
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content=None,
+                                tool_calls=[make_router_tool_call()],
+                            ),
+                        )
+                    ],
+                    usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+                )
+            # Second call: return final text response
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content="Hello",
+                            tool_calls=None,
+                        ),
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+            )
+
+        with (
+            patch("gluellm.api.resolve_tool_route", side_effect=fake_resolve),
+            patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm),
+        ):
+            await complete(
+                user_message="Hi",
+                tools=[dummy_tool],
+                tool_mode="dynamic",
+                tool_route_model="openai:gpt-4o",  # override
+            )
+
+        assert captured_model == "openai:gpt-4o"
+
+    async def test_condense_tool_messages_default_from_settings(self):
+        """GLUELLM_DEFAULT_CONDENSE_TOOL_MESSAGES is used when condense_tool_messages is not passed."""
+        with patch("gluellm.api.settings") as mock_settings:
+            mock_settings.default_condense_tool_messages = True
+            mock_settings.default_tool_mode = "standard"
+            mock_settings.default_model = "openai:gpt-4o-mini"
+            mock_settings.default_system_prompt = "You are helpful."
+            mock_settings.max_tool_iterations = 10
+            mock_settings.tool_route_model = "openai:gpt-4o-mini"
+
+            client = GlueLLM()  # no condense_tool_messages passed
+            assert client.condense_tool_messages is True
+
+    async def test_stream_complete_retry_config_per_call(self):
+        """stream_complete passes retry_config to _llm_call_with_retry."""
+        from gluellm.api import RetryConfig
+
+        captured_retry_config = None
+
+        async def fake_llm(*args, retry_config=None, **kwargs):
+            nonlocal captured_retry_config
+            captured_retry_config = retry_config
+            async def stream():
+                yield SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="Hi", tool_calls=None),
+                        )
+                    ]
+                )
+            return stream()
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            custom_config = RetryConfig(max_attempts=1, retry_enabled=False)
+            chunks = []
+            async for ch in stream_complete(
+                user_message="Hi",
+                tools=[],
+                retry_config=custom_config,
+            ):
+                chunks.append(ch)
+
+        assert captured_retry_config is custom_config
+
+    async def test_stream_complete_correlation_id_per_call(self):
+        """stream_complete uses provided correlation_id."""
+        from gluellm.runtime.context import get_correlation_id
+
+        async def fake_llm(*args, **kwargs):
+            async def stream():
+                yield SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="Hi", tool_calls=None),
+                        )
+                    ]
+                )
+            return stream()
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            custom_id = "test-correlation-123"
+            chunks = []
+            async for ch in stream_complete(
+                user_message="Hi",
+                tools=[],
+                correlation_id=custom_id,
+            ):
+                chunks.append(ch)
+                # During streaming, correlation_id should be set
+                if get_correlation_id() == custom_id:
+                    break
+
+        # At least one chunk should have been yielded
+        assert len(chunks) >= 1
+
+    async def test_complete_track_costs_false_skips_session_tracker(self):
+        """When track_costs=False, cost is not recorded to session tracker."""
+        reset_session_tracker()
+
+        async def fake_llm(*args, **kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="Hi", tool_calls=None),
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+            )
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            result = await complete(
+                user_message="Hi",
+                tools=[],
+                track_costs=False,
+            )
+
+        assert result.estimated_cost_usd is None
+        summary = get_session_summary()
+        assert summary["request_count"] == 0
+
+    async def test_complete_enable_eval_recording_false_skips_store(self):
+        """When enable_eval_recording=False, _record_eval_data is not called with a store."""
+        with patch("gluellm.api._record_eval_data", new_callable=AsyncMock) as mock_record:
+            async def fake_llm(*args, **kwargs):
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content="Hi", tool_calls=None),
+                        )
+                    ],
+                    usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+                )
+
+            with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+                await complete(
+                    user_message="Hi",
+                    tools=[],
+                    enable_eval_recording=False,
+                )
+
+            # All _record_eval_data calls should have eval_store=None when enable_eval_recording=False
+            for call in mock_record.call_args_list:
+                assert call.kwargs.get("eval_store") is None
 
 
 if __name__ == "__main__":

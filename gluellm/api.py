@@ -609,6 +609,7 @@ def _calculate_and_record_cost(
     model: str,
     tokens_used: dict[str, int] | None,
     correlation_id: str | None = None,
+    track_costs: bool | None = None,
 ) -> float | None:
     """Calculate cost from token usage and record to session tracker.
 
@@ -616,11 +617,16 @@ def _calculate_and_record_cost(
         model: Model identifier (e.g., "openai:gpt-4o-mini")
         tokens_used: Token usage dictionary with 'prompt', 'completion', 'total'
         correlation_id: Optional correlation ID for logging
+        track_costs: If False, skip recording and return None. If None, use settings.track_costs.
 
     Returns:
-        Estimated cost in USD, or None if cost cannot be calculated
+        Estimated cost in USD, or None if cost cannot be calculated or track_costs is False
     """
     if not tokens_used:
+        return None
+
+    effective_track = track_costs if track_costs is not None else settings.track_costs
+    if not effective_track:
         return None
 
     prompt_tokens = tokens_used.get("prompt", 0)
@@ -1448,13 +1454,14 @@ async def _llm_call_with_retry(
     model: str,
     tools: list[Callable] | None = None,
     response_format: type[BaseModel] | None = None,
+    stream: bool = False,
     request_timeout: float | None = None,
     connect_timeout: float | None = None,
     api_key: str | None = None,
     max_tokens: int | None = None,
     retry_config: RetryConfig | None = None,
     **model_kwargs: Any,
-) -> ChatCompletion:
+) -> ChatCompletion | AsyncIterator[ChatCompletion]:
     """Make an LLM call with configurable retry on transient errors.
 
     When retry_config.retry_enabled is False, performs a single attempt.
@@ -1491,6 +1498,7 @@ async def _llm_call_with_retry(
                 model=model,
                 tools=tools,
                 response_format=response_format,
+                stream=stream,
                 request_timeout=request_timeout,
                 connect_timeout=connect_timeout,
                 api_key=api_key,
@@ -1618,7 +1626,7 @@ class GlueLLM:
         max_tool_iterations: int | None = None,
         eval_store: EvalStore | None = None,
         guardrails: GuardrailsConfig | None = None,
-        condense_tool_messages: bool = False,
+        condense_tool_messages: bool | None = None,
         tool_mode: ToolMode = "standard",
         tool_route_model: str | None = None,
         max_tokens: int | None = None,
@@ -1656,7 +1664,9 @@ class GlueLLM:
         self.eval_store = eval_store or get_global_eval_store()
         self.guardrails = guardrails
         self.max_tokens = max_tokens
-        self.condense_tool_messages = condense_tool_messages
+        self.condense_tool_messages = (
+            condense_tool_messages if condense_tool_messages is not None else settings.default_condense_tool_messages
+        )
         self.tool_mode = tool_mode
         self.tool_route_model = tool_route_model or settings.tool_route_model
         self.max_tokens = max_tokens
@@ -1679,6 +1689,8 @@ class GlueLLM:
         tool_mode: ToolMode | None = None,
         retry_enabled: bool | None = None,
         retry_config: RetryConfig | None = None,
+        track_costs: bool | None = None,
+        enable_eval_recording: bool | None = None,
         **model_kwargs: Any,
     ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
@@ -1697,6 +1709,8 @@ class GlueLLM:
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
             retry_enabled: If False, disables retries for this call (shorthand for retry_config.retry_enabled=False).
             retry_config: Per-call retry configuration override (includes optional callback).
+            track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
+            enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
@@ -1734,6 +1748,7 @@ class GlueLLM:
                 if cfg is None
                 else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
             )
+        effective_eval_store = None if enable_eval_recording is False else self.eval_store
         effective_model_kwargs = {**self.model_kwargs, **model_kwargs}
 
         # Set correlation ID if provided
@@ -2183,6 +2198,7 @@ class GlueLLM:
                         model=model or self.model,
                         tokens_used=tokens_used,
                         correlation_id=correlation_id,
+                        track_costs=track_costs,
                     )
 
                     await emit_status(
@@ -2208,7 +2224,7 @@ class GlueLLM:
 
                     # Record evaluation data
                     await _record_eval_data(
-                        eval_store=self.eval_store,
+                        eval_store=effective_eval_store,
                         user_message=user_message,
                         system_prompt=system_prompt_content,
                         model=model or self.model,
@@ -2232,6 +2248,7 @@ class GlueLLM:
                     model=self.model,
                     tokens_used=tokens_used,
                     correlation_id=correlation_id,
+                    track_costs=track_costs,
                 )
 
                 await emit_status(
@@ -2257,7 +2274,7 @@ class GlueLLM:
 
                 # Record evaluation data
                 await _record_eval_data(
-                    eval_store=self.eval_store,
+                    eval_store=effective_eval_store,
                     user_message=user_message,
                     system_prompt=system_prompt_content,
                     model=model or self.model,
@@ -2275,7 +2292,7 @@ class GlueLLM:
             # Record evaluation data on error if not already recorded
             if error and not result:
                 await _record_eval_data(
-                    eval_store=self.eval_store,
+                    eval_store=effective_eval_store,
                     user_message=user_message,
                     system_prompt=system_prompt_content,
                     model=model or self.model,
@@ -2305,6 +2322,8 @@ class GlueLLM:
         tool_mode: ToolMode | None = None,
         retry_enabled: bool | None = None,
         retry_config: RetryConfig | None = None,
+        track_costs: bool | None = None,
+        enable_eval_recording: bool | None = None,
         **model_kwargs: Any,
     ) -> ExecutionResult:
         """Complete a request and return structured output.
@@ -2330,6 +2349,8 @@ class GlueLLM:
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
             retry_enabled: If False, disables retries for this call (shorthand for retry_config.retry_enabled=False).
             retry_config: Per-call retry configuration override (includes optional callback).
+            track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
+            enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
@@ -2367,6 +2388,7 @@ class GlueLLM:
                 if cfg is None
                 else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
             )
+        effective_eval_store = None if enable_eval_recording is False else self.eval_store
         effective_model_kwargs = {**self.model_kwargs, **model_kwargs}
 
         # Set correlation ID if provided
@@ -2445,6 +2467,7 @@ class GlueLLM:
                         model=model or self.model,
                         tokens_used=iteration_tokens,
                         correlation_id=correlation_id,
+                        track_costs=track_costs,
                     )
                     if iteration_cost is not None:
                         total_cost += iteration_cost
@@ -2934,7 +2957,7 @@ class GlueLLM:
 
                 # Record evaluation data
                 await _record_eval_data(
-                    eval_store=self.eval_store,
+                    eval_store=effective_eval_store,
                     user_message=user_message,
                     system_prompt=system_prompt_content,
                     model=model or self.model,
@@ -2952,7 +2975,7 @@ class GlueLLM:
             # Record evaluation data on error if not already recorded
             if error and not result:
                 await _record_eval_data(
-                    eval_store=self.eval_store,
+                    eval_store=effective_eval_store,
                     user_message=user_message,
                     system_prompt=system_prompt_content,
                     model=model or self.model,
@@ -2996,11 +3019,16 @@ class GlueLLM:
         guardrails: GuardrailsConfig | None = None,
         response_format: type[BaseModel] | None = None,
         on_status: OnStatusCallback = None,
+        correlation_id: str | None = None,
         request_timeout: float | None = None,
         connect_timeout: float | None = None,
         max_tokens: int | None = None,
         condense_tool_messages: bool | None = None,
         tool_mode: ToolMode | None = None,
+        retry_enabled: bool | None = None,
+        retry_config: RetryConfig | None = None,
+        track_costs: bool | None = None,
+        enable_eval_recording: bool | None = None,
     ) -> AsyncIterator[StreamingChunk]:
         """Stream completion with automatic tool execution.
 
@@ -3026,12 +3054,16 @@ class GlueLLM:
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             response_format: Optional Pydantic model; if set, the final chunk may include structured_output
             on_status: Optional callback for process status events
+            correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
             request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
             connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
             max_tokens: Maximum number of tokens to generate. Overrides instance-level max_tokens if provided.
             condense_tool_messages: Override the instance-level condense_tool_messages setting for this call.
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
-            max_tokens: Override the instance-level max_tokens for this call (None = provider default; not all models support this).
+            retry_enabled: If False, disables retries for this call (shorthand for retry_config.retry_enabled=False).
+            retry_config: Per-call retry configuration override (includes optional callback).
+            track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
+            enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
 
         Yields:
             StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)
@@ -3055,6 +3087,20 @@ class GlueLLM:
             tool_mode if tool_mode is not None else self.tool_mode
         )
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+        effective_retry_config = retry_config if retry_config is not None else self.retry_config
+        if retry_enabled is not None and not retry_enabled:
+            cfg = effective_retry_config
+            effective_retry_config = (
+                RetryConfig(retry_enabled=False)
+                if cfg is None
+                else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
+            )
+
+        # Set correlation ID if provided
+        if correlation_id:
+            set_correlation_id(correlation_id)
+        elif not get_correlation_id():
+            set_correlation_id()
 
         # Resolve active_tools for dynamic vs standard mode
         router_tool = None
@@ -3101,16 +3147,18 @@ class GlueLLM:
                     )
                     # Providers (e.g. OpenAI) do not support response_format with stream=True;
                     # we stream plain text and parse into response_format when the stream ends.
-                    async for chunk_response in await _safe_llm_call(
+                    stream_iter = await _llm_call_with_retry(
                         messages=messages,
-                        model=self.model,
+                        model=model or self.model,
                         tools=None,
                         response_format=None,
                         stream=True,
                         request_timeout=request_timeout,
                         connect_timeout=connect_timeout,
                         max_tokens=effective_max_tokens,
-                    ):
+                        retry_config=effective_retry_config,
+                    )
+                    async for chunk_response in stream_iter:
                         if hasattr(chunk_response, "choices") and chunk_response.choices:
                             delta = chunk_response.choices[0].delta
                             if hasattr(delta, "content") and delta.content:
@@ -3190,7 +3238,7 @@ class GlueLLM:
                     ),
                     on_status,
                 )
-                stream_iter = await _safe_llm_call(
+                stream_iter = await _llm_call_with_retry(
                     messages=messages,
                     model=model or self.model,
                     tools=active_tools if active_tools else None,
@@ -3199,6 +3247,7 @@ class GlueLLM:
                     request_timeout=request_timeout,
                     connect_timeout=connect_timeout,
                     max_tokens=effective_max_tokens,
+                    retry_config=effective_retry_config,
                 )
                 accumulated_content = ""
                 assistant_message = None
@@ -3655,10 +3704,13 @@ async def complete(
     guardrails: GuardrailsConfig | None = None,
     on_status: OnStatusCallback = None,
     max_tokens: int | None = None,
-    condense_tool_messages: bool = False,
+    condense_tool_messages: bool | None = None,
     tool_mode: ToolMode | None = None,
+    tool_route_model: str | None = None,
     retry_enabled: bool | None = None,
     retry_config: RetryConfig | None = None,
+    track_costs: bool | None = None,
+    enable_eval_recording: bool | None = None,
     **model_kwargs: Any,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
@@ -3677,10 +3729,13 @@ async def complete(
         on_status: Optional callback for process status events
         max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
         condense_tool_messages: If True, each completed tool-call round is condensed into a single
-            assistant message, reducing context size across multi-iteration tool loops. Defaults to False.
+            assistant message, reducing context size across multi-iteration tool loops. Defaults to settings.default_condense_tool_messages.
         tool_mode: "standard" (all tools in prompt) or "dynamic" (router discovers tools). Defaults to settings.default_tool_mode.
+        tool_route_model: Fast model for dynamic tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model).
         retry_enabled: If False, disables retries for this call.
         retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
+        track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
+        enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
     Returns:
@@ -3696,6 +3751,7 @@ async def complete(
         max_tokens=max_tokens,
         condense_tool_messages=condense_tool_messages,
         tool_mode=effective_tool_mode,
+        tool_route_model=tool_route_model,
         retry_config=retry_config,
         model_kwargs=model_kwargs if model_kwargs else None,
     )
@@ -3710,6 +3766,8 @@ async def complete(
         max_tokens=max_tokens,
         retry_enabled=retry_enabled,
         retry_config=retry_config,
+        track_costs=track_costs,
+        enable_eval_recording=enable_eval_recording,
         **model_kwargs,
     )
 
@@ -3728,10 +3786,13 @@ async def structured_complete(
     guardrails: GuardrailsConfig | None = None,
     on_status: OnStatusCallback = None,
     max_tokens: int | None = None,
-    condense_tool_messages: bool = False,
+    condense_tool_messages: bool | None = None,
     tool_mode: ToolMode | None = None,
+    tool_route_model: str | None = None,
     retry_enabled: bool | None = None,
     retry_config: RetryConfig | None = None,
+    track_costs: bool | None = None,
+    enable_eval_recording: bool | None = None,
     **model_kwargs: Any,
 ) -> ExecutionResult:
     """Quick structured completion with optional tool support.
@@ -3755,10 +3816,13 @@ async def structured_complete(
         on_status: Optional callback for process status events
         max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
         condense_tool_messages: If True, each completed tool-call round is condensed into a single
-            assistant message, reducing context size across multi-iteration tool loops. Defaults to False.
+            assistant message, reducing context size across multi-iteration tool loops. Defaults to settings.default_condense_tool_messages.
         tool_mode: "standard" (all tools in prompt) or "dynamic" (router discovers tools). Defaults to settings.default_tool_mode.
+        tool_route_model: Fast model for dynamic tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model).
         retry_enabled: If False, disables retries for this call.
         retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
+        track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
+        enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
     Returns:
@@ -3808,6 +3872,7 @@ async def structured_complete(
         max_tokens=max_tokens,
         condense_tool_messages=condense_tool_messages,
         tool_mode=effective_tool_mode,
+        tool_route_model=tool_route_model,
         retry_config=retry_config,
         model_kwargs=model_kwargs if model_kwargs else None,
     )
@@ -3824,6 +3889,8 @@ async def structured_complete(
         max_tokens=max_tokens,
         retry_enabled=retry_enabled,
         retry_config=retry_config,
+        track_costs=track_costs,
+        enable_eval_recording=enable_eval_recording,
         **model_kwargs,
     )
 
@@ -3884,14 +3951,20 @@ async def stream_complete(
     tools: list[Callable] | None = None,
     execute_tools: bool = True,
     max_tool_iterations: int | None = None,
+    correlation_id: str | None = None,
     guardrails: GuardrailsConfig | None = None,
     response_format: type[BaseModel] | None = None,
     on_status: OnStatusCallback = None,
     request_timeout: float | None = None,
     connect_timeout: float | None = None,
     max_tokens: int | None = None,
-    condense_tool_messages: bool = False,
+    condense_tool_messages: bool | None = None,
     tool_mode: ToolMode | None = None,
+    tool_route_model: str | None = None,
+    retry_enabled: bool | None = None,
+    retry_config: RetryConfig | None = None,
+    track_costs: bool | None = None,
+    enable_eval_recording: bool | None = None,
 ) -> AsyncIterator[StreamingChunk]:
     """Stream completion with automatic tool execution.
 
@@ -3914,14 +3987,19 @@ async def stream_complete(
         tools: List of callable functions to use as tools
         execute_tools: Whether to automatically execute tools
         max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
+        correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
         guardrails: Optional guardrails configuration
         response_format: Optional Pydantic model; final chunk may include structured_output
         on_status: Optional callback for process status events
         request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
         connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
         condense_tool_messages: If True, each completed tool-call round is condensed into a single
-            assistant message, reducing context size across multi-iteration tool loops. Defaults to False.
+            assistant message, reducing context size across multi-iteration tool loops. Defaults to settings.default_condense_tool_messages.
         tool_mode: "standard" (all tools in prompt) or "dynamic" (router discovers tools). Defaults to settings.default_tool_mode.
+        tool_route_model: Fast model for dynamic tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model).
+        retry_enabled: If False, disables retries for this call.
+        retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
+        track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this).
 
     Yields:
@@ -3943,15 +4021,22 @@ async def stream_complete(
         max_tokens=max_tokens,
         condense_tool_messages=condense_tool_messages,
         tool_mode=effective_tool_mode,
+        tool_route_model=tool_route_model,
+        retry_config=retry_config,
     )
     async for chunk in client.stream_complete(
         user_message,
         execute_tools=execute_tools,
         response_format=response_format,
         on_status=on_status,
+        correlation_id=correlation_id,
         request_timeout=request_timeout,
         connect_timeout=connect_timeout,
         tool_mode=tool_mode,
         max_tokens=max_tokens,
+        retry_enabled=retry_enabled,
+        retry_config=retry_config,
+        track_costs=track_costs,
+        enable_eval_recording=enable_eval_recording,
     ):
         yield chunk
