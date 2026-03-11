@@ -2118,9 +2118,9 @@ class TestPerCallConfigGaps:
 
     async def test_complete_tool_route_model_per_call_overrides_settings(self):
         """tool_route_model passed to free complete() is used for dynamic tool routing."""
-        from gluellm.tool_router import ROUTER_TOOL_NAME
+        from unittest.mock import patch
 
-        from unittest.mock import AsyncMock, patch
+        from gluellm.tool_router import ROUTER_TOOL_NAME
 
         captured_model = None
 
