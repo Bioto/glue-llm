@@ -1098,7 +1098,6 @@ async def _safe_llm_call(
     timeout: float | None = None,
     api_key: str | None = None,
     max_tokens: int | None = None,
-    max_tokens: int | None = None,
 ) -> ChatCompletion | AsyncIterator[ChatCompletion]:
     """Make an LLM call with error classification and tracing.
 
@@ -1463,7 +1462,6 @@ class GlueLLM:
         max_tool_iterations: int | None = None,
         eval_store: EvalStore | None = None,
         guardrails: GuardrailsConfig | None = None,
-        max_tokens: int | None = None,
         condense_tool_messages: bool = False,
         tool_mode: ToolMode = "standard",
         tool_route_model: str | None = None,
@@ -1514,7 +1512,6 @@ class GlueLLM:
         max_tokens: int | None = None,
         condense_tool_messages: bool | None = None,
         tool_mode: ToolMode | None = None,
-        max_tokens: int | None = None,
     ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
 
@@ -2118,7 +2115,6 @@ class GlueLLM:
         max_tokens: int | None = None,
         condense_tool_messages: bool | None = None,
         tool_mode: ToolMode | None = None,
-        max_tokens: int | None = None,
     ) -> ExecutionResult:
         """Complete a request and return structured output.
 
@@ -2789,7 +2785,6 @@ class GlueLLM:
         max_tokens: int | None = None,
         condense_tool_messages: bool | None = None,
         tool_mode: ToolMode | None = None,
-        max_tokens: int | None = None,
     ) -> AsyncIterator[StreamingChunk]:
         """Stream completion with automatic tool execution.
 
@@ -3434,7 +3429,6 @@ async def complete(
     max_tokens: int | None = None,
     condense_tool_messages: bool = False,
     tool_mode: ToolMode | None = None,
-    max_tokens: int | None = None,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
 
@@ -3468,7 +3462,6 @@ async def complete(
         max_tokens=max_tokens,
         condense_tool_messages=condense_tool_messages,
         tool_mode=effective_tool_mode,
-        max_tokens=max_tokens,
     )
     return await client.complete(
         user_message,
@@ -3496,7 +3489,6 @@ async def structured_complete(
     max_tokens: int | None = None,
     condense_tool_messages: bool = False,
     tool_mode: ToolMode | None = None,
-    max_tokens: int | None = None,
 ) -> ExecutionResult:
     """Quick structured completion with optional tool support.
 
@@ -3569,7 +3561,6 @@ async def structured_complete(
         max_tokens=max_tokens,
         condense_tool_messages=condense_tool_messages,
         tool_mode=effective_tool_mode,
-        max_tokens=max_tokens,
     )
     return await client.structured_complete(
         user_message,
@@ -3643,7 +3634,6 @@ async def stream_complete(
     max_tokens: int | None = None,
     condense_tool_messages: bool = False,
     tool_mode: ToolMode | None = None,
-    max_tokens: int | None = None,
 ) -> AsyncIterator[StreamingChunk]:
     """Stream completion with automatic tool execution.
 
@@ -3693,7 +3683,6 @@ async def stream_complete(
         max_tokens=max_tokens,
         condense_tool_messages=condense_tool_messages,
         tool_mode=effective_tool_mode,
-        max_tokens=max_tokens,
     )
     async for chunk in client.stream_complete(
         user_message,
