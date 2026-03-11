@@ -145,4 +145,5 @@ To customise retries (per-call, per-client, callback, backoff), see [RETRY.md](R
 ## See also
 
 - [RETRY.md](RETRY.md) — Retry configuration, `RetryConfig`, callbacks, backoff
+- [TIMEOUTS.md](TIMEOUTS.md) — `connect_timeout`, `request_timeout`, defaults, env vars
 - [`examples/error_handling_example.py`](../examples/error_handling_example.py) — Runnable error-handling examples

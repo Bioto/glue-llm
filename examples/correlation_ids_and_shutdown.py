@@ -56,7 +56,7 @@ async def example_timeouts():
     try:
         result = await complete(
             "What is the capital of France?",
-            timeout=5.0,  # 5 second timeout
+            request_timeout=5.0,  # 5 second timeout
         )
         print(f"Response: {result.final_response}")
     except TimeoutError:
@@ -88,7 +88,7 @@ async def example_graceful_shutdown():
             try:
                 result = await complete(
                     f"Count to {i + 1}",
-                    timeout=2.0,
+                    request_timeout=2.0,
                 )
                 print(f"  Response: {result.final_response[:50]}...")
             except Exception as e:
@@ -124,7 +124,7 @@ async def example_shutdown_context():
     async def process_with_context():
         with ShutdownContext():
             print("Processing request with ShutdownContext...")
-            result = await complete("What is Python?", timeout=5.0)
+            result = await complete("What is Python?", request_timeout=5.0)
             print(f"Response: {result.final_response[:50]}...")
             print(f"In-flight requests: {get_in_flight_count()}")
 

@@ -7,6 +7,8 @@ as the completion API.
 
 import asyncio
 import hashlib
+
+import httpx
 import logging
 import os
 import time
@@ -154,7 +156,8 @@ def _extract_token_usage(response: CreateEmbeddingResponse) -> dict[str, int] | 
 async def _safe_embedding_call(
     model: str,
     inputs: str | list[str],
-    timeout: float | None = None,
+    request_timeout: float | None = None,
+    connect_timeout: float | None = None,
     api_key: str | None = None,
     embedding_kwargs: dict[str, Any] | None = None,
 ) -> CreateEmbeddingResponse:
@@ -167,7 +170,8 @@ async def _safe_embedding_call(
     Args:
         model: Model identifier (e.g., "openai/text-embedding-3-small")
         inputs: Single text string or list of text strings to embed
-        timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
         api_key: Optional API key override (for key pool usage)
         embedding_kwargs: Optional dictionary of provider-specific arguments to pass to the embedding API
 
@@ -179,8 +183,20 @@ async def _safe_embedding_call(
         LLMError: Various LLM-related errors (rate limit, auth, etc.)
     """
     correlation_id = get_correlation_id()
-    timeout = timeout or settings.default_request_timeout
-    timeout = min(timeout, settings.max_request_timeout)  # Enforce max timeout
+    request_timeout = request_timeout or settings.default_request_timeout
+    request_timeout = min(request_timeout, settings.max_request_timeout)  # Enforce max timeout
+    connect_timeout = connect_timeout or settings.default_connect_timeout
+    connect_timeout = min(connect_timeout, settings.max_connect_timeout)  # Enforce max connect timeout
+
+    # Inject httpx.Timeout into embedding_kwargs if caller hasn't set it (provider SDKs accept this)
+    embedding_kwargs_dict = dict(embedding_kwargs) if embedding_kwargs else {}
+    if "timeout" not in embedding_kwargs_dict:
+        embedding_kwargs_dict["timeout"] = httpx.Timeout(
+            connect=connect_timeout,
+            read=request_timeout,
+            write=request_timeout,
+            pool=connect_timeout,
+        )
 
     # Apply rate limiting before making the call
     provider = _extract_provider_from_embedding_model(model)
@@ -193,7 +209,8 @@ async def _safe_embedding_call(
     input_count = len(inputs) if isinstance(inputs, list) else 1
     logger.debug(
         f"Making embedding call: model={model}, input_count={input_count}, "
-        f"timeout={timeout}s, correlation_id={correlation_id}"
+        f"request_timeout={request_timeout}s, connect_timeout={connect_timeout}s, "
+        f"correlation_id={correlation_id}"
     )
 
     try:
@@ -222,14 +239,13 @@ async def _safe_embedding_call(
             # Resolve cached provider (reuses the same AsyncOpenAI/httpx client
             # across calls, preventing 'Event loop is closed' on GC cleanup).
             embedding_provider, model_id = _provider_cache.get_provider(model, api_key)
-            embedding_kwargs_dict = embedding_kwargs or {}
             response = await asyncio.wait_for(
                 embedding_provider._aembedding(
                     model_id,
                     inputs,
                     **embedding_kwargs_dict,
                 ),
-                timeout=timeout,
+                timeout=request_timeout,
             )
 
             elapsed_time = time.time() - start_time
@@ -275,8 +291,8 @@ async def _safe_embedding_call(
     except TimeoutError:
         elapsed_time = time.time() - start_time
         logger.error(
-            f"Embedding call timed out after {elapsed_time:.3f}s (timeout={timeout}s): model={model}, "
-            f"correlation_id={correlation_id}",
+            f"Embedding call timed out after {elapsed_time:.3f}s (request_timeout={request_timeout}s): "
+            f"model={model}, correlation_id={correlation_id}",
             exc_info=True,
         )
         # Log timeout metrics
@@ -327,7 +343,8 @@ async def _safe_embedding_call(
 async def _embedding_call_with_retry(
     model: str,
     inputs: str | list[str],
-    timeout: float | None = None,
+    request_timeout: float | None = None,
+    connect_timeout: float | None = None,
     api_key: str | None = None,
     embedding_kwargs: dict[str, Any] | None = None,
 ) -> CreateEmbeddingResponse:
@@ -346,14 +363,16 @@ async def _embedding_call_with_retry(
     Args:
         model: Model identifier
         inputs: Single text string or list of text strings to embed
-        timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
         api_key: Optional API key override (for key pool usage)
         embedding_kwargs: Optional dictionary of provider-specific arguments to pass to the embedding API
     """
     return await _safe_embedding_call(
         model=model,
         inputs=inputs,
-        timeout=timeout,
+        request_timeout=request_timeout,
+        connect_timeout=connect_timeout,
         api_key=api_key,
         embedding_kwargs=embedding_kwargs,
     )
@@ -363,7 +382,8 @@ async def embed(
     texts: str | list[str],
     model: str | None = None,
     correlation_id: str | None = None,
-    timeout: float | None = None,
+    request_timeout: float | None = None,
+    connect_timeout: float | None = None,
     api_key: str | None = None,
     encoding_format: str | None = None,
     **kwargs: Any,
@@ -377,7 +397,8 @@ async def embed(
         texts: Single text string or list of text strings to embed
         model: Model identifier (defaults to settings.default_embedding_model)
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
-        timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
         api_key: Optional API key override (for key pool usage)
         encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
             Provider-specific. Note: If using "base64", the embedding format may differ from
@@ -448,7 +469,8 @@ async def embed(
             response = await _embedding_call_with_retry(
                 model=model,
                 inputs=texts,
-                timeout=timeout,
+                request_timeout=request_timeout,
+                connect_timeout=connect_timeout,
                 api_key=api_key,
                 embedding_kwargs=embedding_kwargs if embedding_kwargs else None,
             )

@@ -154,7 +154,7 @@ def test_timeout(timeout: float) -> None:
     async def run_test():
         return await complete(
             "Write a very short poem about time.",
-            timeout=timeout,
+            request_timeout=timeout,
         )
 
     try:

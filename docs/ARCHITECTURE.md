@@ -384,6 +384,8 @@ classDiagram
         Timeout Settings
         +default_request_timeout: float
         +max_request_timeout: float
+        +default_connect_timeout: float
+        +max_connect_timeout: float
 
         Rate Limiting
         +rate_limit_requests_per_second: int
@@ -451,7 +453,8 @@ flowchart TD
 ## Performance Considerations
 
 - **Rate Limiting:** Token bucket algorithm with configurable burst
-- **Connection Pooling:** Handled by any-llm SDK
+- **Connection Pooling:** Handled by any-llm SDK; providers are cached so the same httpx client and connection pool are reused across calls
+- **Dual Timeouts:** `connect_timeout` is enforced at the httpx transport layer; `request_timeout` is an `asyncio.wait_for` guard over the full coroutine. Both default to configurable settings and are clamped to per-setting maximums. See [`docs/TIMEOUTS.md`](TIMEOUTS.md).
 - **Retry Logic:** Exponential backoff with jitter. For per-call and per-client customisation (`RetryConfig`, `retry_on`, callback), see [`docs/RETRY.md`](RETRY.md).
 - **Parallel Execution:** Workflows use `asyncio.gather()` for parallel agent execution
 - **Token Tracking:** Minimal overhead, optional MLflow integration

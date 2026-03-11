@@ -211,7 +211,7 @@ class BatchProcessor:
                         user_message=request.user_message,
                         execute_tools=request.execute_tools,
                         correlation_id=request_id,
-                        timeout=request.timeout,
+                        request_timeout=request.timeout,
                         api_key=api_key,
                     )
 

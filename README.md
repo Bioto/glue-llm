@@ -217,6 +217,48 @@ result = await complete(
 
 `on_status` is supported on `complete()`, `stream_complete()`, and `structured_complete()` (and the `GlueLLM` client methods).
 
+### Timeouts
+
+Two independent timeouts control how long GlueLLM waits for the network:
+
+| Parameter | What it governs | Default |
+|-----------|-----------------|---------|
+| `connect_timeout` | Time to establish the TCP connection | 10s |
+| `request_timeout` | Total time for the full LLM response | 60s |
+
+Both can be set per-call or left at their defaults (configurable via environment variables):
+
+```python
+from gluellm import complete
+
+# Set both per-call
+result = await complete(
+    "Write a short story.",
+    request_timeout=120.0,   # allow 2 minutes for a long generation
+    connect_timeout=5.0,     # fail fast if we can't reach the API
+)
+
+# Or just one — the other uses its default
+result = await complete("Hello", request_timeout=30.0)
+```
+
+On the `GlueLLM` client, set them per method call:
+
+```python
+from gluellm import GlueLLM
+
+client = GlueLLM()
+result = await client.complete(
+    "Summarise this document...",
+    request_timeout=180.0,
+    connect_timeout=10.0,
+)
+```
+
+A connection timeout raises `APIConnectionError`; a request timeout raises `APITimeoutError` (subclass of `APIConnectionError`). Both are retried by default.
+
+For full details and environment variable configuration, see [`docs/TIMEOUTS.md`](docs/TIMEOUTS.md).
+
 ### Retry configuration
 
 Retries are enabled by default (exponential backoff for rate limits and connection errors). You can customise or disable them per client or per call with `retry_config` and `retry_enabled`:
@@ -272,7 +314,7 @@ async def main():
 asyncio.run(main())
 ```
 
-## Configuration (the boring part)
+## Configuration
 
 Providers are configured via environment variables:
 
@@ -287,6 +329,20 @@ Models use `provider:model` strings:
 - `openai:gpt-4o-mini`
 - `anthropic:claude-3-5-sonnet-20241022`
 
+Key GlueLLM-specific env vars:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GLUELLM_DEFAULT_MODEL` | `openai:gpt-4o-mini` | Default model |
+| `GLUELLM_DEFAULT_REQUEST_TIMEOUT` | `60.0` | Request timeout (seconds) |
+| `GLUELLM_MAX_REQUEST_TIMEOUT` | `300.0` | Maximum allowed request timeout |
+| `GLUELLM_DEFAULT_CONNECT_TIMEOUT` | `10.0` | Connection timeout (seconds) |
+| `GLUELLM_MAX_CONNECT_TIMEOUT` | `60.0` | Maximum allowed connection timeout |
+| `GLUELLM_RETRY_MAX_ATTEMPTS` | `3` | Max retry attempts |
+| `GLUELLM_RETRY_MIN_WAIT` | `2` | Min backoff seconds |
+| `GLUELLM_RETRY_MAX_WAIT` | `30` | Max backoff seconds |
+| `GLUELLM_LOG_LEVEL` | `INFO` | Console log level |
+
 ## Docs (when you want the details)
 
 GlueLLM keeps deeper docs in `docs/` so the README stays readable:
@@ -295,6 +351,7 @@ GlueLLM keeps deeper docs in `docs/` so the README stays readable:
 - [`docs/BATCH_PROCESSING.md`](docs/BATCH_PROCESSING.md)
 - [`docs/RETRY.md`](docs/RETRY.md) — retry configuration, `RetryConfig`, callbacks
 - [`docs/ERROR_HANDLING.md`](docs/ERROR_HANDLING.md) — exception hierarchy, classification, handling patterns
+- [`docs/TIMEOUTS.md`](docs/TIMEOUTS.md) — `connect_timeout`, `request_timeout`, defaults, env vars
 - [`docs/CONNECTION_POOLING.md`](docs/CONNECTION_POOLING.md)
 - [`docs/WORKFLOW_PATTERNS.md`](docs/WORKFLOW_PATTERNS.md)
 - [`docs/CONTEXT_OPTIMIZATION.md`](docs/CONTEXT_OPTIMIZATION.md) — condensing + dynamic routing deep-dive

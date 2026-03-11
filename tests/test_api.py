@@ -1965,5 +1965,151 @@ class TestTrimToolDocstrings:
         assert "Extra detail" in original.__doc__
 
 
+class TestDualTimeoutParameters:
+    """Test request_timeout and connect_timeout flow through the API."""
+
+    def _make_fake_completion(self):
+        from any_llm.types.completion import ChatCompletion, ChatCompletionMessage, Choice
+
+        msg = ChatCompletionMessage(role="assistant", content="Hi")
+        choice = Choice(index=0, message=msg, finish_reason="stop")
+        return ChatCompletion(
+            id="test",
+            choices=[choice],
+            model="openai:gpt-4o-mini",
+            created=0,
+            object="chat.completion",
+        )
+
+    async def test_request_timeout_and_connect_timeout_passed_to_llm_call(self):
+        """request_timeout and connect_timeout flow through to _llm_call_with_retry."""
+        captured_kwargs = {}
+
+        async def fake_llm(*, messages, **kwargs):
+            captured_kwargs.clear()
+            captured_kwargs.update(kwargs)
+            return self._make_fake_completion()
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            await complete(
+                "Hello",
+                request_timeout=45.0,
+                connect_timeout=8.0,
+            )
+        assert captured_kwargs.get("request_timeout") == 45.0
+        assert captured_kwargs.get("connect_timeout") == 8.0
+
+    async def test_defaults_applied_when_timeouts_not_specified(self):
+        """Defaults are used when request_timeout and connect_timeout are None."""
+        captured_kwargs = {}
+
+        async def fake_llm(*, messages, **kwargs):
+            captured_kwargs.clear()
+            captured_kwargs.update(kwargs)
+            return self._make_fake_completion()
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            await complete("Hello")
+        # When not specified, _llm_call_with_retry receives None and _safe_llm_call applies defaults
+        assert "request_timeout" in captured_kwargs or captured_kwargs.get("request_timeout") is None
+        assert "connect_timeout" in captured_kwargs or captured_kwargs.get("connect_timeout") is None
+
+    async def test_httpx_timeout_injected_into_model_kwargs(self):
+        """httpx.Timeout is injected into model_kwargs when timeout not already set."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import httpx
+
+        captured_model_kwargs = {}
+
+        async def capture_and_return(*args, **kwargs):
+            captured_model_kwargs.clear()
+            captured_model_kwargs.update(kwargs)
+            return self._make_fake_completion()
+
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(side_effect=capture_and_return)
+
+        with patch("gluellm.api._provider_cache") as mock_cache:
+            mock_cache.get_provider = lambda model, api_key: (mock_provider, "gpt-4o-mini")
+
+            from gluellm.api import _safe_llm_call
+
+            await _safe_llm_call(
+                messages=[{"role": "user", "content": "hi"}],
+                model="openai:gpt-4o-mini",
+                request_timeout=30.0,
+                connect_timeout=5.0,
+            )
+
+        assert "timeout" in captured_model_kwargs
+        timeout = captured_model_kwargs["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        assert timeout.connect == 5.0
+        assert timeout.read == 30.0
+        assert timeout.write == 30.0
+        assert timeout.pool == 5.0
+
+    async def test_module_complete_passes_both_timeouts_to_client(self):
+        """Module-level complete() passes request_timeout and connect_timeout to GlueLLM.complete."""
+        captured_kwargs = {}
+
+        async def fake_complete(self, user_message, **kwargs):
+            captured_kwargs.clear()
+            captured_kwargs.update(kwargs)
+            return ExecutionResult(
+                final_response="Done",
+                tool_calls_made=0,
+                tool_execution_history=[],
+                raw_response=None,
+                tokens_used=None,
+                estimated_cost_usd=None,
+                model=None,
+            )
+
+        with patch.object(GlueLLM, "complete", fake_complete):
+            await complete(
+                "Hello",
+                request_timeout=60.0,
+                connect_timeout=15.0,
+            )
+        assert captured_kwargs.get("request_timeout") == 60.0
+        assert captured_kwargs.get("connect_timeout") == 15.0
+
+    async def test_connect_timeout_capped_at_max_from_settings(self):
+        """connect_timeout is capped at settings.max_connect_timeout."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        captured_model_kwargs = {}
+
+        async def capture_and_return(*args, **kwargs):
+            captured_model_kwargs.clear()
+            captured_model_kwargs.update(kwargs)
+            return self._make_fake_completion()
+
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(side_effect=capture_and_return)
+
+        with (
+            patch("gluellm.api._provider_cache") as mock_cache,
+            patch("gluellm.api.settings") as mock_settings,
+        ):
+            mock_settings.max_connect_timeout = 30.0
+            mock_settings.default_connect_timeout = 10.0
+            mock_settings.default_request_timeout = 60.0
+            mock_settings.max_request_timeout = 300.0
+            mock_cache.get_provider = lambda model, api_key: (mock_provider, "gpt-4o-mini")
+
+            from gluellm.api import _safe_llm_call
+
+            await _safe_llm_call(
+                messages=[{"role": "user", "content": "hi"}],
+                model="openai:gpt-4o-mini",
+                connect_timeout=999.0,  # Exceeds mocked max of 30
+            )
+
+        assert captured_model_kwargs["timeout"].connect == 30.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

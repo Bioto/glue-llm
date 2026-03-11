@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gluellm"
-version = "1.1.21"
+version = "1.1.22"
 description = "A high-level Python SDK for Large Language Models with automatic tool execution, structured output support, multi-agent workflows, and evaluation data recording"
 readme = "README.md"
 license = {text = "MIT"}
@@ -53,6 +53,7 @@ dependencies = [
     "tenacity>=9.0.0",
     "throttled-py>=3.1.0",
     "aiofiles>=25.1.0",
+    "httpx>=0.28.0",
 ]
 
 [project.urls]

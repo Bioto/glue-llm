@@ -50,6 +50,8 @@ Example:
 
 import asyncio
 import hashlib
+
+import httpx
 import importlib
 import json
 import logging
@@ -1208,7 +1210,8 @@ async def _safe_llm_call(
     tools: list[Callable] | None = None,
     response_format: type[BaseModel] | None = None,
     stream: bool = False,
-    timeout: float | None = None,
+    request_timeout: float | None = None,
+    connect_timeout: float | None = None,
     api_key: str | None = None,
     max_tokens: int | None = None,
     **model_kwargs: Any,
@@ -1225,7 +1228,8 @@ async def _safe_llm_call(
         tools: Optional list of tools
         response_format: Optional Pydantic model for structured output
         stream: Whether to stream the response
-        timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
         api_key: Optional API key override (for key pool usage)
         max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
         **model_kwargs: Additional parameters passed to provider.acompletion (e.g. temperature, top_p).
@@ -1237,9 +1241,20 @@ async def _safe_llm_call(
         asyncio.TimeoutError: If the request exceeds the timeout
     """
     correlation_id = get_correlation_id()
-    timeout = timeout or settings.default_request_timeout
-    timeout = min(timeout, settings.max_request_timeout)  # Enforce max timeout
+    request_timeout = request_timeout or settings.default_request_timeout
+    request_timeout = min(request_timeout, settings.max_request_timeout)  # Enforce max timeout
+    connect_timeout = connect_timeout or settings.default_connect_timeout
+    connect_timeout = min(connect_timeout, settings.max_connect_timeout)  # Enforce max connect timeout
     _patch_any_llm_openai_converter()
+
+    # Inject httpx.Timeout into model_kwargs if caller hasn't set it (provider SDKs accept this)
+    if "timeout" not in model_kwargs:
+        model_kwargs["timeout"] = httpx.Timeout(
+            connect=connect_timeout,
+            read=request_timeout,
+            write=request_timeout,
+            pool=connect_timeout,
+        )
 
     # Apply rate limiting before making the call
     provider = extract_provider_from_model(model)
@@ -1286,7 +1301,8 @@ async def _safe_llm_call(
     logger.debug(
         f"Making LLM call: model={model}, stream={stream}, has_tools={bool(tools)}, "
         f"response_format={response_format.__name__ if response_format else None}, "
-        f"message_count={len(messages)}, timeout={timeout}s, correlation_id={correlation_id}"
+        f"message_count={len(messages)}, request_timeout={request_timeout}s, "
+        f"connect_timeout={connect_timeout}s, correlation_id={correlation_id}"
     )
 
     try:
@@ -1320,7 +1336,7 @@ async def _safe_llm_call(
                     max_tokens=max_tokens,
                     **model_kwargs,
                 ),
-                timeout=timeout,
+                timeout=request_timeout,
             )
 
             elapsed_time = time.time() - start_time
@@ -1387,7 +1403,7 @@ async def _safe_llm_call(
     except TimeoutError:
         elapsed_time = time.time() - start_time
         logger.error(
-            f"LLM call timed out after {elapsed_time:.3f}s (timeout={timeout}s): model={model}, "
+            f"LLM call timed out after {elapsed_time:.3f}s (request_timeout={request_timeout}s): model={model}, "
             f"correlation_id={correlation_id}",
             exc_info=True,
         )
@@ -1432,7 +1448,8 @@ async def _llm_call_with_retry(
     model: str,
     tools: list[Callable] | None = None,
     response_format: type[BaseModel] | None = None,
-    timeout: float | None = None,
+    request_timeout: float | None = None,
+    connect_timeout: float | None = None,
     api_key: str | None = None,
     max_tokens: int | None = None,
     retry_config: RetryConfig | None = None,
@@ -1449,7 +1466,8 @@ async def _llm_call_with_retry(
         model: Model identifier
         tools: Optional list of tools
         response_format: Optional Pydantic model for structured output
-        timeout: Request timeout in seconds
+        request_timeout: Request timeout in seconds
+        connect_timeout: Connection timeout in seconds
         api_key: Optional API key override
         max_tokens: Maximum number of tokens to generate
         retry_config: Retry configuration including optional callback
@@ -1473,7 +1491,8 @@ async def _llm_call_with_retry(
                 model=model,
                 tools=tools,
                 response_format=response_format,
-                timeout=timeout,
+                request_timeout=request_timeout,
+                connect_timeout=connect_timeout,
                 api_key=api_key,
                 max_tokens=final_max_tokens,
                 **kwargs,
@@ -1650,7 +1669,8 @@ class GlueLLM:
         model: str | None = None,
         execute_tools: bool = True,
         correlation_id: str | None = None,
-        timeout: float | None = None,
+        request_timeout: float | None = None,
+        connect_timeout: float | None = None,
         api_key: str | None = None,
         guardrails: GuardrailsConfig | None = None,
         on_status: OnStatusCallback = None,
@@ -1667,7 +1687,8 @@ class GlueLLM:
             user_message: The user's message/request
             execute_tools: Whether to automatically execute tools and loop
             correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
-            timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+            request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+            connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
             api_key: Optional API key override (for key pool usage)
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             on_status: Optional callback for process status events (LLM call start/end, tool start/end, complete)
@@ -1786,11 +1807,12 @@ class GlueLLM:
                             messages=messages,
                             model=model or self.model,
                             tools=active_tools if active_tools else None,
-                            timeout=timeout,
+                            request_timeout=request_timeout,
+                            connect_timeout=connect_timeout,
                             api_key=api_key,
                             max_tokens=effective_max_tokens,
                             retry_config=effective_retry_config,
-                            
+
                             **effective_model_kwargs,
                         )
                     except LLMError as e:
@@ -1841,7 +1863,7 @@ class GlueLLM:
                                 self.tools,
                                 model=self.tool_route_model,
                                 api_key=api_key,
-                                timeout=timeout,
+                                timeout=request_timeout,
                             )
                             active_tools = matched
                             await emit_status(
@@ -2120,7 +2142,8 @@ class GlueLLM:
                                         messages=messages,
                                         model=model or self.model,
                                         tools=None,  # No tools on retry
-                                        timeout=timeout,
+                                        request_timeout=request_timeout,
+                                        connect_timeout=connect_timeout,
                                         api_key=api_key,
                                         max_tokens=effective_max_tokens,
                                         retry_config=effective_retry_config,
@@ -2272,7 +2295,8 @@ class GlueLLM:
         tools: list[Callable] | None = None,
         execute_tools: bool = True,
         correlation_id: str | None = None,
-        timeout: float | None = None,
+        request_timeout: float | None = None,
+        connect_timeout: float | None = None,
         api_key: str | None = None,
         guardrails: GuardrailsConfig | None = None,
         on_status: OnStatusCallback = None,
@@ -2296,7 +2320,8 @@ class GlueLLM:
             tools: List of callable functions to use as tools (defaults to instance tools)
             execute_tools: Whether to automatically execute tools and loop
             correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
-            timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+            request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+            connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
             api_key: Optional API key override (for key pool usage)
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             on_status: Optional callback for process status events
@@ -2450,7 +2475,8 @@ class GlueLLM:
                                 model=model or self.model,
                                 tools=active_tools,
                                 # No response_format during tool phase
-                                timeout=timeout,
+                                request_timeout=request_timeout,
+                                connect_timeout=connect_timeout,
                                 api_key=api_key,
                                 max_tokens=effective_max_tokens,
                                 retry_config=effective_retry_config,
@@ -2497,7 +2523,7 @@ class GlueLLM:
                                     tools_to_use,
                                     model=self.tool_route_model,
                                     api_key=api_key,
-                                    timeout=timeout,
+                                    timeout=request_timeout,
                                 )
                                 active_tools = matched
                                 await emit_status(
@@ -2739,7 +2765,8 @@ class GlueLLM:
                         model=model or self.model,
                         response_format=response_format,
                         # No tools during structured output phase
-                        timeout=timeout,
+                        request_timeout=request_timeout,
+                        connect_timeout=connect_timeout,
                         api_key=api_key,
                         max_tokens=effective_max_tokens,
                         retry_config=effective_retry_config,
@@ -2825,7 +2852,8 @@ class GlueLLM:
                                     messages=messages,
                                     model=model or self.model,
                                     response_format=response_format,  # Still request structured output
-                                    timeout=timeout,
+                                    request_timeout=request_timeout,
+                                    connect_timeout=connect_timeout,
                                     api_key=api_key,
                                     max_tokens=effective_max_tokens,
                                     retry_config=effective_retry_config,
@@ -2968,6 +2996,8 @@ class GlueLLM:
         guardrails: GuardrailsConfig | None = None,
         response_format: type[BaseModel] | None = None,
         on_status: OnStatusCallback = None,
+        request_timeout: float | None = None,
+        connect_timeout: float | None = None,
         max_tokens: int | None = None,
         condense_tool_messages: bool | None = None,
         tool_mode: ToolMode | None = None,
@@ -2996,6 +3026,8 @@ class GlueLLM:
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             response_format: Optional Pydantic model; if set, the final chunk may include structured_output
             on_status: Optional callback for process status events
+            request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+            connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
             max_tokens: Maximum number of tokens to generate. Overrides instance-level max_tokens if provided.
             condense_tool_messages: Override the instance-level condense_tool_messages setting for this call.
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
@@ -3075,6 +3107,8 @@ class GlueLLM:
                         tools=None,
                         response_format=None,
                         stream=True,
+                        request_timeout=request_timeout,
+                        connect_timeout=connect_timeout,
                         max_tokens=effective_max_tokens,
                     ):
                         if hasattr(chunk_response, "choices") and chunk_response.choices:
@@ -3162,6 +3196,8 @@ class GlueLLM:
                     tools=active_tools if active_tools else None,
                     response_format=None,
                     stream=True,
+                    request_timeout=request_timeout,
+                    connect_timeout=connect_timeout,
                     max_tokens=effective_max_tokens,
                 )
                 accumulated_content = ""
@@ -3224,7 +3260,7 @@ class GlueLLM:
                         self.tools,
                         model=self.tool_route_model,
                         api_key=None,
-                        timeout=None,
+                        timeout=request_timeout,
                     )
                     active_tools = matched
                     await emit_status(
@@ -3468,6 +3504,8 @@ class GlueLLM:
                                 messages=messages,
                                 model=model or self.model,
                                 tools=None,  # No tools on retry
+                                request_timeout=request_timeout,
+                                connect_timeout=connect_timeout,
                                 max_tokens=effective_max_tokens,
                             )
                         except LLMError as llm_error:
@@ -3539,7 +3577,8 @@ class GlueLLM:
         texts: str | list[str],
         model: str | None = None,
         correlation_id: str | None = None,
-        timeout: float | None = None,
+        request_timeout: float | None = None,
+        connect_timeout: float | None = None,
         api_key: str | None = None,
         encoding_format: str | None = None,
         **kwargs: Any,
@@ -3550,7 +3589,8 @@ class GlueLLM:
             texts: Single text string or list of text strings to embed
             model: Model identifier (defaults to self.embedding_model)
             correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
-            timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+            request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+            connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
             api_key: Optional API key override (for key pool usage)
             encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
                 Provider-specific. Note: If using "base64", the embedding format may differ from
@@ -3591,7 +3631,8 @@ class GlueLLM:
             texts=texts,
             model=model,
             correlation_id=correlation_id,
-            timeout=timeout,
+            request_timeout=request_timeout,
+            connect_timeout=connect_timeout,
             api_key=api_key,
             encoding_format=encoding_format,
             **kwargs,
@@ -3609,7 +3650,8 @@ async def complete(
     execute_tools: bool = True,
     max_tool_iterations: int | None = None,
     correlation_id: str | None = None,
-    timeout: float | None = None,
+    request_timeout: float | None = None,
+    connect_timeout: float | None = None,
     guardrails: GuardrailsConfig | None = None,
     on_status: OnStatusCallback = None,
     max_tokens: int | None = None,
@@ -3629,7 +3671,8 @@ async def complete(
         execute_tools: Whether to automatically execute tools
         max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
-        timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
         guardrails: Optional guardrails configuration
         on_status: Optional callback for process status events
         max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
@@ -3660,7 +3703,8 @@ async def complete(
         user_message,
         execute_tools=execute_tools,
         correlation_id=correlation_id,
-        timeout=timeout,
+        request_timeout=request_timeout,
+        connect_timeout=connect_timeout,
         on_status=on_status,
         tool_mode=tool_mode,
         max_tokens=max_tokens,
@@ -3679,7 +3723,8 @@ async def structured_complete(
     execute_tools: bool = True,
     max_tool_iterations: int | None = None,
     correlation_id: str | None = None,
-    timeout: float | None = None,
+    request_timeout: float | None = None,
+    connect_timeout: float | None = None,
     guardrails: GuardrailsConfig | None = None,
     on_status: OnStatusCallback = None,
     max_tokens: int | None = None,
@@ -3704,7 +3749,8 @@ async def structured_complete(
         execute_tools: Whether to automatically execute tools and loop
         max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
-        timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
         guardrails: Optional guardrails configuration
         on_status: Optional callback for process status events
         max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
@@ -3771,7 +3817,8 @@ async def structured_complete(
         tools=tools,
         execute_tools=execute_tools,
         correlation_id=correlation_id,
-        timeout=timeout,
+        request_timeout=request_timeout,
+        connect_timeout=connect_timeout,
         on_status=on_status,
         tool_mode=tool_mode,
         max_tokens=max_tokens,
@@ -3785,7 +3832,8 @@ async def embed(
     texts: str | list[str],
     model: str | None = None,
     correlation_id: str | None = None,
-    timeout: float | None = None,
+    request_timeout: float | None = None,
+    connect_timeout: float | None = None,
     encoding_format: str | None = None,
     **kwargs: Any,
 ) -> "EmbeddingResult":
@@ -3795,7 +3843,8 @@ async def embed(
         texts: Single text string or list of text strings to embed
         model: Model identifier (defaults to settings.default_embedding_model)
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
-        timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
         encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
             Provider-specific. Note: If using "base64", the embedding format may differ from
             the standard list[float] format.
@@ -3821,7 +3870,8 @@ async def embed(
         texts=texts,
         model=model,
         correlation_id=correlation_id,
-        timeout=timeout,
+        request_timeout=request_timeout,
+        connect_timeout=connect_timeout,
         encoding_format=encoding_format,
         **kwargs,
     )
@@ -3837,6 +3887,8 @@ async def stream_complete(
     guardrails: GuardrailsConfig | None = None,
     response_format: type[BaseModel] | None = None,
     on_status: OnStatusCallback = None,
+    request_timeout: float | None = None,
+    connect_timeout: float | None = None,
     max_tokens: int | None = None,
     condense_tool_messages: bool = False,
     tool_mode: ToolMode | None = None,
@@ -3865,6 +3917,8 @@ async def stream_complete(
         guardrails: Optional guardrails configuration
         response_format: Optional Pydantic model; final chunk may include structured_output
         on_status: Optional callback for process status events
+        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
+        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
         condense_tool_messages: If True, each completed tool-call round is condensed into a single
             assistant message, reducing context size across multi-iteration tool loops. Defaults to False.
         tool_mode: "standard" (all tools in prompt) or "dynamic" (router discovers tools). Defaults to settings.default_tool_mode.
@@ -3895,6 +3949,8 @@ async def stream_complete(
         execute_tools=execute_tools,
         response_format=response_format,
         on_status=on_status,
+        request_timeout=request_timeout,
+        connect_timeout=connect_timeout,
         tool_mode=tool_mode,
         max_tokens=max_tokens,
     ):
