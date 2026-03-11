@@ -66,6 +66,7 @@ class GlueLLMSettings(BaseSettings):
     max_tool_iterations: Annotated[int, Field(gt=0)] = 10
     default_tool_mode: Literal["standard", "dynamic"] = "standard"
     tool_route_model: str = "openai:gpt-4o-mini"
+    default_condense_tool_messages: bool = False
 
     # Retry settings
     retry_max_attempts: Annotated[int, Field(gt=0)] = 3
