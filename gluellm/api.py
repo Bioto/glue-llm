@@ -50,12 +50,12 @@ Example:
 
 import asyncio
 import hashlib
+import importlib
 import json
 import logging
 import os
 import threading
 import time
-import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -156,6 +156,68 @@ logger = get_logger(__name__)
 # This allows _record_eval_data to automatically capture agent information
 # when AgentExecutor is used, without requiring API changes
 _current_agent: ContextVar["Agent | None"] = ContextVar("_current_agent", default=None)
+_any_llm_openai_patch_applied = False
+
+
+def _convert_openai_chat_completion_without_parsed(response: Any) -> ChatCompletion:
+    """Convert OpenAI chat completion to any_llm ChatCompletion without serializing `message.parsed`.
+
+    OpenAI's parsed completion objects may carry a user model instance in
+    `choices[*].message.parsed`. Serializing that field through a base schema that
+    expects `None` triggers Pydantic serializer warnings. We exclude it at source.
+    """
+    openai_utils = importlib.import_module("any_llm.providers.openai.utils")
+    normalize_openai_dict_response = getattr(openai_utils, "_normalize_openai_dict_response")
+
+    if getattr(response, "object", None) != "chat.completion":
+        logger.warning(
+            "API returned an unexpected object type: %s. Setting to 'chat.completion'.",
+            getattr(response, "object", None),
+        )
+        response.object = "chat.completion"
+    if not isinstance(getattr(response, "created", None), int):
+        logger.warning(
+            "API returned an unexpected created type: %s. Setting to int.",
+            type(getattr(response, "created", None)),
+        )
+        response.created = int(getattr(response, "created", 0))
+
+    parsed_by_index: dict[int, Any] = {}
+    for i, choice in enumerate(getattr(response, "choices", []) or []):
+        message = getattr(choice, "message", None)
+        parsed_value = getattr(message, "parsed", None)
+        if parsed_value is not None:
+            parsed_by_index[i] = parsed_value
+
+    normalized = normalize_openai_dict_response(
+        response.model_dump(exclude={"choices": {"__all__": {"message": {"parsed"}}}})
+    )
+    converted = ChatCompletion.model_validate(normalized)
+
+    # Preserve runtime parsed objects for structured output consumers while keeping
+    # serialization warning-free by excluding parsed from model_dump conversion.
+    for i, parsed_value in parsed_by_index.items():
+        if i < len(converted.choices):
+            converted.choices[i].message.parsed = parsed_value
+
+    return converted
+
+
+def _patch_any_llm_openai_converter() -> None:
+    """Patch any_llm OpenAI conversion to avoid serializing `message.parsed`."""
+    global _any_llm_openai_patch_applied
+    if _any_llm_openai_patch_applied:
+        return
+
+    try:
+        openai_base = importlib.import_module("any_llm.providers.openai.base")
+        openai_utils = importlib.import_module("any_llm.providers.openai.utils")
+    except Exception:
+        return
+
+    openai_base._convert_chat_completion = _convert_openai_chat_completion_without_parsed
+    openai_utils._convert_chat_completion = _convert_openai_chat_completion_without_parsed
+    _any_llm_openai_patch_applied = True
 
 # ============================================================================
 # Constants
@@ -1177,6 +1239,7 @@ async def _safe_llm_call(
     correlation_id = get_correlation_id()
     timeout = timeout or settings.default_request_timeout
     timeout = min(timeout, settings.max_request_timeout)  # Enforce max timeout
+    _patch_any_llm_openai_converter()
 
     # Apply rate limiting before making the call
     provider = extract_provider_from_model(model)
@@ -1247,35 +1310,18 @@ async def _safe_llm_call(
             # Make LLM call with timeout.
             # Use normalized model class if available, otherwise fall back to original Pydantic model.
             # The normalized class is a subclass, so response parsing still works correctly.
-            # Suppress PydanticSerializationUnexpectedValue warnings emitted by
-            # any_llm when it calls response.model_dump() on a ParsedChatCompletion
-            # whose `message.parsed` field holds a structured-output model instance
-            # at runtime but is typed as None in the base schema. The warning is
-            # benign — serialization still succeeds — but would surface to callers.
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore",
-                    message=".*PydanticSerializationUnexpectedValue.*",
-                    category=UserWarning,
-                )
-                warnings.filterwarnings(
-                    "ignore",
-                    message=r"(?s).*Pydantic serializer warnings:.*PydanticSerializationUnexpectedValue.*field_name='parsed'.*",
-                    category=UserWarning,
-                    module=r"pydantic\.main",
-                )
-                response = await asyncio.wait_for(
-                    provider.acompletion(
-                        model=model_id,
-                        messages=messages,
-                        tools=tools if tools else None,
-                        response_format=normalized_response_format if normalized_response_format else response_format,
-                        stream=stream,
-                        max_tokens=max_tokens,
-                        **model_kwargs,
-                    ),
-                    timeout=timeout,
-                )
+            response = await asyncio.wait_for(
+                provider.acompletion(
+                    model=model_id,
+                    messages=messages,
+                    tools=tools if tools else None,
+                    response_format=normalized_response_format if normalized_response_format else response_format,
+                    stream=stream,
+                    max_tokens=max_tokens,
+                    **model_kwargs,
+                ),
+                timeout=timeout,
+            )
 
             elapsed_time = time.time() - start_time
 

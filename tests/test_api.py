@@ -1067,68 +1067,103 @@ class TestExecutionResultSerialization:
         assert "parsed" not in message
 
 
-class TestAnyLlmWarningsSuppressed:
-    """Regression tests: PydanticSerializationUnexpectedValue from any_llm must not reach callers.
+class TestAnyLlmParsedSerializationFix:
+    """Regression tests for parsed-field serialization in any_llm OpenAI conversion."""
 
-    any_llm calls response.model_dump() on a ParsedChatCompletion whose `message.parsed`
-    holds a user Pydantic model at runtime but is typed as None in the base schema.
-    _safe_llm_call must swallow that UserWarning before it surfaces to third-party code.
-    """
-
-    async def test_safe_llm_call_does_not_emit_pydantic_serialization_warning(self):
-        """_safe_llm_call must suppress PydanticSerializationUnexpectedValue from any_llm."""
-        import time
+    async def test_converter_excludes_parsed_field_and_preserves_runtime_parsed(self):
+        """Converter must avoid warnings and keep message.parsed accessible to callers."""
         import warnings
-        from unittest.mock import AsyncMock, MagicMock, patch
 
-        from any_llm.types.completion import (
-            ChatCompletion,
-            ChatCompletionMessage,
-            Choice,
-            CompletionUsage,
-        )
+        from gluellm.api import _convert_openai_chat_completion_without_parsed
         from pydantic import BaseModel
 
-        from gluellm.api import _safe_llm_call
-
-        class MyScore(BaseModel):
+        class ScoreModel(BaseModel):
             score: float
 
-        async def fake_acompletion(**kwargs):
-            warnings.warn(
-                "Expected `null` but got `MyScore` - serialized value may not be as expected "
-                "[type=PydanticSerializationUnexpectedValue]",
-                UserWarning,
-                stacklevel=2,
-            )
-            msg = ChatCompletionMessage(role="assistant", content='{"score": 0.9}')
-            choice = Choice(index=0, message=msg, finish_reason="stop")
-            usage = CompletionUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15)
-            return ChatCompletion(
-                id="chatcmpl-test",
-                choices=[choice],
-                created=int(time.time()),
-                model="gpt-4o-mini",
-                object="chat.completion",
-                usage=usage,
-            )
+        class DummyResponse:
+            def __init__(self):
+                self.object = "chat.completion"
+                self.created = 123
+                self.last_exclude = None
+                self.choices = [type("Choice", (), {"message": type("Msg", (), {"parsed": ScoreModel(score=0.9)})()})()]
 
-        mock_provider = MagicMock()
-        mock_provider.acompletion = AsyncMock(side_effect=fake_acompletion)
+            def model_dump(self, *, exclude=None, **kwargs):
+                self.last_exclude = exclude
+                if exclude != {"choices": {"__all__": {"message": {"parsed"}}}}:
+                    warnings.warn(
+                        "PydanticSerializationUnexpectedValue for field_name='parsed'",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                return {
+                    "id": "chatcmpl-test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": '{"score": 0.9}'},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "created": 123,
+                    "model": "gpt-4o-mini",
+                    "object": "chat.completion",
+                }
 
-        with (
-            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
-            warnings.catch_warnings(),
-        ):
+        dummy = DummyResponse()
+        with warnings.catch_warnings():
             warnings.simplefilter("error", UserWarning)
-            # Must not raise — the PydanticSerializationUnexpectedValue warning must be suppressed
-            result = await _safe_llm_call(
-                messages=[{"role": "user", "content": "test"}],
-                model="openai:gpt-4o-mini",
-                response_format=MyScore,
-            )
+            converted = _convert_openai_chat_completion_without_parsed(dummy)
 
-        assert result is not None
+        assert dummy.last_exclude == {"choices": {"__all__": {"message": {"parsed"}}}}
+        assert converted.id == "chatcmpl-test"
+        assert converted.choices[0].message.content == '{"score": 0.9}'
+        assert hasattr(converted.choices[0].message, "parsed")
+        assert isinstance(converted.choices[0].message.parsed, ScoreModel)
+        assert converted.choices[0].message.parsed.score == 0.9
+
+    async def test_patch_keeps_message_parsed_for_structured_output_path(self):
+        """Patched converter should preserve parsed values used by structured completion."""
+        from pydantic import BaseModel
+
+        from gluellm.api import (
+            _convert_openai_chat_completion_without_parsed,
+            _patch_any_llm_openai_converter,
+        )
+
+        class StructuredAnalysis(BaseModel):
+            summary: str
+
+        class DummyResponse:
+            object = "chat.completion"
+            created = 123
+
+            def __init__(self):
+                self.choices = [
+                    type(
+                        "Choice",
+                        (),
+                        {"message": type("Msg", (), {"parsed": StructuredAnalysis(summary="ok")})()},
+                    )()
+                ]
+
+            def model_dump(self, *, exclude=None, **kwargs):
+                return {
+                    "id": "chatcmpl-test",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": '{"summary":"ok"}'},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "created": 123,
+                    "model": "gpt-4o-mini",
+                    "object": "chat.completion",
+                }
+
+        _patch_any_llm_openai_converter()
+        converted = _convert_openai_chat_completion_without_parsed(DummyResponse())
+        assert converted.choices[0].message.parsed.summary == "ok"
 
 
 class TestProviderCache:
