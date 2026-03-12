@@ -62,7 +62,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Annotated, Any, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar
 
 if TYPE_CHECKING:
     from gluellm.models.agent import Agent
@@ -70,7 +70,7 @@ if TYPE_CHECKING:
 
 from any_llm import AnyLLM
 from any_llm.types.completion import ChatCompletion
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field, field_validator, field_serializer
 from pydantic.functional_validators import SkipValidation
 from gluellm.config import settings
 from gluellm.tool_router import (
@@ -90,6 +90,7 @@ from gluellm.models.eval import EvalRecord
 from gluellm.observability.logging_config import get_logger
 from gluellm.rate_limiting.api_key_pool import extract_provider_from_model
 from gluellm.rate_limiting.rate_limiter import acquire_rate_limit
+from gluellm.rate_limit_types import RateLimitAlgorithm
 from gluellm.runtime.context import clear_correlation_id, get_correlation_id, set_correlation_id
 from gluellm.runtime.shutdown import ShutdownContext, is_shutting_down, register_shutdown_callback
 from gluellm.schema import create_normalized_model
@@ -150,6 +151,29 @@ class RetryConfig(BaseModel):
     callback: RetryCallback = None
 
     model_config = {"arbitrary_types_allowed": True}
+
+
+class RateLimitConfig(BaseModel):
+    """Configuration for rate limiting on LLM and embedding calls.
+
+    Attributes:
+        algorithm: Rate limiting algorithm (RateLimitAlgorithm enum or string).
+            When None, uses settings.rate_limit_algorithm (GLUELLM_RATE_LIMIT_ALGORITHM).
+    """
+
+    algorithm: RateLimitAlgorithm | str | None = None
+
+    @field_validator("algorithm")
+    @classmethod
+    def _validate_algorithm(cls, v: RateLimitAlgorithm | str | None) -> RateLimitAlgorithm | str | None:
+        if v is None or isinstance(v, RateLimitAlgorithm):
+            return v
+        if v not in [e.value for e in RateLimitAlgorithm]:
+            raise ValueError(
+                f"Invalid rate limit algorithm: {v!r}. "
+                f"Must be one of: {', '.join(e.value for e in RateLimitAlgorithm)}"
+            )
+        return v
 
 # Configure logging
 logger = get_logger(__name__)
@@ -1220,6 +1244,7 @@ async def _safe_llm_call(
     connect_timeout: float | None = None,
     api_key: str | None = None,
     max_tokens: int | None = None,
+    rate_limit_config: RateLimitConfig | None = None,
     **model_kwargs: Any,
 ) -> ChatCompletion | AsyncIterator[ChatCompletion]:
     """Make an LLM call with error classification and tracing.
@@ -1267,7 +1292,8 @@ async def _safe_llm_call(
     rate_limit_key = (
         f"global:{provider}" if not api_key else f"api_key:{hashlib.sha256(api_key.encode()).hexdigest()[:8]}"
     )
-    await acquire_rate_limit(rate_limit_key)
+    rate_limit_algorithm = rate_limit_config.algorithm if rate_limit_config else None
+    await acquire_rate_limit(rate_limit_key, algorithm=rate_limit_algorithm)
 
     # Normalize Pydantic model schema for OpenAI compatibility
     # This fixes issues with union types, additionalProperties, etc. that cause
@@ -1460,6 +1486,7 @@ async def _llm_call_with_retry(
     api_key: str | None = None,
     max_tokens: int | None = None,
     retry_config: RetryConfig | None = None,
+    rate_limit_config: RateLimitConfig | None = None,
     **model_kwargs: Any,
 ) -> ChatCompletion | AsyncIterator[ChatCompletion]:
     """Make an LLM call with configurable retry on transient errors.
@@ -1503,6 +1530,7 @@ async def _llm_call_with_retry(
                 connect_timeout=connect_timeout,
                 api_key=api_key,
                 max_tokens=final_max_tokens,
+                rate_limit_config=rate_limit_config,
                 **kwargs,
             )
         except Exception as e:
@@ -1631,6 +1659,7 @@ class GlueLLM:
         tool_route_model: str | None = None,
         max_tokens: int | None = None,
         retry_config: RetryConfig | None = None,
+        rate_limit_config: RateLimitConfig | None = None,
         model_kwargs: dict[str, Any] | None = None,
     ):
         """Initialize GlueLLM client.
@@ -1653,6 +1682,8 @@ class GlueLLM:
             retry_config: Optional retry configuration. Set retry_config.callback to customise retry
                 decisions and modify model params per attempt. Set retry_config.retry_enabled=False
                 to disable retries entirely.
+            rate_limit_config: Optional rate limit configuration. Set algorithm to override
+                the default (from GLUELLM_RATE_LIMIT_ALGORITHM). E.g. RateLimitConfig(algorithm="leaking_bucket").
             model_kwargs: Optional dict of extra params for acompletion (e.g. temperature, top_p).
         """
         self.model = model or settings.default_model
@@ -1671,6 +1702,7 @@ class GlueLLM:
         self.tool_route_model = tool_route_model or settings.tool_route_model
         self.max_tokens = max_tokens
         self.retry_config = retry_config
+        self.rate_limit_config = rate_limit_config
         self.model_kwargs = model_kwargs or {}
 
     async def complete(
@@ -1689,6 +1721,8 @@ class GlueLLM:
         tool_mode: ToolMode | None = None,
         retry_enabled: bool | None = None,
         retry_config: RetryConfig | None = None,
+        rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
+        rate_limit_config: RateLimitConfig | None = None,
         track_costs: bool | None = None,
         enable_eval_recording: bool | None = None,
         **model_kwargs: Any,
@@ -1709,6 +1743,9 @@ class GlueLLM:
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
             retry_enabled: If False, disables retries for this call (shorthand for retry_config.retry_enabled=False).
             retry_config: Per-call retry configuration override (includes optional callback).
+            rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
+                Shorthand for rate_limit_config=RateLimitConfig(algorithm=...).
+            rate_limit_config: Per-call rate limit configuration override.
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
@@ -1748,6 +1785,10 @@ class GlueLLM:
                 if cfg is None
                 else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
             )
+        # Per-call rate_limit_config or rate_limit_algorithm override; else client-level; else None (use settings)
+        effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else self.rate_limit_config
+        if rate_limit_algorithm is not None:
+            effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
         effective_eval_store = None if enable_eval_recording is False else self.eval_store
         effective_model_kwargs = {**self.model_kwargs, **model_kwargs}
 
@@ -1827,7 +1868,7 @@ class GlueLLM:
                             api_key=api_key,
                             max_tokens=effective_max_tokens,
                             retry_config=effective_retry_config,
-
+                            rate_limit_config=effective_rate_limit_config,
                             **effective_model_kwargs,
                         )
                     except LLMError as e:
@@ -2162,7 +2203,7 @@ class GlueLLM:
                                         api_key=api_key,
                                         max_tokens=effective_max_tokens,
                                         retry_config=effective_retry_config,
-                                        
+                                        rate_limit_config=effective_rate_limit_config,
                                         **effective_model_kwargs,
                                     )
                                 except LLMError as llm_error:
@@ -2322,6 +2363,8 @@ class GlueLLM:
         tool_mode: ToolMode | None = None,
         retry_enabled: bool | None = None,
         retry_config: RetryConfig | None = None,
+        rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
+        rate_limit_config: RateLimitConfig | None = None,
         track_costs: bool | None = None,
         enable_eval_recording: bool | None = None,
         **model_kwargs: Any,
@@ -2349,6 +2392,8 @@ class GlueLLM:
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
             retry_enabled: If False, disables retries for this call (shorthand for retry_config.retry_enabled=False).
             retry_config: Per-call retry configuration override (includes optional callback).
+            rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
+            rate_limit_config: Per-call rate limit configuration override.
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
@@ -2388,6 +2433,9 @@ class GlueLLM:
                 if cfg is None
                 else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
             )
+        effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else self.rate_limit_config
+        if rate_limit_algorithm is not None:
+            effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
         effective_eval_store = None if enable_eval_recording is False else self.eval_store
         effective_model_kwargs = {**self.model_kwargs, **model_kwargs}
 
@@ -2503,7 +2551,7 @@ class GlueLLM:
                                 api_key=api_key,
                                 max_tokens=effective_max_tokens,
                                 retry_config=effective_retry_config,
-                                
+                                rate_limit_config=effective_rate_limit_config,
                                 **effective_model_kwargs,
                             )
                             await emit_status(
@@ -2793,7 +2841,7 @@ class GlueLLM:
                         api_key=api_key,
                         max_tokens=effective_max_tokens,
                         retry_config=effective_retry_config,
-                        
+                        rate_limit_config=effective_rate_limit_config,
                         **effective_model_kwargs,
                     )
                     await emit_status(
@@ -2880,7 +2928,7 @@ class GlueLLM:
                                     api_key=api_key,
                                     max_tokens=effective_max_tokens,
                                     retry_config=effective_retry_config,
-                                    
+                                    rate_limit_config=effective_rate_limit_config,
                                     **effective_model_kwargs,
                                 )
                             except LLMError as llm_error:
@@ -3027,6 +3075,8 @@ class GlueLLM:
         tool_mode: ToolMode | None = None,
         retry_enabled: bool | None = None,
         retry_config: RetryConfig | None = None,
+        rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
+        rate_limit_config: RateLimitConfig | None = None,
         track_costs: bool | None = None,
         enable_eval_recording: bool | None = None,
     ) -> AsyncIterator[StreamingChunk]:
@@ -3095,6 +3145,9 @@ class GlueLLM:
                 if cfg is None
                 else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
             )
+        effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else self.rate_limit_config
+        if rate_limit_algorithm is not None:
+            effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
 
         # Set correlation ID if provided
         if correlation_id:
@@ -3157,6 +3210,7 @@ class GlueLLM:
                         connect_timeout=connect_timeout,
                         max_tokens=effective_max_tokens,
                         retry_config=effective_retry_config,
+                        rate_limit_config=effective_rate_limit_config,
                     )
                     async for chunk_response in stream_iter:
                         if hasattr(chunk_response, "choices") and chunk_response.choices:
@@ -3248,6 +3302,7 @@ class GlueLLM:
                     connect_timeout=connect_timeout,
                     max_tokens=effective_max_tokens,
                     retry_config=effective_retry_config,
+                    rate_limit_config=effective_rate_limit_config,
                 )
                 accumulated_content = ""
                 assistant_message = None
@@ -3556,6 +3611,8 @@ class GlueLLM:
                                 request_timeout=request_timeout,
                                 connect_timeout=connect_timeout,
                                 max_tokens=effective_max_tokens,
+                                retry_config=effective_retry_config,
+                                rate_limit_config=effective_rate_limit_config,
                             )
                         except LLMError as llm_error:
                             # LLM call failed during retry, raise blocked error
@@ -3709,6 +3766,8 @@ async def complete(
     tool_route_model: str | None = None,
     retry_enabled: bool | None = None,
     retry_config: RetryConfig | None = None,
+    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
+    rate_limit_config: RateLimitConfig | None = None,
     track_costs: bool | None = None,
     enable_eval_recording: bool | None = None,
     **model_kwargs: Any,
@@ -3734,6 +3793,8 @@ async def complete(
         tool_route_model: Fast model for dynamic tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model).
         retry_enabled: If False, disables retries for this call.
         retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
+        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
+        rate_limit_config: Per-call rate limit configuration override.
         track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
@@ -3753,6 +3814,7 @@ async def complete(
         tool_mode=effective_tool_mode,
         tool_route_model=tool_route_model,
         retry_config=retry_config,
+        rate_limit_config=rate_limit_config,
         model_kwargs=model_kwargs if model_kwargs else None,
     )
     return await client.complete(
@@ -3766,6 +3828,8 @@ async def complete(
         max_tokens=max_tokens,
         retry_enabled=retry_enabled,
         retry_config=retry_config,
+        rate_limit_algorithm=rate_limit_algorithm,
+        rate_limit_config=rate_limit_config,
         track_costs=track_costs,
         enable_eval_recording=enable_eval_recording,
         **model_kwargs,
@@ -3791,6 +3855,8 @@ async def structured_complete(
     tool_route_model: str | None = None,
     retry_enabled: bool | None = None,
     retry_config: RetryConfig | None = None,
+    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
+    rate_limit_config: RateLimitConfig | None = None,
     track_costs: bool | None = None,
     enable_eval_recording: bool | None = None,
     **model_kwargs: Any,
@@ -3821,6 +3887,8 @@ async def structured_complete(
         tool_route_model: Fast model for dynamic tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model).
         retry_enabled: If False, disables retries for this call.
         retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
+        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
+        rate_limit_config: Per-call rate limit configuration override.
         track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
@@ -3874,6 +3942,7 @@ async def structured_complete(
         tool_mode=effective_tool_mode,
         tool_route_model=tool_route_model,
         retry_config=retry_config,
+        rate_limit_config=rate_limit_config,
         model_kwargs=model_kwargs if model_kwargs else None,
     )
     return await client.structured_complete(
@@ -3889,6 +3958,8 @@ async def structured_complete(
         max_tokens=max_tokens,
         retry_enabled=retry_enabled,
         retry_config=retry_config,
+        rate_limit_algorithm=rate_limit_algorithm,
+        rate_limit_config=rate_limit_config,
         track_costs=track_costs,
         enable_eval_recording=enable_eval_recording,
         **model_kwargs,
@@ -3902,6 +3973,8 @@ async def embed(
     request_timeout: float | None = None,
     connect_timeout: float | None = None,
     encoding_format: str | None = None,
+    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
+    rate_limit_config: RateLimitConfig | None = None,
     **kwargs: Any,
 ) -> "EmbeddingResult":
     """Quick embedding generation.
@@ -3915,6 +3988,8 @@ async def embed(
         encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
             Provider-specific. Note: If using "base64", the embedding format may differ from
             the standard list[float] format.
+        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
+        rate_limit_config: Per-call rate limit configuration override.
         **kwargs: Additional provider-specific arguments passed through to the embedding API.
             Examples: `user` (OpenAI) for end-user identification.
 
@@ -3940,6 +4015,8 @@ async def embed(
         request_timeout=request_timeout,
         connect_timeout=connect_timeout,
         encoding_format=encoding_format,
+        rate_limit_algorithm=rate_limit_algorithm,
+        rate_limit_config=rate_limit_config,
         **kwargs,
     )
 
@@ -3963,6 +4040,8 @@ async def stream_complete(
     tool_route_model: str | None = None,
     retry_enabled: bool | None = None,
     retry_config: RetryConfig | None = None,
+    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
+    rate_limit_config: RateLimitConfig | None = None,
     track_costs: bool | None = None,
     enable_eval_recording: bool | None = None,
 ) -> AsyncIterator[StreamingChunk]:
@@ -3999,6 +4078,8 @@ async def stream_complete(
         tool_route_model: Fast model for dynamic tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model).
         retry_enabled: If False, disables retries for this call.
         retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
+        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
+        rate_limit_config: Per-call rate limit configuration override.
         track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this).
 
@@ -4023,6 +4104,7 @@ async def stream_complete(
         tool_mode=effective_tool_mode,
         tool_route_model=tool_route_model,
         retry_config=retry_config,
+        rate_limit_config=rate_limit_config,
     )
     async for chunk in client.stream_complete(
         user_message,
@@ -4036,6 +4118,8 @@ async def stream_complete(
         max_tokens=max_tokens,
         retry_enabled=retry_enabled,
         retry_config=retry_config,
+        rate_limit_algorithm=rate_limit_algorithm,
+        rate_limit_config=rate_limit_config,
         track_costs=track_costs,
         enable_eval_recording=enable_eval_recording,
     ):

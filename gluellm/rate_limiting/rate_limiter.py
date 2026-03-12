@@ -7,12 +7,13 @@ and ensure compliance with provider rate limits.
 import asyncio
 from typing import Literal
 
-from throttled import Throttled, per_min
+from throttled import RateLimiterType, Throttled, per_min
 from throttled.exceptions import LimitedError
 from throttled.store import MemoryStore, RedisStore
 
 from gluellm.config import settings
 from gluellm.observability.logging_config import get_logger
+from gluellm.rate_limit_types import RateLimitAlgorithm
 
 logger = get_logger(__name__)
 
@@ -46,6 +47,7 @@ def get_rate_limiter(
     burst: int | None = None,
     backend: Literal["memory", "redis"] | None = None,
     redis_url: str | None = None,
+    algorithm: RateLimitAlgorithm | str | None = None,
 ) -> Throttled:
     """Get or create a rate limiter for a specific key.
 
@@ -58,6 +60,8 @@ def get_rate_limiter(
         burst: Burst capacity (not used directly, but kept for API compatibility)
         backend: Storage backend type (defaults to settings.rate_limit_backend)
         redis_url: Redis connection URL (defaults to settings.rate_limit_redis_url)
+        algorithm: Rate limiting algorithm (defaults to settings.rate_limit_algorithm).
+            Use RateLimitAlgorithm enum or string (e.g. "leaking_bucket").
 
     Returns:
         Configured Throttled instance
@@ -66,9 +70,16 @@ def get_rate_limiter(
     requests_per_minute = requests_per_minute or settings.rate_limit_requests_per_minute
     backend = backend or settings.rate_limit_backend
     redis_url = redis_url or settings.rate_limit_redis_url
+    _raw = algorithm or settings.rate_limit_algorithm
+    # Normalize to string: enum -> .value, str -> as-is
+    algorithm_str = _raw.value if isinstance(_raw, RateLimitAlgorithm) else _raw
+
+    # Map to throttled-py value (expects string like "leaking_bucket")
+    _enum = getattr(RateLimiterType, algorithm_str.upper(), None)
+    algorithm_value = _enum.value if _enum is not None else algorithm_str
 
     # Create cache key
-    cache_key = f"{key}:{requests_per_minute}:{backend}:{redis_url or ''}"
+    cache_key = f"{key}:{requests_per_minute}:{backend}:{redis_url or ''}:{algorithm_str}"
 
     # Return cached instance if available
     if cache_key in _rate_limiters:
@@ -79,7 +90,7 @@ def get_rate_limiter(
     quota = per_min(requests_per_minute)
     rate_limiter = Throttled(
         key=key,
-        using="sliding_window",  # Use string value instead of enum
+        using=algorithm_value,
         quota=quota,
         store=store,
         timeout=-1,  # Non-blocking mode, we handle waiting ourselves
@@ -87,7 +98,9 @@ def get_rate_limiter(
 
     # Cache and return
     _rate_limiters[cache_key] = rate_limiter
-    logger.debug(f"Created rate limiter: key={key}, requests_per_minute={requests_per_minute}, backend={backend}")
+    logger.debug(
+        f"Created rate limiter: key={key}, requests_per_minute={requests_per_minute}, backend={backend}, algorithm={algorithm_str}"
+    )
 
     return rate_limiter
 
@@ -97,6 +110,7 @@ async def acquire_rate_limit(
     rate_limiter: Throttled | None = None,
     requests_per_minute: int | None = None,
     burst: int | None = None,
+    algorithm: RateLimitAlgorithm | str | None = None,
 ) -> None:
     """Acquire a rate limit permit, waiting if necessary.
 
@@ -109,6 +123,7 @@ async def acquire_rate_limit(
         rate_limiter: Optional pre-configured Throttled instance
         requests_per_minute: Maximum requests per minute (used if rate_limiter not provided)
         burst: Burst capacity (not used, kept for API compatibility)
+        algorithm: Rate limiting algorithm override (defaults to settings.rate_limit_algorithm)
 
     Raises:
         LimitedError: If rate limit cannot be acquired (should not happen with auto-wait)
@@ -122,6 +137,7 @@ async def acquire_rate_limit(
             key=key,
             requests_per_minute=requests_per_minute,
             burst=burst,
+            algorithm=algorithm,
         )
 
     # Try to acquire permit

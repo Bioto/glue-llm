@@ -13,13 +13,12 @@ from gluellm.rate_limiting.api_key_pool import (
     extract_provider_from_model,
     get_api_key_env_var,
 )
-from gluellm.rate_limiting.rate_limiter import (
-    acquire_rate_limit,
-    get_rate_limiter,
-)
+from gluellm.rate_limiting.rate_limiter import acquire_rate_limit, get_rate_limiter
+from gluellm.rate_limit_types import RateLimitAlgorithm
 
 __all__ = [
     # Rate limiter
+    "RateLimitAlgorithm",
     "get_rate_limiter",
     "acquire_rate_limit",
     # API key pool

@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field
+
+from gluellm.rate_limit_types import RateLimitAlgorithm
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Find the project root (where .env file is located)
@@ -109,6 +111,7 @@ class GlueLLMSettings(BaseSettings):
     rate_limit_burst: Annotated[int, Field(gt=0)] = 10
     rate_limit_backend: Literal["memory", "redis"] = "memory"
     rate_limit_redis_url: str | None = None
+    rate_limit_algorithm: RateLimitAlgorithm = RateLimitAlgorithm.SLIDING_WINDOW
 
     # Cost tracking settings
     track_costs: bool = True  # Enable cost tracking and include in responses

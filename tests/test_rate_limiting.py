@@ -243,6 +243,7 @@ class TestRateLimiter:
             mock_settings.rate_limit_burst = 10
             mock_settings.rate_limit_backend = "memory"
             mock_settings.rate_limit_redis_url = None
+            mock_settings.rate_limit_algorithm = "sliding_window"
 
             # Should acquire immediately
             start = time.time()
@@ -260,6 +261,7 @@ class TestRateLimiter:
             mock_settings.rate_limit_burst = 1
             mock_settings.rate_limit_backend = "memory"
             mock_settings.rate_limit_redis_url = None
+            mock_settings.rate_limit_algorithm = "sliding_window"
 
             # First request should succeed
             await acquire_rate_limit("test-key-limited")
@@ -270,6 +272,21 @@ class TestRateLimiter:
             elapsed = time.time() - start
             # Should have waited at least a bit (though exact timing depends on throttled-py)
             assert elapsed >= 0  # At minimum, should not error
+
+    @pytest.mark.asyncio
+    async def test_acquire_rate_limit_with_leaking_bucket_algorithm(self):
+        """Test that leaking_bucket algorithm can be configured and used."""
+        clear_rate_limiter_cache()
+        with patch("gluellm.rate_limiting.rate_limiter.settings") as mock_settings:
+            mock_settings.rate_limit_enabled = True
+            mock_settings.rate_limit_requests_per_minute = 60
+            mock_settings.rate_limit_burst = 10
+            mock_settings.rate_limit_backend = "memory"
+            mock_settings.rate_limit_redis_url = None
+            mock_settings.rate_limit_algorithm = "leaking_bucket"
+
+            # Should acquire successfully with leaking_bucket
+            await acquire_rate_limit("test-key-leaking-bucket")
 
 
 class TestRateLimitingConfiguration:
@@ -284,6 +301,9 @@ class TestRateLimitingConfiguration:
             assert config.rate_limit_burst == 10
             assert config.rate_limit_backend == "memory"
             assert config.rate_limit_redis_url is None
+            from gluellm.rate_limit_types import RateLimitAlgorithm
+
+            assert config.rate_limit_algorithm == RateLimitAlgorithm.SLIDING_WINDOW
 
     def test_rate_limit_settings_from_env(self):
         """Test loading rate limiting settings from environment."""
@@ -293,6 +313,7 @@ class TestRateLimitingConfiguration:
             "GLUELLM_RATE_LIMIT_BURST": "20",
             "GLUELLM_RATE_LIMIT_BACKEND": "redis",
             "GLUELLM_RATE_LIMIT_REDIS_URL": "redis://localhost:6379",
+            "GLUELLM_RATE_LIMIT_ALGORITHM": "leaking_bucket",
         }
         with patch.dict(os.environ, env_vars, clear=False):
             config = GlueLLMSettings()
@@ -301,6 +322,9 @@ class TestRateLimitingConfiguration:
             assert config.rate_limit_burst == 20
             assert config.rate_limit_backend == "redis"
             assert config.rate_limit_redis_url == "redis://localhost:6379"
+            from gluellm.rate_limit_types import RateLimitAlgorithm
+
+            assert config.rate_limit_algorithm == RateLimitAlgorithm.LEAKING_BUCKET
 
     def test_rate_limit_settings_validation(self):
         """Test rate limiting settings validation."""
@@ -351,6 +375,36 @@ class TestBatchAPIKeyConfig:
         # Invalid: zero requests_per_minute
         with pytest.raises(ValidationError):
             BatchAPIKeyConfig(key="test-key", provider="openai", requests_per_minute=0)
+
+
+class TestRateLimitConfig:
+    """Tests for RateLimitConfig model."""
+
+    def test_rate_limit_config_defaults(self):
+        """Test RateLimitConfig has algorithm=None by default."""
+        from gluellm.api import RateLimitConfig
+
+        config = RateLimitConfig()
+        assert config.algorithm is None
+
+    def test_rate_limit_config_with_algorithm(self):
+        """Test RateLimitConfig accepts valid algorithm as string or enum."""
+        from gluellm.api import RateLimitConfig
+        from gluellm.rate_limit_types import RateLimitAlgorithm
+
+        config = RateLimitConfig(algorithm="leaking_bucket")
+        assert config.algorithm == "leaking_bucket"
+        config_enum = RateLimitConfig(algorithm=RateLimitAlgorithm.LEAKING_BUCKET)
+        assert config_enum.algorithm == RateLimitAlgorithm.LEAKING_BUCKET
+
+    def test_rate_limit_config_invalid_algorithm(self):
+        """Test RateLimitConfig rejects invalid algorithm."""
+        from pydantic import ValidationError
+
+        from gluellm.api import RateLimitConfig
+
+        with pytest.raises(ValidationError):
+            RateLimitConfig(algorithm="invalid")
 
 
 class TestRateLimitingIntegration:
@@ -407,3 +461,103 @@ class TestRateLimitingIntegration:
             # Check that rate limit key includes API key hash
             call_args = mock_rate_limit.call_args[0][0]
             assert "api_key:" in call_args
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_config_passed_to_safe_llm_call(self):
+        """Test that rate_limit_config is passed through to acquire_rate_limit."""
+        from gluellm.api import RateLimitConfig, _safe_llm_call
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Test response"
+        mock_response.choices[0].message.tool_calls = None
+        mock_response.usage = None
+
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(return_value=mock_response)
+        with (
+            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
+            patch("gluellm.api.acquire_rate_limit") as mock_rate_limit,
+        ):
+            await _safe_llm_call(
+                messages=[{"role": "user", "content": "Hello"}],
+                model="openai:gpt-4o-mini",
+                rate_limit_config=RateLimitConfig(algorithm="leaking_bucket"),
+            )
+            assert mock_rate_limit.called
+            call_kwargs = mock_rate_limit.call_args.kwargs
+            assert call_kwargs["algorithm"] == "leaking_bucket"
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_algorithm_shorthand_on_complete(self):
+        """Test that rate_limit_algorithm shorthand passes through to acquire_rate_limit."""
+        from gluellm.api import GlueLLM
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Test response"
+        mock_response.choices[0].message.tool_calls = None
+        mock_response.usage = None
+
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(return_value=mock_response)
+        with (
+            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
+            patch("gluellm.api.acquire_rate_limit") as mock_rate_limit,
+        ):
+            client = GlueLLM()
+            await client.complete("Hello", rate_limit_algorithm="token_bucket")
+            assert mock_rate_limit.called
+            call_kwargs = mock_rate_limit.call_args.kwargs
+            assert call_kwargs["algorithm"] == "token_bucket"
+
+    @pytest.mark.asyncio
+    async def test_client_level_rate_limit_config(self):
+        """Test that GlueLLM rate_limit_config is used by default; per-call override takes precedence."""
+        from gluellm.api import GlueLLM, RateLimitConfig
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Test response"
+        mock_response.choices[0].message.tool_calls = None
+        mock_response.usage = None
+
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(return_value=mock_response)
+        with (
+            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
+            patch("gluellm.api.acquire_rate_limit") as mock_rate_limit,
+        ):
+            # Client-level default
+            client = GlueLLM(rate_limit_config=RateLimitConfig(algorithm="gcra"))
+            await client.complete("Hello")
+            assert mock_rate_limit.call_args.kwargs["algorithm"] == "gcra"
+
+            # Per-call override takes precedence
+            await client.complete("Hello", rate_limit_algorithm="fixed_window")
+            assert mock_rate_limit.call_args.kwargs["algorithm"] == "fixed_window"
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_algorithm_defaults_to_settings(self):
+        """Test that with no override, acquire_rate_limit is called with algorithm=None (uses settings)."""
+        from gluellm.api import _safe_llm_call
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Test response"
+        mock_response.choices[0].message.tool_calls = None
+        mock_response.usage = None
+
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(return_value=mock_response)
+        with (
+            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
+            patch("gluellm.api.acquire_rate_limit") as mock_rate_limit,
+        ):
+            await _safe_llm_call(
+                messages=[{"role": "user", "content": "Hello"}],
+                model="openai:gpt-4o-mini",
+            )
+            assert mock_rate_limit.called
+            call_kwargs = mock_rate_limit.call_args.kwargs
+            assert call_kwargs.get("algorithm") is None

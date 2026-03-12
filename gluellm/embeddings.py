@@ -26,10 +26,12 @@ from tenacity import (
 
 from gluellm.api import (
     APIConnectionError,
+    RateLimitConfig,
     RateLimitError,
     _provider_cache,
     classify_llm_error,
 )
+from gluellm.rate_limit_types import RateLimitAlgorithm
 from gluellm.config import settings
 from gluellm.costing.pricing_data import calculate_embedding_cost
 from gluellm.models.embedding import EmbeddingResult
@@ -160,6 +162,7 @@ async def _safe_embedding_call(
     connect_timeout: float | None = None,
     api_key: str | None = None,
     embedding_kwargs: dict[str, Any] | None = None,
+    rate_limit_config: RateLimitConfig | None = None,
 ) -> CreateEmbeddingResponse:
     """Make an embedding call with error classification and tracing.
 
@@ -203,7 +206,8 @@ async def _safe_embedding_call(
     rate_limit_key = (
         f"global:{provider}" if not api_key else f"api_key:{hashlib.sha256(api_key.encode()).hexdigest()[:8]}"
     )
-    await acquire_rate_limit(rate_limit_key)
+    rate_limit_algorithm = rate_limit_config.algorithm if rate_limit_config else None
+    await acquire_rate_limit(rate_limit_key, algorithm=rate_limit_algorithm)
 
     start_time = time.time()
     input_count = len(inputs) if isinstance(inputs, list) else 1
@@ -347,6 +351,7 @@ async def _embedding_call_with_retry(
     connect_timeout: float | None = None,
     api_key: str | None = None,
     embedding_kwargs: dict[str, Any] | None = None,
+    rate_limit_config: RateLimitConfig | None = None,
 ) -> CreateEmbeddingResponse:
     """Make an embedding call with automatic retry on transient errors.
 
@@ -375,6 +380,7 @@ async def _embedding_call_with_retry(
         connect_timeout=connect_timeout,
         api_key=api_key,
         embedding_kwargs=embedding_kwargs,
+        rate_limit_config=rate_limit_config,
     )
 
 
@@ -386,6 +392,8 @@ async def embed(
     connect_timeout: float | None = None,
     api_key: str | None = None,
     encoding_format: str | None = None,
+    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
+    rate_limit_config: RateLimitConfig | None = None,
     **kwargs: Any,
 ) -> EmbeddingResult:
     """Generate embeddings for the given text(s).
@@ -403,6 +411,8 @@ async def embed(
         encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
             Provider-specific. Note: If using "base64", the embedding format may differ from
             the standard list[float] format.
+        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
+        rate_limit_config: Per-call rate limit configuration override.
         **kwargs: Additional provider-specific arguments passed through to the embedding API.
             Examples: `user` (OpenAI) for end-user identification.
 
@@ -455,6 +465,11 @@ async def embed(
         f"Starting embedding request: correlation_id={correlation_id}, model={model}, input_count={input_count}"
     )
 
+    # Per-call rate_limit_config or rate_limit_algorithm override
+    effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else None
+    if rate_limit_algorithm is not None:
+        effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
+
     # Build embedding kwargs from explicit parameters and any additional kwargs
     embedding_kwargs: dict[str, Any] = {}
     if encoding_format is not None:
@@ -473,6 +488,7 @@ async def embed(
                 connect_timeout=connect_timeout,
                 api_key=api_key,
                 embedding_kwargs=embedding_kwargs if embedding_kwargs else None,
+                rate_limit_config=effective_rate_limit_config,
             )
 
             # Extract embeddings from response

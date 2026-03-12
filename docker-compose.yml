@@ -12,6 +12,9 @@ services:
       - XAI_API_KEY=${XAI_API_KEY:-}
     volumes:
       - ./logs:/app/logs
+    sysctls:
+      fs.inotify.max_user_watches: 524288
+      fs.inotify.max_user_instances: 512
     restart: unless-stopped
     # Override command as needed
     # command: ["python", "your_app.py"]

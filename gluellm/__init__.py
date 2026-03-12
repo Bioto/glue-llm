@@ -84,6 +84,8 @@ from gluellm.api import (
     RateLimitError,
     RetryConfig,
     RetryCallback,
+    RateLimitAlgorithm,
+    RateLimitConfig,
     StreamingChunk,
     TokenLimitError,
     close_providers,
@@ -221,6 +223,8 @@ __all__ = [
     "AuthenticationError",
     "RetryConfig",
     "RetryCallback",
+    "RateLimitAlgorithm",
+    "RateLimitConfig",
     # Guardrails
     "GuardrailsConfig",
     "PromptGuidedConfig",
