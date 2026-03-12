@@ -388,8 +388,12 @@ classDiagram
         +max_connect_timeout: float
 
         Rate Limiting
-        +rate_limit_requests_per_second: int
-        +rate_limit_burst_size: int
+        +rate_limit_enabled: bool
+        +rate_limit_requests_per_minute: int
+        +rate_limit_burst: int
+        +rate_limit_backend: str
+        +rate_limit_redis_url: str
+        +rate_limit_algorithm: RateLimitAlgorithm
 
         Telemetry Settings
         +enable_tracing: bool
@@ -399,11 +403,80 @@ classDiagram
     }
 
     note for GlueLLMSettings "Configuration Sources (priority order):
-    1. Constructor arguments
+    1. gluellm.configure(**kwargs) — programmatic overrides
     2. Environment variables (GLUELLM_*)
     3. .env file
     4. Default values"
 ```
+
+## Programmatic Configuration
+
+In addition to environment variables and `.env` files, settings can be applied at runtime with `gluellm.configure()`. This is especially useful for library consumers that manage their own Pydantic settings or need multiple configurations without filesystem side-effects.
+
+```python
+import gluellm
+from gluellm import RateLimitAlgorithm
+
+# Call once at application startup, before making any LLM calls.
+# Kwargs are merged on top of whatever env vars / .env already resolved.
+gluellm.configure(
+    default_model="anthropic:claude-3-5-sonnet-20241022",
+    rate_limit_backend="redis",
+    rate_limit_redis_url="redis://localhost:6379",
+    rate_limit_algorithm=RateLimitAlgorithm.LEAKING_BUCKET,
+    openai_api_key=my_settings.openai_key,
+)
+```
+
+`configure()` mutates the global `settings` singleton **in place**, so all internal modules (`rate_limiter`, `api`, `embeddings`, etc.) pick up the new values immediately without requiring a restart or re-import.
+
+### Rate Limiting Configuration
+
+Rate limiting supports five algorithms (backed by [throttled-py](https://pypi.org/project/throttled-py/)) and two storage backends.
+
+| Setting | Env var | Default | Description |
+|---|---|---|---|
+| `rate_limit_enabled` | `GLUELLM_RATE_LIMIT_ENABLED` | `True` | Enable/disable rate limiting |
+| `rate_limit_requests_per_minute` | `GLUELLM_RATE_LIMIT_REQUESTS_PER_MINUTE` | `60` | Global RPM cap |
+| `rate_limit_burst` | `GLUELLM_RATE_LIMIT_BURST` | `10` | Burst allowance |
+| `rate_limit_backend` | `GLUELLM_RATE_LIMIT_BACKEND` | `"memory"` | `"memory"` or `"redis"` |
+| `rate_limit_redis_url` | `GLUELLM_RATE_LIMIT_REDIS_URL` | `None` | Redis connection URL (required for redis backend) |
+| `rate_limit_algorithm` | `GLUELLM_RATE_LIMIT_ALGORITHM` | `"sliding_window"` | See `RateLimitAlgorithm` below |
+
+**`RateLimitAlgorithm` enum values:**
+
+| Enum | String value | Description |
+|---|---|---|
+| `FIXED_WINDOW` | `"fixed_window"` | Counts requests in fixed time windows |
+| `SLIDING_WINDOW` | `"sliding_window"` | Rolling window — smoother than fixed (default) |
+| `LEAKING_BUCKET` | `"leaking_bucket"` | Constant outflow, absorbs bursts |
+| `TOKEN_BUCKET` | `"token_bucket"` | Tokens refill at a fixed rate |
+| `GCRA` | `"gcra"` | Generic Cell Rate Algorithm — low jitter |
+
+**Per-call and per-client overrides** via `RateLimitConfig`:
+
+```python
+from gluellm import GlueLLM, RateLimitConfig, RateLimitAlgorithm
+
+# Client-level default (applies to all calls from this instance)
+client = GlueLLM(
+    rate_limit_config=RateLimitConfig(algorithm=RateLimitAlgorithm.LEAKING_BUCKET)
+)
+
+# Per-call override (highest priority)
+result = await client.complete(
+    "Hello",
+    rate_limit_config=RateLimitConfig(algorithm=RateLimitAlgorithm.TOKEN_BUCKET),
+)
+
+# Shorthand for algorithm-only overrides
+result = await client.complete(
+    "Hello",
+    rate_limit_algorithm=RateLimitAlgorithm.GCRA,
+)
+```
+
+Priority order (highest → lowest): per-call `rate_limit_config` → per-call `rate_limit_algorithm` → client-level `rate_limit_config` → `gluellm.configure()` / env vars.
 
 ## Shutdown Handling
 
@@ -452,7 +525,7 @@ flowchart TD
 
 ## Performance Considerations
 
-- **Rate Limiting:** Token bucket algorithm with configurable burst
+- **Rate Limiting:** Five algorithms (sliding window, fixed window, leaking bucket, token bucket, GCRA) via `throttled-py`. Memory or Redis backend. Configurable globally via `gluellm.configure()` or per-call via `RateLimitConfig`.
 - **Connection Pooling:** Handled by any-llm SDK; providers are cached so the same httpx client and connection pool are reused across calls
 - **Dual Timeouts:** `connect_timeout` is enforced at the httpx transport layer; `request_timeout` is an `asyncio.wait_for` guard over the full coroutine. Both default to configurable settings and are clamped to per-setting maximums. See [`docs/TIMEOUTS.md`](TIMEOUTS.md).
 - **Retry Logic:** Exponential backoff with jitter. For per-call and per-client customisation (`RetryConfig`, `retry_on`, callback), see [`docs/RETRY.md`](RETRY.md).
