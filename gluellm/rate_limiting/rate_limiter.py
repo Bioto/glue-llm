@@ -37,7 +37,7 @@ def _get_store(backend: Literal["memory", "redis"] = "memory", redis_url: str | 
     if backend == "redis":
         if not redis_url:
             raise ValueError("redis_url is required when backend is 'redis'")
-        return RedisStore(redis_url=redis_url)
+        return RedisStore(server=redis_url)
     return MemoryStore()
 
 
