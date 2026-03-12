@@ -144,3 +144,32 @@ def reload_settings() -> GlueLLMSettings:
     global settings
     settings = GlueLLMSettings()
     return settings
+
+
+def configure(**kwargs) -> GlueLLMSettings:
+    """Configure GlueLLM settings programmatically.
+
+    Merges the provided keyword arguments on top of the current settings
+    (which still respect environment variables and .env). Call this once at
+    application startup before making any LLM calls.
+
+    Args:
+        **kwargs: Any GlueLLMSettings field and value.
+
+    Returns:
+        GlueLLMSettings: The updated global settings instance.
+
+    Example:
+        >>> import gluellm
+        >>> from gluellm import RateLimitAlgorithm
+        >>>
+        >>> gluellm.configure(
+        ...     rate_limit_backend="redis",
+        ...     rate_limit_redis_url="redis://localhost:6379",
+        ...     rate_limit_algorithm=RateLimitAlgorithm.LEAKING_BUCKET,
+        ...     default_model="anthropic:claude-3-5-sonnet-20241022",
+        ... )
+    """
+    for key, value in kwargs.items():
+        setattr(settings, key, value)
+    return settings
