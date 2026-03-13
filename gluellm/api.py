@@ -185,6 +185,7 @@ logger = get_logger(__name__)
 # when AgentExecutor is used, without requiring API changes
 _current_agent: ContextVar["Agent | None"] = ContextVar("_current_agent", default=None)
 _any_llm_openai_patch_applied = False
+_any_llm_openai_embedding_dimensions_patch_applied = False
 
 
 def _convert_openai_chat_completion_without_parsed(response: Any) -> ChatCompletion:
@@ -246,6 +247,50 @@ def _patch_any_llm_openai_converter() -> None:
     openai_base._convert_chat_completion = _convert_openai_chat_completion_without_parsed
     openai_utils._convert_chat_completion = _convert_openai_chat_completion_without_parsed
     _any_llm_openai_patch_applied = True
+    _patch_any_llm_openai_embedding_dimensions()
+
+
+def _patch_any_llm_openai_embedding_dimensions() -> None:
+    """Patch any_llm OpenAI provider so dimensions is only passed once to embeddings.create().
+
+    any_llm's _aembedding calls _convert_embedding_params(inputs, **kwargs) which merges
+    kwargs (including dimensions) into embedding_kwargs, then calls
+    client.embeddings.create(model=..., dimensions=kwargs.get(...), **embedding_kwargs).
+    That passes dimensions twice → TypeError. This patch pops dimensions from kwargs
+    before _convert_embedding_params so it's only passed as the explicit argument.
+    """
+    global _any_llm_openai_embedding_dimensions_patch_applied
+    if _any_llm_openai_embedding_dimensions_patch_applied:
+        return
+
+    try:
+        from openai._types import NOT_GIVEN
+
+        openai_base = importlib.import_module("any_llm.providers.openai.base")
+        BaseOpenAIProvider = openai_base.BaseOpenAIProvider
+        original_aembedding = BaseOpenAIProvider._aembedding
+    except Exception:
+        return
+
+    async def _patched_aembedding(
+        self: Any,
+        model: str,
+        inputs: str | list[str],
+        **kwargs: Any,
+    ) -> Any:
+        dimensions = kwargs.pop("dimensions", NOT_GIVEN)
+        embedding_kwargs = self._convert_embedding_params(inputs, **kwargs)
+        return self._convert_embedding_response(
+            await self.client.embeddings.create(
+                model=model,
+                dimensions=dimensions,
+                **embedding_kwargs,
+            )
+        )
+
+    BaseOpenAIProvider._aembedding = _patched_aembedding
+    _any_llm_openai_embedding_dimensions_patch_applied = True
+
 
 # ============================================================================
 # Constants

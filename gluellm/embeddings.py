@@ -28,6 +28,7 @@ from gluellm.api import (
     APIConnectionError,
     RateLimitConfig,
     RateLimitError,
+    _patch_any_llm_openai_embedding_dimensions,
     _provider_cache,
     classify_llm_error,
 )
@@ -185,6 +186,7 @@ async def _safe_embedding_call(
         asyncio.TimeoutError: If the request exceeds the timeout
         LLMError: Various LLM-related errors (rate limit, auth, etc.)
     """
+    _patch_any_llm_openai_embedding_dimensions()
     correlation_id = get_correlation_id()
     request_timeout = request_timeout or settings.default_request_timeout
     request_timeout = min(request_timeout, settings.max_request_timeout)  # Enforce max timeout

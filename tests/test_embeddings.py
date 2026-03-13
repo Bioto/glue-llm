@@ -4,6 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from any_llm.types.completion import CreateEmbeddingResponse
+
+from gluellm import api as gluellm_api
 from gluellm.api import GlueLLM
 from gluellm.embeddings import embed
 from gluellm.models.embedding import EmbeddingResult
@@ -286,3 +289,41 @@ class TestEmbeddingGeneration:
 
             assert isinstance(result, EmbeddingResult)
             assert result.dimension == 1536
+
+    async def test_embed_with_dimensions_does_not_pass_dimensions_twice_to_openai(self):
+        """Regression: embed(dimensions=N) must not pass dimensions twice to OpenAI embeddings.create().
+
+        any_llm's OpenAI provider previously passed dimensions both as an explicit
+        argument and inside embedding_kwargs, causing TypeError. Our patch pops
+        dimensions from kwargs before _convert_embedding_params so it's only passed once.
+        """
+        mock_response = CreateEmbeddingResponse(
+            data=[{"embedding": [0.1] * 768, "index": 0, "object": "embedding"}],
+            model="text-embedding-3-small",
+            object="list",
+            usage={"prompt_tokens": 2, "total_tokens": 2},
+        )
+
+        mock_create = AsyncMock(return_value=mock_response)
+        mock_client = MagicMock()
+        mock_client.embeddings.create = mock_create
+
+        with (
+            patch.object(gluellm_api._provider_cache, "_providers", {}),
+            patch("openai.AsyncOpenAI", return_value=mock_client),
+        ):
+            result = await embed(
+                "Your document chunk to embed.",
+                model="openai:text-embedding-3-small",
+                dimensions=768,
+                api_key="sk-test-dummy",  # Bypass env check; client is mocked
+            )
+
+        mock_create.assert_called_once()
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs.get("dimensions") == 768
+        assert call_kwargs.get("model") == "text-embedding-3-small"
+        assert "input" in call_kwargs
+        assert isinstance(result, EmbeddingResult)
+        assert result.dimension == 768
+        assert len(result.embeddings) == 1
