@@ -329,8 +329,14 @@ async def main():
     result = await embed("Hello, world!")
     print(result.dimension, result.tokens_used)
 
+    # Request a specific output dimension (OpenAI text-embedding-3-* only)
+    result = await embed("Hello, world!", dimensions=512)
+    print(result.dimension)  # 512
+
 asyncio.run(main())
 ```
+
+The `dimensions` parameter truncates the output vector — useful for reducing storage costs while preserving most of the semantic signal. You can also set a global default via `GLUELLM_DEFAULT_EMBEDDING_DIMENSIONS` or `gluellm.configure(default_embedding_dimensions=512)` so every call uses it without repeating the argument.
 
 ## Configuration
 
@@ -352,6 +358,8 @@ Key GlueLLM-specific env vars:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GLUELLM_DEFAULT_MODEL` | `openai:gpt-4o-mini` | Default model |
+| `GLUELLM_DEFAULT_EMBEDDING_MODEL` | `openai/text-embedding-3-small` | Default embedding model |
+| `GLUELLM_DEFAULT_EMBEDDING_DIMENSIONS` | _(unset)_ | Default output dimensions for embeddings (e.g. `512`) |
 | `GLUELLM_DEFAULT_REQUEST_TIMEOUT` | `60.0` | Request timeout (seconds) |
 | `GLUELLM_MAX_REQUEST_TIMEOUT` | `300.0` | Maximum allowed request timeout |
 | `GLUELLM_DEFAULT_CONNECT_TIMEOUT` | `10.0` | Connection timeout (seconds) |

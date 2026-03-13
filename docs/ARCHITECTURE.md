@@ -379,6 +379,8 @@ classDiagram
 
         Model Settings
         +default_model: str
+        +default_embedding_model: str
+        +default_embedding_dimensions: int
         +default_system_prompt: str
         +max_tool_iterations: int
 
