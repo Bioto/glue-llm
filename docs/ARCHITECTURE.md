@@ -9,7 +9,7 @@ GlueLLM is an LLM orchestration framework that provides:
 - **Automatic tool execution** with retry logic
 - **Multi-agent workflows** for complex tasks
 - **Hooks system** for cross-cutting concerns
-- **Observability** through OpenTelemetry and MLflow
+- **Observability** through logging (`gluellm.observability.logging_config`), OpenTelemetry, and MLflow
 
 ## System Architecture
 
@@ -210,7 +210,19 @@ PRE_WORKFLOW: Before workflow starts
 POST_WORKFLOW: After workflow completes"
 ```
 
-### 6. Telemetry Layer
+### 6. Logging Configuration
+
+Logging is provided by `gluellm.observability.logging_config`:
+
+- **File logging**: Rotating file handler (default: `logs/gluellm.log`, 10MB max, 5 backups)
+- **Console logging**: Opt-in via `GLUELLM_LOG_CONSOLE_OUTPUT=true` or `console_output=True` in `setup_logging()`. Off by default to avoid interfering with parent application logging (e.g., when used as a library).
+- **Correlation IDs**: `CorrelationIDFilter` injects correlation IDs into all log records for request tracing.
+- **JSON format**: Optional structured logging via `GLUELLM_LOG_JSON_FORMAT=true` for log aggregation (ELK, Datadog).
+- **Disable completely**: Set `GLUELLM_DISABLE_LOGGING=true` to use only your application's logging configuration.
+
+See `setup_logging()` and `get_logger()` docstrings for all environment variables.
+
+### 7. Telemetry Layer
 
 ```mermaid
 graph TB

@@ -78,7 +78,8 @@ def setup_logging(
         GLUELLM_LOG_JSON_FORMAT: Enable JSON logging (set to 'true' or '1')
         GLUELLM_LOG_MAX_BYTES: Override max file size
         GLUELLM_LOG_BACKUP_COUNT: Override backup count
-        GLUELLM_CONSOLE_OUTPUT: Enable console output (set to 'true' or '1')
+        GLUELLM_LOG_CONSOLE_OUTPUT: Enable console output (set to 'true' or '1')
+        GLUELLM_CONSOLE_OUTPUT: Legacy alias for GLUELLM_LOG_CONSOLE_OUTPUT
 
     Note:
         When using GlueLLM as a library, you have two options:
@@ -107,8 +108,9 @@ def setup_logging(
         os.getenv("GLUELLM_LOG_JSON_FORMAT", str(log_json_format)).lower()
         in ("true", "1", "yes")
     )
+    # Support both GLUELLM_LOG_CONSOLE_OUTPUT (config/docs) and GLUELLM_CONSOLE_OUTPUT (legacy)
     console_output = (
-        os.getenv("GLUELLM_CONSOLE_OUTPUT", str(console_output)).lower()
+        os.getenv("GLUELLM_LOG_CONSOLE_OUTPUT", os.getenv("GLUELLM_CONSOLE_OUTPUT", str(console_output))).lower()
         in ("true", "1", "yes")
     )
     try:

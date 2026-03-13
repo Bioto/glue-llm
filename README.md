@@ -342,6 +342,8 @@ Key GlueLLM-specific env vars:
 | `GLUELLM_RETRY_MIN_WAIT` | `2` | Min backoff seconds |
 | `GLUELLM_RETRY_MAX_WAIT` | `30` | Max backoff seconds |
 | `GLUELLM_LOG_LEVEL` | `INFO` | Console log level |
+| `GLUELLM_LOG_CONSOLE_OUTPUT` | `false` | Enable console output (off by default for library usage) |
+| `GLUELLM_DISABLE_LOGGING` | `false` | Disable GlueLLM logging setup (use your app's config) |
 
 ## Docs (when you want the details)
 
