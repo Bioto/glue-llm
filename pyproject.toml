@@ -80,6 +80,7 @@ dev = [
 dev = [
     "pre-commit>=4.5.1",
     "pytest-asyncio>=1.3.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.14.10",
 ]
 
