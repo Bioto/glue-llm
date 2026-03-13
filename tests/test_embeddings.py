@@ -160,6 +160,60 @@ class TestEmbeddingGeneration:
             assert isinstance(result, EmbeddingResult)
             assert len(result.embeddings) == 1
 
+    async def test_embedding_with_dimensions(self):
+        """Test that dimensions parameter is passed through to the provider."""
+        mock_response = MagicMock()
+        mock_response.data = [
+            MagicMock(embedding=[0.1] * 512, index=0),
+        ]
+        mock_response.usage = MagicMock(prompt_tokens=2, total_tokens=2)
+        mock_response.model = "openai/text-embedding-3-small"
+
+        mock_provider = MagicMock()
+        mock_provider._aembedding = AsyncMock(return_value=mock_response)
+        with patch(
+            "gluellm.embeddings._provider_cache.get_provider", return_value=(mock_provider, "text-embedding-3-small")
+        ):
+            result = await embed("Hello", dimensions=512)
+
+            # Verify _aembedding was called with dimensions in kwargs
+            mock_provider._aembedding.assert_called_once()
+            call_kwargs = mock_provider._aembedding.call_args.kwargs
+            assert call_kwargs.get("dimensions") == 512
+
+            assert isinstance(result, EmbeddingResult)
+            assert len(result.embeddings) == 1
+            assert result.dimension == 512
+
+    async def test_embedding_uses_default_dimensions_from_config(self, monkeypatch):
+        """Test that dimensions defaults to settings.default_embedding_dimensions when not passed."""
+        mock_response = MagicMock()
+        mock_response.data = [
+            MagicMock(embedding=[0.1] * 256, index=0),
+        ]
+        mock_response.usage = MagicMock(prompt_tokens=2, total_tokens=2)
+        mock_response.model = "openai/text-embedding-3-small"
+
+        mock_provider = MagicMock()
+        mock_provider._aembedding = AsyncMock(return_value=mock_response)
+
+        monkeypatch.setattr(
+            "gluellm.embeddings.settings.default_embedding_dimensions",
+            256,
+        )
+        with patch(
+            "gluellm.embeddings._provider_cache.get_provider",
+            return_value=(mock_provider, "text-embedding-3-small"),
+        ):
+            result = await embed("Hello")
+
+            mock_provider._aembedding.assert_called_once()
+            call_kwargs = mock_provider._aembedding.call_args.kwargs
+            assert call_kwargs.get("dimensions") == 256
+
+            assert isinstance(result, EmbeddingResult)
+            assert result.dimension == 256
+
     async def test_embedding_with_encoding_format(self):
         """Test embedding with encoding_format parameter."""
         mock_response = MagicMock()

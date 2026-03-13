@@ -392,6 +392,7 @@ async def embed(
     connect_timeout: float | None = None,
     api_key: str | None = None,
     encoding_format: str | None = None,
+    dimensions: int | None = None,
     rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
     rate_limit_config: RateLimitConfig | None = None,
     **kwargs: Any,
@@ -411,6 +412,9 @@ async def embed(
         encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
             Provider-specific. Note: If using "base64", the embedding format may differ from
             the standard list[float] format.
+        dimensions: Optional number of dimensions for the embedding output. Supported by some
+            providers (e.g., OpenAI text-embedding-3-* models) to truncate vectors. Defaults to
+            settings.default_embedding_dimensions if not specified.
         rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
         rate_limit_config: Per-call rate limit configuration override.
         **kwargs: Additional provider-specific arguments passed through to the embedding API.
@@ -474,6 +478,9 @@ async def embed(
     embedding_kwargs: dict[str, Any] = {}
     if encoding_format is not None:
         embedding_kwargs["encoding_format"] = encoding_format
+    effective_dimensions = dimensions if dimensions is not None else settings.default_embedding_dimensions
+    if effective_dimensions is not None:
+        embedding_kwargs["dimensions"] = effective_dimensions
     # Merge any additional kwargs (e.g., user, etc.)
     embedding_kwargs.update(kwargs)
 

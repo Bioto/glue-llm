@@ -3358,6 +3358,7 @@ class GlueLLM:
         connect_timeout: float | None = None,
         api_key: str | None = None,
         encoding_format: str | None = None,
+        dimensions: int | None = None,
         **kwargs: Any,
     ) -> "EmbeddingResult":
         """Generate embeddings for the given text(s).
@@ -3372,6 +3373,8 @@ class GlueLLM:
             encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
                 Provider-specific. Note: If using "base64", the embedding format may differ from
                 the standard list[float] format.
+            dimensions: Optional number of dimensions for the embedding output. Supported by some
+                providers (e.g., OpenAI text-embedding-3-* models) to truncate vectors.
             **kwargs: Additional provider-specific arguments passed through to the embedding API.
                 Examples: `user` (OpenAI) for end-user identification.
 
@@ -3412,6 +3415,7 @@ class GlueLLM:
             connect_timeout=connect_timeout,
             api_key=api_key,
             encoding_format=encoding_format,
+            dimensions=dimensions,
             **kwargs,
         )
 
@@ -3652,6 +3656,7 @@ async def embed(
     request_timeout: float | None = None,
     connect_timeout: float | None = None,
     encoding_format: str | None = None,
+    dimensions: int | None = None,
     rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
     rate_limit_config: RateLimitConfig | None = None,
     **kwargs: Any,
@@ -3667,6 +3672,8 @@ async def embed(
         encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
             Provider-specific. Note: If using "base64", the embedding format may differ from
             the standard list[float] format.
+        dimensions: Optional number of dimensions for the embedding output. Supported by some
+            providers (e.g., OpenAI text-embedding-3-* models) to truncate vectors.
         rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
         rate_limit_config: Per-call rate limit configuration override.
         **kwargs: Additional provider-specific arguments passed through to the embedding API.
@@ -3694,6 +3701,7 @@ async def embed(
         request_timeout=request_timeout,
         connect_timeout=connect_timeout,
         encoding_format=encoding_format,
+        dimensions=dimensions,
         rate_limit_algorithm=rate_limit_algorithm,
         rate_limit_config=rate_limit_config,
         **kwargs,

@@ -9,7 +9,7 @@ Configuration Sources (in order of precedence):
     3. .env file in project root
 
 Available Settings:
-    - Model Configuration: default_model, default_system_prompt, default_max_tokens
+    - Model Configuration: default_model, default_embedding_model, default_embedding_dimensions, default_system_prompt, default_max_tokens
     - Tool Execution: max_tool_iterations
     - Retry Behavior: retry_max_attempts, retry_min_wait, retry_max_wait, retry_multiplier
     - Request Timeout: default_request_timeout, max_request_timeout
@@ -65,6 +65,7 @@ class GlueLLMSettings(BaseSettings):
     # Default model settings
     default_model: str = "openai:gpt-4o-mini"
     default_embedding_model: str = "openai/text-embedding-3-small"
+    default_embedding_dimensions: int | None = None  # e.g., 512 for text-embedding-3-small
     default_system_prompt: str = "You are a helpful assistant."
     default_max_tokens: int | None = None  # Global default; overridable per client and per call (e.g. 8192 for Anthropic)
 
