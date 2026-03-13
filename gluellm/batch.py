@@ -204,6 +204,7 @@ class BatchProcessor:
                         system_prompt=request.system_prompt or self.system_prompt,
                         tools=request.tools if request.tools is not None else self.tools,
                         max_tool_iterations=request.max_tool_iterations or self.max_tool_iterations,
+                        tool_execution_order=request.tool_execution_order,
                     )
 
                     # Execute the request
@@ -213,6 +214,7 @@ class BatchProcessor:
                         correlation_id=request_id,
                         request_timeout=request.timeout,
                         api_key=api_key,
+                        tool_execution_order=request.tool_execution_order,
                     )
 
                     elapsed_time = time.time() - start_time

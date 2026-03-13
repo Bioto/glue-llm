@@ -6,9 +6,11 @@ and processing them efficiently in parallel.
 
 from collections.abc import Callable
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
+
+ToolExecutionOrder = Literal["sequential", "parallel"]
 
 
 class BatchErrorStrategy(str, Enum):
@@ -54,6 +56,7 @@ class BatchRequest(BaseModel):
         tools: Optional tools override for this specific request
         execute_tools: Whether to execute tools for this request
         max_tool_iterations: Optional max tool iterations override
+        tool_execution_order: Optional override ("sequential" or "parallel")
         timeout: Optional timeout override for this request
         metadata: Optional metadata to attach to this request
     """
@@ -64,6 +67,9 @@ class BatchRequest(BaseModel):
     tools: Annotated[list[Callable] | None, Field(description="Optional tools override", default=None)]
     execute_tools: Annotated[bool, Field(description="Whether to execute tools", default=True)]
     max_tool_iterations: Annotated[int | None, Field(description="Optional max tool iterations override", default=None)]
+    tool_execution_order: Annotated[
+        ToolExecutionOrder | None, Field(description="Optional tool execution order override", default=None)
+    ] = None
     timeout: Annotated[float | None, Field(description="Optional timeout override", default=None)]
     metadata: Annotated[dict[str, Any], Field(description="Optional metadata", default_factory=dict)]
 

@@ -102,6 +102,11 @@ class TestErrorClassification:
             Exception("invalid request"),
             Exception("400 bad request"),
             Exception("validation error"),
+            Exception("The 'max_tokens' field is required and cannot be left empty"),
+            Exception(
+                "Unsupported parameter: 'max_tokens' is not supported with this model. "
+                "Use 'max_completion_tokens' instead."
+            ),
         ]
 
         for error in errors:

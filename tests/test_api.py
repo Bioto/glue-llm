@@ -1561,6 +1561,34 @@ def _make_tool_call_response(tool_name: str, arguments: str, call_id: str = "cal
     )
 
 
+def _make_multi_tool_call_response(
+    calls: list[tuple[str, str, str]],
+) -> SimpleNamespace:
+    """Build a fake LLM response that requests multiple tool calls in one round."""
+    tool_calls = [
+        SimpleNamespace(
+            id=call_id,
+            type="function",
+            function=SimpleNamespace(name=name, arguments=args),
+        )
+        for name, args, call_id in calls
+    ]
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    role="assistant",
+                    content=None,
+                    tool_calls=tool_calls,
+                ),
+                finish_reason="tool_calls",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        model="openai:gpt-4o-mini",
+    )
+
+
 class TestCondenseToolMessagesIntegration:
     """Integration tests for condense_tool_messages using mocked LLM calls.
 
@@ -1908,6 +1936,71 @@ class TestCondenseToolMessagesIntegration:
             assert not any("[Tool Results]" in (m.get("content") or "") for m in non_system), (
                 f"Turn {turn_number}: condensed tool summaries leaked into conversation history"
             )
+
+
+class TestParallelToolExecution:
+    """Tests for tool_execution_order='parallel' — multiple tool calls in one round."""
+
+    async def test_parallel_tool_calls_both_executed(self):
+        """With tool_execution_order='parallel', two tool calls in one round both execute."""
+        call_count = 0
+
+        async def fake_llm(*, messages, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_multi_tool_call_response(
+                    [
+                        ("dummy_tool", '{"value": "first"}', "call_1"),
+                        ("math_tool", '{"a": 1, "b": 2, "operation": "add"}', "call_2"),
+                    ]
+                )
+            return _make_tool_response("All done")
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            result = await complete(
+                user_message="Call both tools",
+                system_prompt="Use tools.",
+                tools=[dummy_tool, math_tool],
+                tool_execution_order="parallel",
+            )
+
+        assert result.tool_calls_made == 2
+        assert call_count == 2
+        assert len(result.tool_execution_history) == 2
+        tool_names = [h["tool_name"] for h in result.tool_execution_history]
+        assert "dummy_tool" in tool_names and "math_tool" in tool_names
+        assert any(h["result"] == "Tool received: first" for h in result.tool_execution_history)
+        assert any("3" in str(h["result"]) for h in result.tool_execution_history)
+
+    async def test_sequential_remains_default(self):
+        """Default tool_execution_order is sequential; both modes produce same results."""
+        call_count = 0
+
+        async def fake_llm(*, messages, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_multi_tool_call_response(
+                    [
+                        ("dummy_tool", '{"value": "seq"}', "call_1"),
+                        ("math_tool", '{"a": 5, "b": 10, "operation": "add"}', "call_2"),
+                    ]
+                )
+            return _make_tool_response("Done")
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            result = await complete(
+                user_message="Call both",
+                system_prompt="Use tools.",
+                tools=[dummy_tool, math_tool],
+                tool_execution_order="sequential",
+            )
+
+        assert result.tool_calls_made == 2
+        assert len(result.tool_execution_history) == 2
+        assert result.tool_execution_history[0]["tool_name"] == "dummy_tool"
+        assert result.tool_execution_history[1]["tool_name"] == "math_tool"
 
 
 class TestTrimToolDocstrings:

@@ -101,7 +101,7 @@ from gluellm.batch import (
     batch_complete,
     batch_complete_simple,
 )
-from gluellm.config import GlueLLMSettings, configure, get_settings, reload_settings, settings
+from gluellm.config import GlueLLMSettings, ToolExecutionOrder, configure, get_settings, reload_settings, settings
 from gluellm.tool_router import ToolMode
 from gluellm.eval import (
     CallbackStore,
@@ -250,6 +250,7 @@ __all__ = [
     "get_global_eval_store",
     # Tool routing
     "ToolMode",
+    "ToolExecutionOrder",
     # Configuration
     "GlueLLMSettings",
     "configure",

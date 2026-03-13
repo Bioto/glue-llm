@@ -60,7 +60,7 @@ class Agent:
             max_tool_iterations: Maximum number of tool call iterations
                 (defaults to 10)
             model: LLM model to use (defaults to settings.default_model)
-            max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
+            max_tokens: Maximum number of tokens to generate (defaults to settings.default_max_tokens).
         """
         from gluellm.config import settings
 
@@ -70,4 +70,4 @@ class Agent:
         self.tools = tools
         self.model = model or settings.default_model
         self.max_tool_iterations = max_tool_iterations
-        self.max_tokens = max_tokens
+        self.max_tokens = max_tokens if max_tokens is not None else settings.default_max_tokens

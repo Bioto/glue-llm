@@ -198,6 +198,24 @@ result = await complete(
 )
 ```
 
+### Parallel tool execution (opt-in)
+
+By default, when the model returns multiple tool calls in a single round, they are executed sequentially. Use `tool_execution_order="parallel"` to run them concurrently (via `asyncio.gather`), which can reduce latency when tools are I/O-bound.
+
+**Off by default (`tool_execution_order="sequential"`).** Enable globally, per client, or per call:
+
+```python
+# Per-call
+result = await complete("Get weather in Tokyo and Paris", tools=[get_weather], tool_execution_order="parallel")
+
+# On the client
+client = GlueLLM(tools=[...], tool_execution_order="parallel")
+
+# Global default (env: GLUELLM_DEFAULT_TOOL_EXECUTION_ORDER)
+import gluellm
+gluellm.configure(default_tool_execution_order="parallel")
+```
+
 ### Process status events
 
 Use the optional `on_status` callback to observe what’s happening (LLM call start/end, tool execution, stream start/chunk/end, completion). Handy for progress UIs or logging.

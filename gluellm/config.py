@@ -9,7 +9,7 @@ Configuration Sources (in order of precedence):
     3. .env file in project root
 
 Available Settings:
-    - Model Configuration: default_model, default_system_prompt
+    - Model Configuration: default_model, default_system_prompt, default_max_tokens
     - Tool Execution: max_tool_iterations
     - Retry Behavior: retry_max_attempts, retry_min_wait, retry_max_wait, retry_multiplier
     - Request Timeout: default_request_timeout, max_request_timeout
@@ -35,11 +35,14 @@ from typing import Annotated, Literal
 from pydantic import Field
 
 from gluellm.rate_limit_types import RateLimitAlgorithm
+
+ToolExecutionOrder = Literal["sequential", "parallel"]
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Find the project root (where .env file is located)
-_project_root = Path(__file__).parent.parent
-_env_file = _project_root / ".env"
+# When used as an installed library, Path(__file__) points into site-packages,
+# so an absolute path derived from it would miss the consumer's .env.
+# A plain relative path lets pydantic-settings resolve against CWD instead.
+_env_file = Path(".env")
 
 
 class GlueLLMSettings(BaseSettings):
@@ -63,10 +66,12 @@ class GlueLLMSettings(BaseSettings):
     default_model: str = "openai:gpt-4o-mini"
     default_embedding_model: str = "openai/text-embedding-3-small"
     default_system_prompt: str = "You are a helpful assistant."
+    default_max_tokens: int | None = None  # Global default; overridable per client and per call (e.g. 8192 for Anthropic)
 
     # Tool execution settings
     max_tool_iterations: Annotated[int, Field(gt=0)] = 10
     default_tool_mode: Literal["standard", "dynamic"] = "standard"
+    default_tool_execution_order: Literal["sequential", "parallel"] = "sequential"
     tool_route_model: str = "openai:gpt-4o-mini"
     default_condense_tool_messages: bool = False
 

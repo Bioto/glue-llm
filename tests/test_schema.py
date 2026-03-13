@@ -108,6 +108,38 @@ class TestNormalizeSchemaForOpenAI:
         assert "required_field" in required
         assert "optional_field" in required
 
+    def test_fields_with_defaults_not_made_nullable(self):
+        """Fields with non-None defaults must NOT be made nullable by normalization.
+
+        Previously, datetime/list fields with default_factory were wrapped in
+        anyOf: [{original}, {type: null}], causing the LLM to return null and
+        Pydantic validation to fail.
+        """
+        from datetime import datetime
+
+        from pydantic import Field
+
+        from gluellm.schema import _is_nullable, normalize_schema_for_openai
+
+        class Item(BaseModel):
+            title: str
+            created_at: datetime = Field(default_factory=datetime.utcnow)
+            tags: list[str] = Field(default_factory=list)
+            note: str | None = None  # this one IS genuinely nullable
+
+        schema = normalize_schema_for_openai(Item)
+
+        # All fields must be required
+        assert set(schema["required"]) == {"title", "created_at", "tags", "note"}
+
+        props = schema["properties"]
+        # created_at must NOT be nullable (no null in anyOf)
+        assert not _is_nullable(props["created_at"])
+        # tags must NOT be nullable
+        assert not _is_nullable(props["tags"])
+        # note IS nullable (str | None) — should remain nullable
+        assert _is_nullable(props["note"])
+
     def test_dict_with_any_type(self):
         """Test normalization of dict[str, Any] fields."""
         from gluellm.schema import normalize_schema_for_openai

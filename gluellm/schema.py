@@ -146,12 +146,10 @@ def _apply_strict_mode_fixes(schema: dict[str, Any]) -> dict[str, Any]:
                 missing = all_props - required
 
                 if missing:
-                    # Add missing properties to required, handling optional fields
-                    for prop_name in missing:
-                        prop_schema = properties[prop_name]
-                        # If not already nullable, make it nullable for optional fields
-                        if not _is_nullable(prop_schema):
-                            properties[prop_name] = _make_nullable(prop_schema)
+                    # Add missing properties to required as-is. Non-nullable fields
+                    # with defaults (e.g. datetime, list) must NOT be made nullable —
+                    # the LLM must provide values for them. Genuinely optional fields
+                    # (T | None) are already nullable from Pydantic's schema.
                     obj["required"] = list(all_props)
                     logger.debug(f"Added {missing} to required at {path}")
 

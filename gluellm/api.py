@@ -73,6 +73,7 @@ from any_llm.types.completion import ChatCompletion
 from pydantic import BaseModel, Field, field_validator, field_serializer
 from pydantic.functional_validators import SkipValidation
 from gluellm.config import settings
+from gluellm.config import ToolExecutionOrder
 from gluellm.tool_router import (
     ToolMode,
     build_router_tool,
@@ -88,6 +89,7 @@ from gluellm.guardrails.runner import run_input_guardrails, run_output_guardrail
 from gluellm.models.conversation import Conversation, Role
 from gluellm.models.eval import EvalRecord
 from gluellm.observability.logging_config import get_logger
+from gluellm.provider_params import normalize_model_params
 from gluellm.rate_limiting.api_key_pool import extract_provider_from_model
 from gluellm.rate_limiting.rate_limiter import acquire_rate_limit
 from gluellm.rate_limit_types import RateLimitAlgorithm
@@ -1113,6 +1115,23 @@ def classify_llm_error(error: Exception) -> Exception:
     error_msg = str(error).lower()
     error_type = type(error).__name__
 
+    # Invalid param involving max_tokens — check before generic TokenLimitError to avoid false matches:
+    # 1. max_tokens required but missing (e.g. Anthropic)
+    # 2. max_tokens not supported by model, use max_completion_tokens instead (e.g. OpenAI o-series)
+    if "max_tokens" in error_msg and any(
+        phrase in error_msg
+        for phrase in [
+            "required",
+            "cannot be left empty",
+            "must be",
+            "must be provided",
+            "not supported",
+            "unsupported parameter",
+            "max_completion_tokens",
+        ]
+    ):
+        return InvalidRequestError(f"Invalid request: {error}")
+
     # Token/context length errors
     if any(
         keyword in error_msg
@@ -1286,6 +1305,9 @@ async def _safe_llm_call(
             write=request_timeout,
             pool=connect_timeout,
         )
+
+    # Normalize provider-specific params (e.g. Anthropic max_tokens, OpenAI o-series max_completion_tokens)
+    max_tokens, model_kwargs = normalize_model_params(model, max_tokens, model_kwargs)
 
     # Apply rate limiting before making the call
     provider = extract_provider_from_model(model)
@@ -1656,6 +1678,7 @@ class GlueLLM:
         guardrails: GuardrailsConfig | None = None,
         condense_tool_messages: bool | None = None,
         tool_mode: ToolMode = "standard",
+        tool_execution_order: ToolExecutionOrder | None = None,
         tool_route_model: str | None = None,
         max_tokens: int | None = None,
         retry_config: RetryConfig | None = None,
@@ -1672,13 +1695,13 @@ class GlueLLM:
             max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
             eval_store: Optional evaluation store for recording request/response data (defaults to global store if set)
             guardrails: Optional guardrails configuration for input/output validation
-            max_tokens: Maximum number of tokens to generate. Required for Anthropic models.
+            max_tokens: Maximum completion tokens per LLM call (defaults to settings.default_max_tokens; overridable per complete() call).
             condense_tool_messages: If True, each completed tool-call round is condensed into a
                 single assistant message summarising the calls and results, reducing context size
                 across multi-iteration tool loops. Defaults to False.
             tool_mode: "standard" (all tools in system prompt) or "dynamic" (router tool discovers tools on demand)
+            tool_execution_order: "sequential" (default) or "parallel" - how to run multiple tool calls in a round
             tool_route_model: Fast model used for tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model)
-            max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this)
             retry_config: Optional retry configuration. Set retry_config.callback to customise retry
                 decisions and modify model params per attempt. Set retry_config.retry_enabled=False
                 to disable retries entirely.
@@ -1694,13 +1717,13 @@ class GlueLLM:
         self._conversation = Conversation()
         self.eval_store = eval_store or get_global_eval_store()
         self.guardrails = guardrails
-        self.max_tokens = max_tokens
+        self.max_tokens = max_tokens if max_tokens is not None else settings.default_max_tokens
         self.condense_tool_messages = (
             condense_tool_messages if condense_tool_messages is not None else settings.default_condense_tool_messages
         )
         self.tool_mode = tool_mode
+        self.tool_execution_order = tool_execution_order if tool_execution_order is not None else settings.default_tool_execution_order
         self.tool_route_model = tool_route_model or settings.tool_route_model
-        self.max_tokens = max_tokens
         self.retry_config = retry_config
         self.rate_limit_config = rate_limit_config
         self.model_kwargs = model_kwargs or {}
@@ -1719,6 +1742,7 @@ class GlueLLM:
         max_tokens: int | None = None,
         condense_tool_messages: bool | None = None,
         tool_mode: ToolMode | None = None,
+        tool_execution_order: ToolExecutionOrder | None = None,
         retry_enabled: bool | None = None,
         retry_config: RetryConfig | None = None,
         rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
@@ -1751,7 +1775,7 @@ class GlueLLM:
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
-            ToolExecutionResult with final response and execution history
+            ExecutionResult with final response and execution history
 
         Raises:
             TokenLimitError: If token limit is exceeded
@@ -1776,6 +1800,9 @@ class GlueLLM:
         )
         effective_tool_mode: ToolMode = (
             tool_mode if tool_mode is not None else self.tool_mode
+        )
+        effective_tool_execution_order: ToolExecutionOrder = (
+            tool_execution_order if tool_execution_order is not None else self.tool_execution_order
         )
         effective_retry_config = retry_config if retry_config is not None else self.retry_config
         if retry_enabled is not None and not retry_enabled:
@@ -1939,197 +1966,19 @@ class GlueLLM:
                         # Add assistant message with tool calls to history (dict for any_llm validation)
                         messages.append(_response_message_to_dict(response.choices[0].message))
 
-                        # Execute each tool call
-                        for call_index, tool_call in enumerate(tool_calls, 1):
-                            tool_calls_made += 1
-                            tool_name = _tool_name_from_call(tool_call)
-                            await emit_status(
-                                ProcessEvent(
-                                    kind="tool_call_start",
-                                    correlation_id=correlation_id,
-                                    timestamp=time.time(),
-                                    iteration=iteration + 1,
-                                    tool_name=tool_name,
-                                    call_index=call_index,
-                                ),
-                                on_status,
-                            )
-
-                            try:
-                                tool_args = json.loads(tool_call.function.arguments)
-                            except json.JSONDecodeError as e:
-                                # Handle malformed JSON from model
-                                error_msg = f"Invalid JSON in tool arguments: {str(e)}"
-                                logger.warning(f"Tool {tool_name} - {error_msg}")
-                                await emit_status(
-                                    ProcessEvent(
-                                        kind="tool_call_end",
-                                        correlation_id=correlation_id,
-                                        timestamp=time.time(),
-                                        tool_name=tool_name,
-                                        call_index=call_index,
-                                        success=False,
-                                        duration_seconds=0,
-                                        error=error_msg,
-                                    ),
-                                    on_status,
-                                )
-                                tool_execution_history.append(
-                                    {
-                                        "tool_name": tool_name,
-                                        "arguments": tool_call.function.arguments,
-                                        "result": error_msg,
-                                        "error": True,
-                                    }
-                                )
-                                messages.append(
-                                    {
-                                        "role": "tool",
-                                        "tool_call_id": tool_call.id,
-                                        "content": error_msg,
-                                    }
-                                )
-                                continue
-
-                            # Find and execute the tool
-                            tool_func = self._find_tool(tool_name, tools=active_tools)
-                            if tool_func:
-                                tool_start_time = time.time()
-                                try:
-                                    # Support both sync and async tools
-                                    if asyncio.iscoroutinefunction(tool_func):
-                                        logger.debug(f"Executing async tool: {tool_name}")
-                                        tool_result = await tool_func(**tool_args)
-                                    else:
-                                        logger.debug(f"Executing sync tool: {tool_name}")
-                                        tool_result = tool_func(**tool_args)
-                                    tool_result_str = str(tool_result)
-                                    tool_elapsed = time.time() - tool_start_time
-                                    logger.info(f"Tool {tool_name} executed successfully in {tool_elapsed:.3f}s")
-                                    await emit_status(
-                                        ProcessEvent(
-                                            kind="tool_call_end",
-                                            correlation_id=correlation_id,
-                                            timestamp=time.time(),
-                                            tool_name=tool_name,
-                                            call_index=call_index,
-                                            success=True,
-                                            duration_seconds=tool_elapsed,
-                                        ),
-                                        on_status,
-                                    )
-
-                                    # Record in history
-                                    tool_execution_history.append(
-                                        {
-                                            "tool_name": tool_name,
-                                            "arguments": tool_args,
-                                            "result": tool_result_str,
-                                            "error": False,
-                                        }
-                                    )
-
-                                    # Record tool execution in trace if enabled
-                                    if is_tracing_enabled():
-                                        from gluellm.telemetry import _tracer
-
-                                        if _tracer is not None:
-                                            with _tracer.start_as_current_span(f"tool.{tool_name}") as tool_span:
-                                                set_span_attributes(
-                                                    tool_span,
-                                                    **{
-                                                        "tool.name": tool_name,
-                                                        "tool.arg_count": len(tool_args),
-                                                        "tool.success": True,
-                                                    },
-                                                )
-                                except Exception as e:
-                                    # Tool execution error
-                                    tool_elapsed = time.time() - tool_start_time
-                                    tool_result_str = f"Error executing tool: {type(e).__name__}: {str(e)}"
-                                    logger.warning(
-                                        f"Tool {tool_name} execution failed after {tool_elapsed:.3f}s: {e}",
-                                        exc_info=True,
-                                    )
-                                    await emit_status(
-                                        ProcessEvent(
-                                            kind="tool_call_end",
-                                            correlation_id=correlation_id,
-                                            timestamp=time.time(),
-                                            tool_name=tool_name,
-                                            call_index=call_index,
-                                            success=False,
-                                            duration_seconds=tool_elapsed,
-                                            error=str(e),
-                                        ),
-                                        on_status,
-                                    )
-
-                                    tool_execution_history.append(
-                                        {
-                                            "tool_name": tool_name,
-                                            "arguments": tool_args,
-                                            "result": tool_result_str,
-                                            "error": True,
-                                        }
-                                    )
-
-                                    # Record tool execution error in trace if enabled
-                                    if is_tracing_enabled():
-                                        from gluellm.telemetry import _tracer
-
-                                        if _tracer is not None:
-                                            with _tracer.start_as_current_span(f"tool.{tool_name}") as tool_span:
-                                                set_span_attributes(
-                                                    tool_span,
-                                                    **{
-                                                        "tool.name": tool_name,
-                                                        "tool.arg_count": len(tool_args),
-                                                        "tool.success": False,
-                                                        "tool.error": str(e),
-                                                    },
-                                                )
-
-                                # Add tool result to messages
-                                messages.append(
-                                    {
-                                        "role": "tool",
-                                        "tool_call_id": tool_call.id,
-                                        "content": tool_result_str,
-                                    }
-                                )
-                            else:
-                                # Tool not found
-                                error_msg = f"Tool '{tool_name}' not found in available tools"
-                                logger.warning(error_msg)
-                                await emit_status(
-                                    ProcessEvent(
-                                        kind="tool_call_end",
-                                        correlation_id=correlation_id,
-                                        timestamp=time.time(),
-                                        tool_name=tool_name,
-                                        call_index=call_index,
-                                        success=False,
-                                        duration_seconds=0,
-                                        error=error_msg,
-                                    ),
-                                    on_status,
-                                )
-                                tool_execution_history.append(
-                                    {
-                                        "tool_name": tool_name,
-                                        "arguments": tool_args,
-                                        "result": error_msg,
-                                        "error": True,
-                                    }
-                                )
-                                messages.append(
-                                    {
-                                        "role": "tool",
-                                        "tool_call_id": tool_call.id,
-                                        "content": error_msg,
-                                    }
-                                )
+                        # Execute tool calls (sequential or parallel per effective_tool_execution_order)
+                        round_results = await self._execute_tool_calls_round(
+                            tool_calls=tool_calls,
+                            active_tools=active_tools,
+                            parallel=(effective_tool_execution_order == "parallel"),
+                            iteration=iteration + 1,
+                            correlation_id=correlation_id,
+                            on_status=on_status,
+                        )
+                        tool_calls_made += len(round_results)
+                        for r in round_results:
+                            tool_execution_history.append(r["history"])
+                            messages.append(r["message"])
 
                         if effective_condense:
                             _condense_tool_round(messages)
@@ -2361,6 +2210,7 @@ class GlueLLM:
         max_tokens: int | None = None,
         condense_tool_messages: bool | None = None,
         tool_mode: ToolMode | None = None,
+        tool_execution_order: ToolExecutionOrder | None = None,
         retry_enabled: bool | None = None,
         retry_config: RetryConfig | None = None,
         rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
@@ -2424,6 +2274,9 @@ class GlueLLM:
         )
         effective_tool_mode: ToolMode = (
             tool_mode if tool_mode is not None else self.tool_mode
+        )
+        effective_tool_execution_order: ToolExecutionOrder = (
+            tool_execution_order if tool_execution_order is not None else self.tool_execution_order
         )
         effective_retry_config = retry_config if retry_config is not None else self.retry_config
         if retry_enabled is not None and not retry_enabled:
@@ -2614,189 +2467,19 @@ class GlueLLM:
                             # Add assistant message with tool calls to history (dict for any_llm validation)
                             messages.append(_response_message_to_dict(response.choices[0].message))
 
-                            # Execute each tool call
-                            for call_index, tool_call in enumerate(tool_calls, 1):
-                                tool_calls_made += 1
-                                tool_name = _tool_name_from_call(tool_call)
-                                await emit_status(
-                                    ProcessEvent(
-                                        kind="tool_call_start",
-                                        correlation_id=correlation_id,
-                                        timestamp=time.time(),
-                                        iteration=iteration + 1,
-                                        tool_name=tool_name,
-                                        call_index=call_index,
-                                    ),
-                                    on_status,
-                                )
-
-                                try:
-                                    tool_args = json.loads(tool_call.function.arguments)
-                                except json.JSONDecodeError as e:
-                                    error_msg = f"Invalid JSON in tool arguments: {str(e)}"
-                                    logger.warning(f"Tool {tool_name} - {error_msg}")
-                                    await emit_status(
-                                        ProcessEvent(
-                                            kind="tool_call_end",
-                                            correlation_id=correlation_id,
-                                            timestamp=time.time(),
-                                            tool_name=tool_name,
-                                            call_index=call_index,
-                                            success=False,
-                                            duration_seconds=0,
-                                            error=error_msg,
-                                        ),
-                                        on_status,
-                                    )
-                                    tool_execution_history.append(
-                                        {
-                                            "tool_name": tool_name,
-                                            "arguments": tool_call.function.arguments,
-                                            "result": error_msg,
-                                            "error": True,
-                                        }
-                                    )
-                                    messages.append(
-                                        {
-                                            "role": "tool",
-                                            "tool_call_id": tool_call.id,
-                                            "content": error_msg,
-                                        }
-                                    )
-                                    continue
-
-                                # Find and execute the tool
-                                tool_func = self._find_tool(tool_name, tools=active_tools)
-                                if tool_func:
-                                    tool_start_time = time.time()
-                                    try:
-                                        if asyncio.iscoroutinefunction(tool_func):
-                                            logger.debug(f"Executing async tool: {tool_name}")
-                                            tool_result = await tool_func(**tool_args)
-                                        else:
-                                            logger.debug(f"Executing sync tool: {tool_name}")
-                                            tool_result = tool_func(**tool_args)
-                                        tool_result_str = str(tool_result)
-                                        tool_elapsed = time.time() - tool_start_time
-                                        logger.info(f"Tool {tool_name} executed successfully in {tool_elapsed:.3f}s")
-                                        await emit_status(
-                                            ProcessEvent(
-                                                kind="tool_call_end",
-                                                correlation_id=correlation_id,
-                                                timestamp=time.time(),
-                                                tool_name=tool_name,
-                                                call_index=call_index,
-                                                success=True,
-                                                duration_seconds=tool_elapsed,
-                                            ),
-                                            on_status,
-                                        )
-
-                                        tool_execution_history.append(
-                                            {
-                                                "tool_name": tool_name,
-                                                "arguments": tool_args,
-                                                "result": tool_result_str,
-                                                "error": False,
-                                            }
-                                        )
-
-                                        if is_tracing_enabled():
-                                            from gluellm.telemetry import _tracer
-
-                                            if _tracer is not None:
-                                                with _tracer.start_as_current_span(f"tool.{tool_name}") as tool_span:
-                                                    set_span_attributes(
-                                                        tool_span,
-                                                        **{
-                                                            "tool.name": tool_name,
-                                                            "tool.arg_count": len(tool_args),
-                                                            "tool.success": True,
-                                                        },
-                                                    )
-                                    except Exception as e:
-                                        tool_elapsed = time.time() - tool_start_time
-                                        tool_result_str = f"Error executing tool: {type(e).__name__}: {str(e)}"
-                                        logger.warning(
-                                            f"Tool {tool_name} execution failed after {tool_elapsed:.3f}s: {e}",
-                                            exc_info=True,
-                                        )
-                                        await emit_status(
-                                            ProcessEvent(
-                                                kind="tool_call_end",
-                                                correlation_id=correlation_id,
-                                                timestamp=time.time(),
-                                                tool_name=tool_name,
-                                                call_index=call_index,
-                                                success=False,
-                                                duration_seconds=tool_elapsed,
-                                                error=str(e),
-                                            ),
-                                            on_status,
-                                        )
-
-                                        tool_execution_history.append(
-                                            {
-                                                "tool_name": tool_name,
-                                                "arguments": tool_args,
-                                                "result": tool_result_str,
-                                                "error": True,
-                                            }
-                                        )
-
-                                        if is_tracing_enabled():
-                                            from gluellm.telemetry import _tracer
-
-                                            if _tracer is not None:
-                                                with _tracer.start_as_current_span(f"tool.{tool_name}") as tool_span:
-                                                    set_span_attributes(
-                                                        tool_span,
-                                                        **{
-                                                            "tool.name": tool_name,
-                                                            "tool.arg_count": len(tool_args),
-                                                            "tool.success": False,
-                                                            "tool.error": str(e),
-                                                        },
-                                                    )
-
-                                    messages.append(
-                                        {
-                                            "role": "tool",
-                                            "tool_call_id": tool_call.id,
-                                            "content": tool_result_str,
-                                        }
-                                    )
-                                else:
-                                    error_msg = f"Tool '{tool_name}' not found"
-                                    logger.warning(error_msg)
-                                    await emit_status(
-                                        ProcessEvent(
-                                            kind="tool_call_end",
-                                            correlation_id=correlation_id,
-                                            timestamp=time.time(),
-                                            tool_name=tool_name,
-                                            call_index=call_index,
-                                            success=False,
-                                            duration_seconds=0,
-                                            error=error_msg,
-                                        ),
-                                        on_status,
-                                    )
-                                    tool_execution_history.append(
-                                        {
-                                            "tool_name": tool_name,
-                                            "arguments": tool_args,
-                                            "result": error_msg,
-                                            "error": True,
-                                        }
-                                    )
-                                    messages.append(
-                                        {
-                                            "role": "tool",
-                                            "tool_call_id": tool_call.id,
-                                            "content": error_msg,
-                                        }
-                                    )
+                            # Execute tool calls (sequential or parallel per effective_tool_execution_order)
+                            round_results = await self._execute_tool_calls_round(
+                                tool_calls=tool_calls,
+                                active_tools=active_tools,
+                                parallel=(effective_tool_execution_order == "parallel"),
+                                iteration=iteration + 1,
+                                correlation_id=correlation_id,
+                                on_status=on_status,
+                            )
+                            tool_calls_made += len(round_results)
+                            for r in round_results:
+                                tool_execution_history.append(r["history"])
+                                messages.append(r["message"])
 
                             if effective_condense:
                                 _condense_tool_round(messages)
@@ -3059,6 +2742,132 @@ class GlueLLM:
                 return tool
         return None
 
+    async def _execute_tool_calls_round(
+        self,
+        tool_calls: list[Any],
+        active_tools: list[Callable],
+        parallel: bool,
+        iteration: int,
+        correlation_id: str,
+        on_status: OnStatusCallback,
+    ) -> list[dict[str, Any]]:
+        """Execute a round of tool calls (sequential or parallel).
+
+        Returns a list of dicts, each with "history" and "message" keys for
+        appending to tool_execution_history and messages.
+        """
+        # Phase 1: parse and resolve each tool call
+        Parsed = tuple[int, Any, str, dict[str, Any] | None, Callable | None, str | None]
+        parsed: list[Parsed] = []
+        for call_index, tool_call in enumerate(tool_calls, 1):
+            tool_name = _tool_name_from_call(tool_call)
+            try:
+                tool_args = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError as e:
+                parsed.append((call_index, tool_call, tool_name, None, None, f"Invalid JSON in tool arguments: {str(e)}"))
+                continue
+            tool_func = self._find_tool(tool_name, tools=active_tools)
+            if not tool_func:
+                parsed.append((call_index, tool_call, tool_name, tool_args, None, f"Tool '{tool_name}' not found in available tools"))
+                continue
+            parsed.append((call_index, tool_call, tool_name, tool_args, tool_func, None))
+
+        async def run_one(call_index: int, tool_call: Any, tool_name: str, tool_args: dict[str, Any], tool_func: Callable) -> tuple[str, bool, float]:
+            """Execute a single tool and return (result_str, error, duration)."""
+            start = time.time()
+            try:
+                if is_tracing_enabled():
+                    from gluellm.telemetry import _tracer
+
+                    if _tracer is not None:
+                        with _tracer.start_as_current_span(f"tool.{tool_name}") as tool_span:
+                            set_span_attributes(
+                                tool_span,
+                                **{
+                                    "tool.name": tool_name,
+                                    "tool.arg_count": len(tool_args),
+                                    "tool.success": True,
+                                },
+                            )
+                if asyncio.iscoroutinefunction(tool_func):
+                    result = await tool_func(**tool_args)
+                else:
+                    result = await asyncio.to_thread(tool_func, **tool_args)
+                elapsed = time.time() - start
+                return (str(result), False, elapsed)
+            except Exception as e:
+                elapsed = time.time() - start
+                return (f"Error executing tool: {type(e).__name__}: {str(e)}", True, elapsed)
+
+        results: list[dict[str, Any]] = []
+        if parallel:
+            # Emit all starts first
+            for call_index, tool_call, tool_name, _a, _f, err in parsed:
+                await emit_status(
+                    ProcessEvent(
+                        kind="tool_call_start",
+                        correlation_id=correlation_id,
+                        timestamp=time.time(),
+                        iteration=iteration,
+                        tool_name=tool_name,
+                        call_index=call_index,
+                    ),
+                    on_status,
+                )
+            # Build ordered results: errors first, then runnables
+            ordered: list[dict[str, Any] | None] = [None] * len(parsed)
+            runnable_items: list[tuple[int, Any, str, dict[str, Any], Callable]] = []
+            for i, (call_index, tool_call, tool_name, tool_args, tool_func, err) in enumerate(parsed):
+                if err is not None:
+                    await emit_status(
+                        ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=False, duration_seconds=0, error=err),
+                        on_status,
+                    )
+                    args_str = getattr(tool_call.function, "arguments", "{}")
+                    ordered[i] = {"history": {"tool_name": tool_name, "arguments": args_str, "result": err, "error": True}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": err}}
+                else:
+                    runnable_items.append((call_index, tool_call, tool_name, tool_args or {}, tool_func))
+            if runnable_items:
+                tasks = [run_one(ci, tc, tn, ta, tf) for ci, tc, tn, ta, tf in runnable_items]
+                gathered = await asyncio.gather(*tasks, return_exceptions=True)
+                runnable_idx = 0
+                for i, (call_index, tool_call, tool_name, tool_args, tool_func, err) in enumerate(parsed):
+                    if err is not None:
+                        continue
+                    g = gathered[runnable_idx]
+                    runnable_idx += 1
+                    if isinstance(g, Exception):
+                        result_str, error, duration = f"Error executing tool: {type(g).__name__}: {str(g)}", True, 0.0
+                    else:
+                        result_str, error, duration = g
+                    await emit_status(
+                        ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=not error, duration_seconds=duration, error=result_str if error else None),
+                        on_status,
+                    )
+                    ordered[i] = {"history": {"tool_name": tool_name, "arguments": tool_args or {}, "result": result_str, "error": error}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": result_str}}
+            results = [r for r in ordered if r is not None]
+        else:
+            # Sequential
+            for call_index, tool_call, tool_name, tool_args, tool_func, err in parsed:
+                await emit_status(
+                    ProcessEvent(kind="tool_call_start", correlation_id=correlation_id, timestamp=time.time(), iteration=iteration, tool_name=tool_name, call_index=call_index),
+                    on_status,
+                )
+                if err is not None:
+                    await emit_status(
+                        ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=False, duration_seconds=0, error=err),
+                        on_status,
+                    )
+                    results.append({"history": {"tool_name": tool_name, "arguments": getattr(tool_call.function, "arguments", "{}"), "result": err, "error": True}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": err}})
+                    continue
+                result_str, error, duration = await run_one(call_index, tool_call, tool_name, tool_args or {}, tool_func)
+                await emit_status(
+                    ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=not error, duration_seconds=duration, error=result_str if error else None),
+                    on_status,
+                )
+                results.append({"history": {"tool_name": tool_name, "arguments": tool_args or {}, "result": result_str, "error": error}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": result_str}})
+        return results
+
     async def stream_complete(
         self,
         user_message: str,
@@ -3073,6 +2882,7 @@ class GlueLLM:
         max_tokens: int | None = None,
         condense_tool_messages: bool | None = None,
         tool_mode: ToolMode | None = None,
+        tool_execution_order: ToolExecutionOrder | None = None,
         retry_enabled: bool | None = None,
         retry_config: RetryConfig | None = None,
         rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
@@ -3135,6 +2945,9 @@ class GlueLLM:
         )
         effective_tool_mode: ToolMode = (
             tool_mode if tool_mode is not None else self.tool_mode
+        )
+        effective_tool_execution_order: ToolExecutionOrder = (
+            tool_execution_order if tool_execution_order is not None else self.tool_execution_order
         )
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
         effective_retry_config = retry_config if retry_config is not None else self.retry_config
@@ -3393,161 +3206,19 @@ class GlueLLM:
                 if msg_dict is not None:
                     messages.append(msg_dict)
 
-                # Execute each tool call
-                for call_index, tool_call in enumerate(tool_calls, 1):
-                    tool_calls_made += 1
-                    tool_name = _tool_name_from_call(tool_call)
-                    logger.debug(f"Executing tool call {tool_calls_made}: {tool_name}")
-                    await emit_status(
-                        ProcessEvent(
-                            kind="tool_call_start",
-                            correlation_id=get_correlation_id(),
-                            timestamp=time.time(),
-                            iteration=iteration + 1,
-                            tool_name=tool_name,
-                            call_index=call_index,
-                        ),
-                        on_status,
-                    )
-
-                    try:
-                        tool_args = json.loads(tool_call.function.arguments)
-                        logger.debug(f"Tool {tool_name} arguments: {tool_args}")
-                    except json.JSONDecodeError as e:
-                        error_msg = f"Invalid JSON in tool arguments: {str(e)}"
-                        logger.warning(f"Tool {tool_name} - {error_msg}")
-                        await emit_status(
-                            ProcessEvent(
-                                kind="tool_call_end",
-                                correlation_id=get_correlation_id(),
-                                timestamp=time.time(),
-                                tool_name=tool_name,
-                                call_index=call_index,
-                                success=False,
-                                duration_seconds=0,
-                                error=error_msg,
-                            ),
-                            on_status,
-                        )
-                        tool_execution_history.append(
-                            {
-                                "tool_name": tool_name,
-                                "arguments": tool_call.function.arguments,
-                                "result": error_msg,
-                                "error": True,
-                            }
-                        )
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": error_msg,
-                            }
-                        )
-                        continue
-
-                    # Find and execute the tool
-                    tool_func = self._find_tool(tool_name, tools=active_tools)
-                    if tool_func:
-                        tool_start_time = time.time()
-                        try:
-                            # Check if tool is async
-                            if asyncio.iscoroutinefunction(tool_func):
-                                logger.debug(f"Executing async tool: {tool_name}")
-                                tool_result = await tool_func(**tool_args)
-                            else:
-                                logger.debug(f"Executing sync tool: {tool_name}")
-                                tool_result = tool_func(**tool_args)
-                            tool_result_str = str(tool_result)
-                            tool_elapsed = time.time() - tool_start_time
-                            logger.info(f"Tool {tool_name} executed successfully in {tool_elapsed:.3f}s")
-                            await emit_status(
-                                ProcessEvent(
-                                    kind="tool_call_end",
-                                    correlation_id=get_correlation_id(),
-                                    timestamp=time.time(),
-                                    tool_name=tool_name,
-                                    call_index=call_index,
-                                    success=True,
-                                    duration_seconds=tool_elapsed,
-                                ),
-                                on_status,
-                            )
-
-                            tool_execution_history.append(
-                                {
-                                    "tool_name": tool_name,
-                                    "arguments": tool_args,
-                                    "result": tool_result_str,
-                                    "error": False,
-                                }
-                            )
-                        except Exception as e:
-                            tool_elapsed = time.time() - tool_start_time
-                            tool_result_str = f"Error executing tool: {type(e).__name__}: {str(e)}"
-                            logger.warning(
-                                f"Tool {tool_name} execution failed after {tool_elapsed:.3f}s: {e}", exc_info=True
-                            )
-                            await emit_status(
-                                ProcessEvent(
-                                    kind="tool_call_end",
-                                    correlation_id=get_correlation_id(),
-                                    timestamp=time.time(),
-                                    tool_name=tool_name,
-                                    call_index=call_index,
-                                    success=False,
-                                    duration_seconds=tool_elapsed,
-                                    error=str(e),
-                                ),
-                                on_status,
-                            )
-                            tool_execution_history.append(
-                                {
-                                    "tool_name": tool_name,
-                                    "arguments": tool_args,
-                                    "result": tool_result_str,
-                                    "error": True,
-                                }
-                            )
-
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": tool_result_str,
-                            }
-                        )
-                    else:
-                        error_msg = f"Tool '{tool_name}' not found in available tools"
-                        logger.warning(error_msg)
-                        await emit_status(
-                            ProcessEvent(
-                                kind="tool_call_end",
-                                correlation_id=get_correlation_id(),
-                                timestamp=time.time(),
-                                tool_name=tool_name,
-                                call_index=call_index,
-                                success=False,
-                                duration_seconds=0,
-                                error=error_msg,
-                            ),
-                            on_status,
-                        )
-                        tool_execution_history.append(
-                            {
-                                "tool_name": tool_name,
-                                "arguments": tool_args,
-                                "result": error_msg,
-                                "error": True,
-                            }
-                        )
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": error_msg,
-                            }
-                        )
+                # Execute tool calls (sequential or parallel per effective_tool_execution_order)
+                round_results = await self._execute_tool_calls_round(
+                    tool_calls=tool_calls,
+                    active_tools=active_tools,
+                    parallel=(effective_tool_execution_order == "parallel"),
+                    iteration=iteration + 1,
+                    correlation_id=get_correlation_id(),
+                    on_status=on_status,
+                )
+                tool_calls_made += len(round_results)
+                for r in round_results:
+                    tool_execution_history.append(r["history"])
+                    messages.append(r["message"])
 
                 if effective_condense:
                     _condense_tool_round(messages)
@@ -3763,6 +3434,7 @@ async def complete(
     max_tokens: int | None = None,
     condense_tool_messages: bool | None = None,
     tool_mode: ToolMode | None = None,
+    tool_execution_order: ToolExecutionOrder | None = None,
     tool_route_model: str | None = None,
     retry_enabled: bool | None = None,
     retry_config: RetryConfig | None = None,
@@ -3803,6 +3475,7 @@ async def complete(
         ToolExecutionResult with final response and execution history
     """
     effective_tool_mode = tool_mode if tool_mode is not None else settings.default_tool_mode
+    effective_tool_execution_order = tool_execution_order if tool_execution_order is not None else settings.default_tool_execution_order
     client = GlueLLM(
         model=model,
         system_prompt=system_prompt,
@@ -3812,6 +3485,7 @@ async def complete(
         max_tokens=max_tokens,
         condense_tool_messages=condense_tool_messages,
         tool_mode=effective_tool_mode,
+        tool_execution_order=effective_tool_execution_order,
         tool_route_model=tool_route_model,
         retry_config=retry_config,
         rate_limit_config=rate_limit_config,
@@ -3825,6 +3499,7 @@ async def complete(
         connect_timeout=connect_timeout,
         on_status=on_status,
         tool_mode=tool_mode,
+        tool_execution_order=tool_execution_order,
         max_tokens=max_tokens,
         retry_enabled=retry_enabled,
         retry_config=retry_config,
@@ -3852,6 +3527,7 @@ async def structured_complete(
     max_tokens: int | None = None,
     condense_tool_messages: bool | None = None,
     tool_mode: ToolMode | None = None,
+    tool_execution_order: ToolExecutionOrder | None = None,
     tool_route_model: str | None = None,
     retry_enabled: bool | None = None,
     retry_config: RetryConfig | None = None,
@@ -3931,6 +3607,7 @@ async def structured_complete(
         >>> asyncio.run(main())
     """
     effective_tool_mode = tool_mode if tool_mode is not None else settings.default_tool_mode
+    effective_tool_execution_order = tool_execution_order if tool_execution_order is not None else settings.default_tool_execution_order
     client = GlueLLM(
         model=model,
         system_prompt=system_prompt,
@@ -3940,6 +3617,7 @@ async def structured_complete(
         max_tokens=max_tokens,
         condense_tool_messages=condense_tool_messages,
         tool_mode=effective_tool_mode,
+        tool_execution_order=effective_tool_execution_order,
         tool_route_model=tool_route_model,
         retry_config=retry_config,
         rate_limit_config=rate_limit_config,
@@ -3955,6 +3633,7 @@ async def structured_complete(
         connect_timeout=connect_timeout,
         on_status=on_status,
         tool_mode=tool_mode,
+        tool_execution_order=tool_execution_order,
         max_tokens=max_tokens,
         retry_enabled=retry_enabled,
         retry_config=retry_config,
@@ -4037,6 +3716,7 @@ async def stream_complete(
     max_tokens: int | None = None,
     condense_tool_messages: bool | None = None,
     tool_mode: ToolMode | None = None,
+    tool_execution_order: ToolExecutionOrder | None = None,
     tool_route_model: str | None = None,
     retry_enabled: bool | None = None,
     retry_config: RetryConfig | None = None,
@@ -4093,6 +3773,7 @@ async def stream_complete(
         ...         print(f"\\nTool calls: {chunk.tool_calls_made}")
     """
     effective_tool_mode = tool_mode if tool_mode is not None else settings.default_tool_mode
+    effective_tool_execution_order = tool_execution_order if tool_execution_order is not None else settings.default_tool_execution_order
     client = GlueLLM(
         model=model,
         system_prompt=system_prompt,
@@ -4102,6 +3783,7 @@ async def stream_complete(
         max_tokens=max_tokens,
         condense_tool_messages=condense_tool_messages,
         tool_mode=effective_tool_mode,
+        tool_execution_order=effective_tool_execution_order,
         tool_route_model=tool_route_model,
         retry_config=retry_config,
         rate_limit_config=rate_limit_config,
@@ -4115,6 +3797,7 @@ async def stream_complete(
         request_timeout=request_timeout,
         connect_timeout=connect_timeout,
         tool_mode=tool_mode,
+        tool_execution_order=tool_execution_order,
         max_tokens=max_tokens,
         retry_enabled=retry_enabled,
         retry_config=retry_config,
