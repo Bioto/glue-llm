@@ -16,6 +16,7 @@ from gluellm.api import (
     LLMError,
     RateLimitError,
     TokenLimitError,
+    _build_cause_chain,
     classify_llm_error,
 )
 
@@ -119,6 +120,65 @@ class TestErrorClassification:
         classified = classify_llm_error(error)
         assert isinstance(classified, LLMError)
         assert not isinstance(classified, TokenLimitError)
+
+
+class TestBuildCauseChain:
+    """Test _build_cause_chain exception chain formatting."""
+
+    def test_build_cause_chain_single_exception(self):
+        """Single exception with no cause produces just its type name."""
+        e = ValueError("boom")
+        assert _build_cause_chain(e) == "ValueError"
+
+    def test_build_cause_chain_explicit_cause(self):
+        """Explicit __cause__ (raise X from Y) produces arrow-separated chain."""
+        root = ConnectionError("refused")
+        try:
+            raise RuntimeError("wrapper") from root
+        except RuntimeError as e:
+            result = _build_cause_chain(e)
+        assert result == "RuntimeError -> ConnectionError"
+
+    def test_build_cause_chain_implicit_context(self):
+        """Implicit __context__ (raise X inside except) is included."""
+        root = OSError("low-level")
+        try:
+            try:
+                raise root
+            except OSError:
+                raise ValueError("higher-level")
+        except ValueError as e:
+            result = _build_cause_chain(e)
+        assert result == "ValueError -> OSError"
+
+    def test_build_cause_chain_deep_chain(self):
+        """Deep exception chains are fully unwound."""
+        def _deep():
+            try:
+                try:
+                    raise ConnectionError("refused") from OSError("io")
+                except ConnectionError as e:
+                    raise RuntimeError("mid") from e
+            except RuntimeError as e:
+                raise ValueError("top") from e
+
+        try:
+            _deep()
+        except ValueError as e:
+            result = _build_cause_chain(e)
+        assert result == "ValueError -> RuntimeError -> ConnectionError -> OSError"
+
+    def test_build_cause_chain_does_not_include_subtype_in_log_for_connection_error(self):
+        """APIConnectionError cause chain includes the originating SDK exception type."""
+        sdk_error = Exception("Connection error.")
+        cause = ConnectionError("TCP refused")
+        try:
+            raise sdk_error from cause
+        except Exception as e:
+            chain = _build_cause_chain(e)
+        assert "Exception" in chain
+        assert "ConnectionError" in chain
+        assert chain == "Exception -> ConnectionError"
 
 
 class TestRetryLogic:

@@ -12,7 +12,7 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-from gluellm.api import GlueLLM
+from gluellm.api import GlueLLM, _build_cause_chain
 from gluellm.models.batch import (
     APIKeyConfig,
     BatchConfig,
@@ -207,15 +207,26 @@ class BatchProcessor:
                         tool_execution_order=request.tool_execution_order,
                     )
 
-                    # Execute the request
-                    result = await client.complete(
-                        user_message=request.user_message,
-                        execute_tools=request.execute_tools,
-                        correlation_id=request_id,
-                        request_timeout=request.timeout,
-                        api_key=api_key,
-                        tool_execution_order=request.tool_execution_order,
-                    )
+                    # Execute the request — structured or plain
+                    if request.response_format is not None:
+                        result = await client.structured_complete(
+                            user_message=request.user_message,
+                            response_format=request.response_format,
+                            execute_tools=request.execute_tools,
+                            correlation_id=request_id,
+                            request_timeout=request.timeout,
+                            api_key=api_key,
+                            tool_execution_order=request.tool_execution_order,
+                        )
+                    else:
+                        result = await client.complete(
+                            user_message=request.user_message,
+                            execute_tools=request.execute_tools,
+                            correlation_id=request_id,
+                            request_timeout=request.timeout,
+                            api_key=api_key,
+                            tool_execution_order=request.tool_execution_order,
+                        )
 
                     elapsed_time = time.time() - start_time
 
@@ -227,6 +238,7 @@ class BatchProcessor:
                         id=request_id,
                         success=True,
                         response=result.final_response,
+                        structured_output=result.structured_output,
                         tool_calls_made=result.tool_calls_made,
                         tool_execution_history=result.tool_execution_history,
                         tokens_used=result.tokens_used,
@@ -239,12 +251,14 @@ class BatchProcessor:
                     elapsed_time = time.time() - start_time
                     error_type = type(e).__name__
                     error_msg = str(e)
+                    cause_chain = _build_cause_chain(e)
 
                     if attempt < max_attempts - 1:
                         logger.info(f"Request {request_id} failed (attempt {attempt + 1}/{max_attempts}), retrying...")
                     else:
                         logger.error(
-                            f"Request {request_id} failed after {elapsed_time:.3f}s: {error_type}: {error_msg}"
+                            f"Request {request_id} failed after {elapsed_time:.3f}s: {error_type}: {error_msg}, "
+                            f"cause_chain={cause_chain}"
                         )
 
             # All attempts failed
@@ -372,3 +386,65 @@ async def batch_complete_simple(
 
     # Return responses in the same order as input
     return [result.response if result.success else f"Error: {result.error}" for result in response.results]
+
+
+async def batch_structured_complete(
+    messages: list[str],
+    response_format: type[T],
+    model: str | None = None,
+    system_prompt: str | None = None,
+    tools: list[Callable] | None = None,
+    max_tool_iterations: int | None = None,
+    config: BatchConfig | None = None,
+) -> BatchResponse:
+    """Process a batch of messages and return structured outputs.
+
+    Each message is sent to the LLM with the given response_format, and
+    results include both the raw text and the parsed Pydantic model instance
+    on ``BatchResult.structured_output``.
+
+    Args:
+        messages: List of user messages to process
+        response_format: Pydantic model class for structured output
+        model: Default model identifier
+        system_prompt: Default system prompt
+        tools: Default tools
+        max_tool_iterations: Default max tool iterations
+        config: Batch processing configuration
+
+    Returns:
+        BatchResponse with results containing structured_output fields
+
+    Example:
+        >>> from pydantic import BaseModel
+        >>>
+        >>> class CityInfo(BaseModel):
+        ...     name: str
+        ...     country: str
+        ...     population: int
+        >>>
+        >>> response = await batch_structured_complete(
+        ...     messages=[
+        ...         "Extract info: Paris, France, pop 2.1M",
+        ...         "Extract info: Tokyo, Japan, pop 14M",
+        ...     ],
+        ...     response_format=CityInfo,
+        ...     config=BatchConfig(max_concurrent=3),
+        ... )
+        >>> for result in response.results:
+        ...     if result.success:
+        ...         city = result.structured_output
+        ...         print(f"{city.name}, {city.country}: {city.population}")
+    """
+    requests = [
+        BatchRequest(user_message=msg, response_format=response_format)
+        for msg in messages
+    ]
+    processor = BatchProcessor(
+        model=model,
+        system_prompt=system_prompt,
+        tools=tools,
+        max_tool_iterations=max_tool_iterations,
+        config=config,
+    )
+    return await processor.process(requests)

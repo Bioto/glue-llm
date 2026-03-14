@@ -1151,6 +1151,30 @@ class AuthenticationError(LLMError):
 # ============================================================================
 
 
+def _build_cause_chain(error: Exception) -> str:
+    """Build a dotted type chain from an exception's cause hierarchy.
+
+    Walks __cause__ (explicit `raise X from Y`) then falls back to
+    __context__ (implicit chaining), stopping when suppress_context is set.
+    Deduplicates consecutive identical type names that some libraries repeat.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: Exception | None = error
+    while current is not None:
+        if id(current) in seen:
+            break
+        seen.add(id(current))
+        parts.append(type(current).__qualname__)
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif current.__context__ is not None and not current.__suppress_context__:
+            current = current.__context__
+        else:
+            break
+    return " -> ".join(parts)
+
+
 def classify_llm_error(error: Exception) -> Exception:
     """Classify an error from any_llm into our custom exception types.
 
@@ -1522,9 +1546,10 @@ async def _safe_llm_call(
         # Classify the error and raise the appropriate exception
         classified_error = classify_llm_error(e)
         error_type = type(classified_error).__name__
+        cause_chain = _build_cause_chain(e)
         logger.error(
             f"LLM call failed after {elapsed_time:.3f}s: model={model}, error={classified_error}, "
-            f"error_type={error_type}, correlation_id={correlation_id}",
+            f"error_type={error_type}, cause_chain={cause_chain}, correlation_id={correlation_id}",
             exc_info=True,
         )
 
@@ -1945,7 +1970,11 @@ class GlueLLM:
                         )
                     except LLMError as e:
                         # Log the error and re-raise with context
-                        logger.error(f"LLM call failed on iteration {iteration + 1}/{self.max_tool_iterations}: {e}")
+                        cause_chain = _build_cause_chain(e)
+                        logger.error(
+                            f"LLM call failed on iteration {iteration + 1}/{self.max_tool_iterations}: {e}, "
+                            f"error_type={type(e).__name__}, cause_chain={cause_chain}"
+                        )
                         # Add error context to the exception
                         error_msg = (
                             f"Failed during tool execution loop (iteration {iteration + 1}/{self.max_tool_iterations})"
@@ -2465,7 +2494,11 @@ class GlueLLM:
                                 on_status,
                             )
                         except LLMError as e:
-                            logger.error(f"LLM call failed on iteration {iteration + 1}: {e}")
+                            cause_chain = _build_cause_chain(e)
+                            logger.error(
+                                f"LLM call failed on iteration {iteration + 1}: {e}, "
+                                f"error_type={type(e).__name__}, cause_chain={cause_chain}"
+                            )
                             raise type(e)(f"Failed during tool execution (iteration {iteration + 1}): {e}") from e
 
                         _track_usage(response)
@@ -3199,7 +3232,11 @@ class GlueLLM:
                     on_status,
                 )
             except LLMError as e:
-                logger.error(f"LLM call failed on iteration {iteration + 1}: {e}")
+                cause_chain = _build_cause_chain(e)
+                logger.error(
+                    f"LLM call failed on iteration {iteration + 1}: {e}, "
+                    f"error_type={type(e).__name__}, cause_chain={cause_chain}"
+                )
                 error_msg = f"Failed during tool execution loop (iteration {iteration + 1}/{self.max_tool_iterations})"
                 raise type(e)(f"{error_msg}: {e}") from e
 

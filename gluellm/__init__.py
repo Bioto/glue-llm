@@ -100,6 +100,7 @@ from gluellm.batch import (
     BatchProcessor,
     batch_complete,
     batch_complete_simple,
+    batch_structured_complete,
 )
 from gluellm.config import GlueLLMSettings, ToolExecutionOrder, configure, get_settings, reload_settings, settings
 from gluellm.tool_router import ToolMode
@@ -205,6 +206,7 @@ __all__ = [
     "BatchProcessor",
     "batch_complete",
     "batch_complete_simple",
+    "batch_structured_complete",
     "BatchRequest",
     "BatchResult",
     "BatchResponse",

@@ -28,6 +28,7 @@ from gluellm.api import (
     APIConnectionError,
     RateLimitConfig,
     RateLimitError,
+    _build_cause_chain,
     _patch_any_llm_openai_embedding_dimensions,
     _provider_cache,
     classify_llm_error,
@@ -317,9 +318,10 @@ async def _safe_embedding_call(
         # Classify the error and raise the appropriate exception
         classified_error = classify_llm_error(e)
         error_type = type(classified_error).__name__
+        cause_chain = _build_cause_chain(e)
         logger.error(
             f"Embedding call failed after {elapsed_time:.3f}s: model={model}, error={classified_error}, "
-            f"error_type={error_type}, correlation_id={correlation_id}",
+            f"error_type={error_type}, cause_chain={cause_chain}, correlation_id={correlation_id}",
             exc_info=True,
         )
 

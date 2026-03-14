@@ -8,7 +8,7 @@ from collections.abc import Callable
 from enum import Enum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SkipValidation
 
 ToolExecutionOrder = Literal["sequential", "parallel"]
 
@@ -57,6 +57,8 @@ class BatchRequest(BaseModel):
         execute_tools: Whether to execute tools for this request
         max_tool_iterations: Optional max tool iterations override
         tool_execution_order: Optional override ("sequential" or "parallel")
+        response_format: Optional Pydantic model class for structured output.
+            When set, the processor uses structured_complete instead of complete.
         timeout: Optional timeout override for this request
         metadata: Optional metadata to attach to this request
     """
@@ -69,6 +71,10 @@ class BatchRequest(BaseModel):
     max_tool_iterations: Annotated[int | None, Field(description="Optional max tool iterations override", default=None)]
     tool_execution_order: Annotated[
         ToolExecutionOrder | None, Field(description="Optional tool execution order override", default=None)
+    ] = None
+    response_format: Annotated[
+        SkipValidation[type[BaseModel]] | None,
+        Field(description="Optional Pydantic model class for structured output", default=None),
     ] = None
     timeout: Annotated[float | None, Field(description="Optional timeout override", default=None)]
     metadata: Annotated[dict[str, Any], Field(description="Optional metadata", default_factory=dict)]
@@ -83,6 +89,7 @@ class BatchResult(BaseModel):
         id: The request ID this result corresponds to
         success: Whether the request succeeded
         response: The response text (if successful)
+        structured_output: Parsed Pydantic model instance for structured completions (if successful)
         tool_calls_made: Number of tool calls made (if successful)
         tool_execution_history: Tool execution history (if successful)
         tokens_used: Token usage information (if available)
@@ -95,6 +102,10 @@ class BatchResult(BaseModel):
     id: Annotated[str, Field(description="The request ID")]
     success: Annotated[bool, Field(description="Whether the request succeeded")]
     response: Annotated[str | None, Field(description="The response text", default=None)]
+    structured_output: Annotated[
+        SkipValidation[Any] | None,
+        Field(description="Parsed structured output (Pydantic model instance) for structured completions", default=None),
+    ] = None
     tool_calls_made: Annotated[int, Field(description="Number of tool calls made", default=0)]
     tool_execution_history: Annotated[
         list[dict[str, Any]], Field(description="Tool execution history", default_factory=list)
