@@ -44,5 +44,7 @@ def normalize_model_params(
         if max_tokens is not None:
             kwargs.setdefault("max_completion_tokens", max_tokens)
             max_tokens = None
+    elif provider == "gemini":
+        kwargs["timeout"] = settings.default_request_timeout  # Gemini SDK doesn't support httpx.Timeout, so we set it here for consistency
 
     return max_tokens, kwargs
