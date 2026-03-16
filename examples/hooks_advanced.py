@@ -471,7 +471,7 @@ async def example_4_content_safety():
     # Safe query
     print("Testing safe query...")
     result = await executor.execute("What is the weather today?")
-    print(f"  Result: {result[:50]}...")
+    print(f"  Result: {result.final_response[:50]}...")
 
     # Unsafe query
     print("Testing blocked query...")
@@ -529,7 +529,7 @@ async def example_5_retry_fallback():
 
     executor = SimpleExecutor(hook_registry=registry)
     result = await executor.execute("What is AI?")
-    print(f"Result: {result[:100]}...")
+    print(f"Result: {result.final_response[:100]}...")
 
 
 async def main():

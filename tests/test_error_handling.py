@@ -20,11 +20,8 @@ from gluellm.api import (
     classify_llm_error,
 )
 
-# Mark tests that need async
-pytestmark = pytest.mark.asyncio
-
-
 class TestErrorClassification:
+    pytestmark = pytest.mark.asyncio
     """Test error classification logic."""
 
     async def test_token_limit_error_classification(self):
@@ -184,6 +181,8 @@ class TestBuildCauseChain:
 class TestRetryLogic:
     """Test retry behavior with mocked LLM calls."""
 
+    pytestmark = pytest.mark.asyncio
+
     @patch("gluellm.api._safe_llm_call")
     async def test_retry_on_rate_limit(self, mock_safe_call):
         """Test that rate limit errors trigger retries."""
@@ -275,6 +274,8 @@ class TestRetryLogic:
 
 class TestToolExecutionErrorHandling:
     """Test error handling during tool execution."""
+
+    pytestmark = pytest.mark.asyncio
 
     @patch("gluellm.api._safe_llm_call")
     async def test_tool_execution_exception_handling(self, mock_safe_call):
@@ -370,6 +371,8 @@ class TestToolExecutionErrorHandling:
 class TestStructuredCompleteErrorHandling:
     """Test error handling in structured_complete."""
 
+    pytestmark = pytest.mark.asyncio
+
     @patch("gluellm.api._safe_llm_call")
     async def test_structured_complete_with_rate_limit_retry(self, mock_safe_call):
         """Test that structured_complete also benefits from retry logic."""
@@ -414,6 +417,8 @@ class TestStructuredCompleteErrorHandling:
 
 class TestRetryBackoffTiming:
     """Test retry backoff timing behavior."""
+
+    pytestmark = pytest.mark.asyncio
 
     @patch("gluellm.api._safe_llm_call")
     @patch("asyncio.sleep")  # Mock asyncio.sleep for async retry

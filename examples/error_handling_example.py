@@ -110,7 +110,7 @@ async def example_catching_specific_errors():
     """Demonstrate catching specific error types."""
     print("\n=== Specific Error Handling ===\n")
 
-    def handle_llm_request(prompt: str):
+    async def handle_llm_request(prompt: str):
         """Handle LLM request with specific error handling."""
         try:
             result = await complete(
@@ -142,7 +142,7 @@ async def example_catching_specific_errors():
 
     for prompt in prompts:
         print(f"Prompt: {prompt[:50]}...")
-        response = handle_llm_request(prompt)
+        response = await handle_llm_request(prompt)
         print(f"Response: {response[:100]}...\n")
 
 

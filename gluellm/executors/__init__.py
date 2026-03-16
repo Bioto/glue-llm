@@ -9,7 +9,7 @@ from typing import Optional, TypeVar
 
 from pydantic import BaseModel
 
-from gluellm.api import ExecutionResult, GlueLLM
+from gluellm.api import GlueLLM
 from gluellm.config import settings
 from gluellm.models.agent import Agent
 
@@ -68,14 +68,14 @@ class SimpleExecutor(Executor):
         self.tools = tools
         self.max_tool_iterations = max_tool_iterations
 
-    async def _execute_internal(self, query: str) -> ExecutionResult:
+    async def _execute_internal(self, query: str) -> str:
         """Execute a query using the configured LLM.
 
         Args:
             query: The query string to process
 
         Returns:
-            ExecutionResult: The result of the execution
+            The LLM's final response text
         """
         client = GlueLLM(
             model=self.model,
@@ -83,7 +83,8 @@ class SimpleExecutor(Executor):
             tools=self.tools,
             max_tool_iterations=self.max_tool_iterations,
         )
-        return await client.complete(query)
+        result = await client.complete(query)
+        return result.final_response
 
 
 class AgentExecutor(Executor):
@@ -128,18 +129,17 @@ class AgentExecutor(Executor):
         super().__init__(hook_registry=hook_registry)
         self.agent = agent
 
-    async def _execute_internal(self, query: str) -> ExecutionResult:
+    async def _execute_internal(self, query: str) -> str:
         """Execute a query using the agent's configuration.
 
         Args:
             query: The query string to process
 
         Returns:
-            str: The LLM's final response
+            The LLM's final response text
         """
         from gluellm.api import _current_agent
 
-        # Set agent in context for automatic recording
         token = _current_agent.set(self.agent)
         try:
             client = GlueLLM(
@@ -149,9 +149,9 @@ class AgentExecutor(Executor):
                 max_tool_iterations=self.agent.max_tool_iterations,
                 max_tokens=self.agent.max_tokens,
             )
-            return await client.complete(query)
+            result = await client.complete(query)
+            return result.final_response
         finally:
-            # Reset context variable
             _current_agent.reset(token)
 
 
@@ -163,11 +163,10 @@ class AgentStructuredExecutor(Executor):
         self.agent = agent
         self.response_format = response_format
 
-    async def _execute_internal(self, query: str) -> ExecutionResult:
-        """Execute a query using the agent's configuration and return structured output."""
+    async def _execute_internal(self, query: str) -> str:
+        """Execute a query using the agent's configuration and return structured output as JSON."""
         from gluellm.api import _current_agent
 
-        # Set agent in context for automatic recording
         token = _current_agent.set(self.agent)
         try:
             client = GlueLLM(
@@ -177,9 +176,9 @@ class AgentStructuredExecutor(Executor):
                 max_tool_iterations=self.agent.max_tool_iterations,
                 max_tokens=self.agent.max_tokens,
             )
-            return await client.structured_complete(query, self.response_format)
+            result = await client.structured_complete(query, self.response_format)
+            return result.final_response
         finally:
-            # Reset context variable
             _current_agent.reset(token)
 
 

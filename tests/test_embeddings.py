@@ -310,7 +310,7 @@ class TestEmbeddingGeneration:
 
         with (
             patch.object(gluellm_api._provider_cache, "_providers", {}),
-            patch("openai.AsyncOpenAI", return_value=mock_client),
+            patch("any_llm.providers.openai.base.AsyncOpenAI", return_value=mock_client),
         ):
             result = await embed(
                 "Your document chunk to embed.",

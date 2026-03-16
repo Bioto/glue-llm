@@ -693,3 +693,50 @@ class TestCLIIntegration:
 
         # Should complete successfully with real API
         assert result.exit_code == 0
+
+
+class TestListModelsCommand:
+    """Tests for the list-models CLI command."""
+
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key-123"})
+    def test_list_models_command_outputs_table(self):
+        """Test that list-models outputs a table of models."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        async def fake_list_models(**kwargs):
+            return [
+                SimpleNamespace(id="gpt-4o-mini", created=1234567890, owned_by="openai"),
+                SimpleNamespace(id="gpt-4o", created=1234567891, owned_by="openai"),
+            ]
+
+        with patch("gluellm.api.list_models", new=AsyncMock(side_effect=fake_list_models)):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["list-models", "--provider", "openai"])
+
+        assert result.exit_code == 0
+        assert "gpt-4o-mini" in result.output or "Models" in result.output
+
+
+class TestTestResponsesCommand:
+    """Tests for the test-responses CLI command."""
+
+    @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key-123"})
+    def test_test_responses_command(self):
+        """Test test-responses command with mocked API."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        mock_resp = SimpleNamespace(
+            output_text="4",
+            output=[],
+            model="gpt-4o-mini",
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+
+        with patch("any_llm.aresponses", new=AsyncMock(return_value=mock_resp)):
+            runner = CliRunner()
+            result = runner.invoke(cli, ["test-responses", "-p", "What is 2+2?"])
+
+        assert result.exit_code == 0
+        assert "OpenResponses" in result.output or "passed" in result.output

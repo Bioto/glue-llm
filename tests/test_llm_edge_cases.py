@@ -1,14 +1,34 @@
 """
 Comprehensive LLM test suite with edge cases and challenging scenarios.
 Tests include various tool calling patterns, parameter combinations, and stress tests.
+
+These tests call the live OpenAI API via any_llm.completion(). They are marked as
+integration and are skipped unless OPENAI_API_KEY is set to a non-placeholder value.
 """
 
 import json
+import os
 from typing import Annotated, Any
 
 import pytest
 from any_llm import completion
 from pydantic import BaseModel, Field
+
+def _openai_key_ok() -> bool:
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    return bool(key and key != "sk-test")
+
+
+pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def _skip_without_openai_key():
+    """Skip at test run time when no real API key (avoids 401/MagicMock under xdist)."""
+    if not _openai_key_ok():
+        pytest.skip(
+            "OPENAI_API_KEY not set or placeholder; these tests call the live API"
+        )
 
 # ============================================================================
 # TOOL DEFINITIONS (with various complexity levels)

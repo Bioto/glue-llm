@@ -86,6 +86,18 @@ class TestConfigurationLoading:
             assert config.anthropic_api_key is None
             assert config.xai_api_key is None
 
+    def test_default_reasoning_effort_from_env(self):
+        """Test loading default_reasoning_effort from environment."""
+        with patch.dict(os.environ, {"GLUELLM_DEFAULT_REASONING_EFFORT": "high"}, clear=False):
+            config = GlueLLMSettings()
+            assert config.default_reasoning_effort == "high"
+
+    def test_default_parallel_tool_calls_from_env(self):
+        """Test loading default_parallel_tool_calls from environment."""
+        with patch.dict(os.environ, {"GLUELLM_DEFAULT_PARALLEL_TOOL_CALLS": "true"}, clear=False):
+            config = GlueLLMSettings()
+            assert config.default_parallel_tool_calls is True
+
 
 class TestConfigurationValidation:
     """Test configuration value validation."""

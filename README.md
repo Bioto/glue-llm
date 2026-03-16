@@ -216,6 +216,48 @@ import gluellm
 gluellm.configure(default_tool_execution_order="parallel")
 ```
 
+### Reasoning effort and logprobs
+
+For reasoning models (o3, o4-mini, Claude 3.7 thinking), use `reasoning_effort` to control thinking depth:
+
+```python
+result = await complete(
+    "Solve this logic puzzle...",
+    model="openai:o4-mini",
+    reasoning_effort="high",  # "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto"
+)
+```
+
+Set a default via `GLUELLM_DEFAULT_REASONING_EFFORT` or on the client.
+
+For eval and confidence scoring, enable `logprobs`:
+
+```python
+result = await complete(
+    "Is this claim true?",
+    logprobs=True,
+    top_logprobs=5,
+)
+# Inspect token-level probabilities in the raw response
+```
+
+### OpenResponses API (agentic tools)
+
+The `responses()` API supports OpenAI's agentic interface with built-in tools like web search, code interpreter, and file search:
+
+```python
+from gluellm import responses, WEB_SEARCH
+
+result = await responses(
+    "What's the latest news about AI?",
+    tools=[WEB_SEARCH],
+)
+print(result.output)
+# Also: result.tool_calls, result.usage
+```
+
+Built-in tool constants: `WEB_SEARCH`, `CODE_INTERPRETER`, `FILE_SEARCH`.
+
 ### Process status events
 
 Use the optional `on_status` callback to observe what’s happening (LLM call start/end, tool execution, stream start/chunk/end, completion). Handy for progress UIs or logging.
@@ -338,6 +380,20 @@ asyncio.run(main())
 
 The `dimensions` parameter truncates the output vector — useful for reducing storage costs while preserving most of the semantic signal. You can also set a global default via `GLUELLM_DEFAULT_EMBEDDING_DIMENSIONS` or `gluellm.configure(default_embedding_dimensions=512)` so every call uses it without repeating the argument.
 
+### Listing models
+
+Enumerate available models for a provider:
+
+```python
+from gluellm import list_models
+
+models = await list_models(provider="openai")
+for m in models[:5]:
+    print(m.id)
+```
+
+CLI: `gluellm list-models -p openai`
+
 ## Configuration
 
 Providers are configured via environment variables:
@@ -364,6 +420,8 @@ Key GlueLLM-specific env vars:
 | `GLUELLM_MAX_REQUEST_TIMEOUT` | `300.0` | Maximum allowed request timeout |
 | `GLUELLM_DEFAULT_CONNECT_TIMEOUT` | `10.0` | Connection timeout (seconds) |
 | `GLUELLM_MAX_CONNECT_TIMEOUT` | `60.0` | Maximum allowed connection timeout |
+| `GLUELLM_DEFAULT_REASONING_EFFORT` | _(unset)_ | Default reasoning effort for thinking models |
+| `GLUELLM_DEFAULT_PARALLEL_TOOL_CALLS` | _(unset)_ | Default for parallel tool calls |
 | `GLUELLM_RETRY_MAX_ATTEMPTS` | `3` | Max retry attempts |
 | `GLUELLM_RETRY_MIN_WAIT` | `2` | Min backoff seconds |
 | `GLUELLM_RETRY_MAX_WAIT` | `30` | Max backoff seconds |

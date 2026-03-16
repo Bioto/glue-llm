@@ -4,6 +4,7 @@ import pytest
 
 from gluellm.provider_params import (
     ANTHROPIC_DEFAULT_MAX_TOKENS,
+    _model_supports_reasoning_effort,
     normalize_model_params,
 )
 
@@ -125,3 +126,23 @@ class TestNormalizeModelParams:
         )
         result_max, _ = normalize_model_params("anthropic:claude-3-5-sonnet", None, {})
         assert result_max == ANTHROPIC_DEFAULT_MAX_TOKENS
+
+    async def test_reasoning_effort_stripped_for_unsupported_models(self):
+        """reasoning_effort is removed when model does not support it (e.g. gpt-4o-mini)."""
+        _, kwargs = normalize_model_params(
+            "openai:gpt-4o-mini", None, {"reasoning_effort": "high"}
+        )
+        assert "reasoning_effort" not in kwargs
+
+    async def test_reasoning_effort_preserved_for_supported_models(self):
+        """reasoning_effort is preserved for o1, o3, o4-mini."""
+        for model in ("openai:o1", "openai:o3-mini", "openai:o4-mini", "openai:o4"):
+            _, kwargs = normalize_model_params(model, None, {"reasoning_effort": "high"})
+            assert kwargs.get("reasoning_effort") == "high", f"Failed for {model}"
+
+    async def test_reasoning_effort_stripped_for_o1_mini(self):
+        """reasoning_effort is not supported by o1-mini."""
+        _, kwargs = normalize_model_params(
+            "openai:o1-mini", None, {"reasoning_effort": "high"}
+        )
+        assert "reasoning_effort" not in kwargs

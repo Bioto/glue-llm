@@ -205,6 +205,32 @@ def test_embedding(text: str, model: str | None, batch: bool) -> None:
         print_error(f"Embedding failed: {e}")
 
 
+@click.command("test-responses")
+@click.option("--web-search", "web_search", is_flag=True, help="Enable web search tool")
+@click.option("--prompt", "-p", default="What is 2+2? Answer briefly.", help="Prompt to send")
+def test_responses(web_search: bool, prompt: str) -> None:
+    """Test the OpenResponses API."""
+    from gluellm.responses import WEB_SEARCH, responses
+
+    tools = [WEB_SEARCH] if web_search else None
+    desc = "with web search" if web_search else "basic"
+    print_header("Test OpenResponses API", desc)
+
+    async def run_responses():
+        return await responses(prompt, tools=tools, stream=False)
+
+    try:
+        result = run_async(run_responses())
+        console.print(f"Output: {result.output[:500]}{'...' if len(result.output) > 500 else ''}")
+        if result.tool_calls:
+            console.print(f"Tool calls: {len(result.tool_calls)}")
+        if result.usage:
+            console.print(f"Usage: {result.usage}")
+        print_success("OpenResponses test passed")
+    except Exception as e:
+        print_error(f"OpenResponses failed: {e}")
+
+
 # Export all commands
 completion_commands = [
     test_completion,
@@ -212,4 +238,5 @@ completion_commands = [
     test_structured_output,
     test_multi_turn_conversation,
     test_embedding,
+    test_responses,
 ]
