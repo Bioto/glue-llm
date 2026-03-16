@@ -442,7 +442,7 @@ GlueLLM keeps deeper docs in `docs/` so the README stays readable:
 - [`docs/WORKFLOW_PATTERNS.md`](docs/WORKFLOW_PATTERNS.md)
 - [`docs/CONTEXT_OPTIMIZATION.md`](docs/CONTEXT_OPTIMIZATION.md) — condensing + dynamic routing deep-dive
 
-More runnable examples live in [`examples/`](examples/).
+More runnable examples live in [`examples/`](examples/). Every example is also a test case (see `tests/test_examples.py`), so if you follow an example, it should work as intended.
 
 ## Contributing
 

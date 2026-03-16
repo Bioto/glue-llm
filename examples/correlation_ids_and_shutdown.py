@@ -124,7 +124,7 @@ async def example_shutdown_context():
     async def process_with_context():
         with ShutdownContext():
             print("Processing request with ShutdownContext...")
-            result = await complete("What is Python?", request_timeout=5.0)
+            result = await complete("What is Python?")
             print(f"Response: {result.final_response[:50]}...")
             print(f"In-flight requests: {get_in_flight_count()}")
 
