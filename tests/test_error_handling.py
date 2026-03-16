@@ -20,6 +20,7 @@ from gluellm.api import (
     classify_llm_error,
 )
 
+
 class TestErrorClassification:
     pytestmark = pytest.mark.asyncio
     """Test error classification logic."""
@@ -142,8 +143,8 @@ class TestBuildCauseChain:
         try:
             try:
                 raise root
-            except OSError:
-                raise ValueError("higher-level")
+            except OSError as err:
+                raise ValueError("higher-level") from err
         except ValueError as e:
             result = _build_cause_chain(e)
         assert result == "ValueError -> OSError"

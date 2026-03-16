@@ -11,8 +11,8 @@ from gluellm.models.workflow import (
     ChainOfDensityConfig,
     ConsensusConfig,
     MapReduceConfig,
-    ReflectionConfig,
     ReActConfig,
+    ReflectionConfig,
 )
 from gluellm.workflows import (
     ChainOfDensityWorkflow,

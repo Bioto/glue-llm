@@ -48,7 +48,7 @@ async def example_multi_key_round_robin():
 
     # Each get_key call rotates to the next key
     for i in range(4):
-        k = pool.get_key("openai")
+        _ = pool.get_key("openai")
         print(f"  Call {i + 1}: got key (round-robin)")
 
     print(f"  Pool has {len(pool._keys_by_provider.get('openai', []))} key(s) for openai")

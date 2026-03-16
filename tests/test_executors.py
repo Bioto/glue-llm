@@ -1,15 +1,15 @@
 """Tests for executor implementations — SimpleExecutor, AgentExecutor, AgentStructuredExecutor."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import BaseModel
 
-from gluellm.executors import AgentExecutor, Executor, SimpleExecutor
-from gluellm.executors import AgentStructuredExecutor
+from gluellm.executors import AgentExecutor, AgentStructuredExecutor, Executor, SimpleExecutor
 from gluellm.models.agent import Agent
 from gluellm.models.hook import HookConfig, HookErrorStrategy, HookRegistry, HookStage
 from gluellm.models.prompt import SystemPrompt
+
 
 def _fake_llm_response(content: str = "Hello"):
     """Build a minimal fake LLM response."""
@@ -54,13 +54,13 @@ class TestSimpleExecutor:
 @pytest.mark.asyncio
 class TestAgentExecutor:
     def _make_agent(self, **overrides):
-        defaults = dict(
-            name="Test Agent",
-            description="A test agent",
-            system_prompt=SystemPrompt(content="You are a test agent."),
-            tools=[],
-            max_tool_iterations=5,
-        )
+        defaults = {
+            "name": "Test Agent",
+            "description": "A test agent",
+            "system_prompt": SystemPrompt(content="You are a test agent."),
+            "tools": [],
+            "max_tool_iterations": 5,
+        }
         defaults.update(overrides)
         return Agent(**defaults)
 

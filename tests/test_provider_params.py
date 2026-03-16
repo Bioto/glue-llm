@@ -4,7 +4,6 @@ import pytest
 
 from gluellm.provider_params import (
     ANTHROPIC_DEFAULT_MAX_TOKENS,
-    _model_supports_reasoning_effort,
     normalize_model_params,
 )
 

@@ -8,10 +8,10 @@ import asyncio
 import os
 
 from gluellm import (
-    complete,
     GuardrailBlockedError,
     GuardrailRejectedError,
     GuardrailsConfig,
+    complete,
 )
 from gluellm.guardrails.config import BlocklistConfig, PIIConfig, PromptGuidedConfig
 from gluellm.guardrails.runner import run_input_guardrails, run_output_guardrails
@@ -50,7 +50,7 @@ async def example_blocklist_redact_input():
         blocklist=BlocklistConfig(patterns=[r"foo"], on_input="redact"),
     )
     result = run_input_guardrails("The foo bar and foo baz", config)
-    print(f"Original: 'The foo bar and foo baz'")
+    print("Original: 'The foo bar and foo baz'")
     print(f"Redacted: '{result}'")
     print()
 

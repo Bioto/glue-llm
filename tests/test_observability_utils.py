@@ -102,25 +102,26 @@ class TestLogAsyncFunctionCall:
 class TestTimedOperation:
     def test_basic_timing(self, caplog):
         test_logger = logging.getLogger("test.timed")
-        with caplog.at_level(logging.DEBUG, logger="test.timed"):
-            with timed_operation("test_op", logger=test_logger):
-                pass
+        with caplog.at_level(logging.DEBUG, logger="test.timed"), timed_operation(
+            "test_op", logger=test_logger
+        ):
+            pass
         assert any("test_op" in r.message for r in caplog.records)
 
     def test_logs_start_and_completion(self, caplog):
         test_logger = logging.getLogger("test.timed")
-        with caplog.at_level(logging.DEBUG, logger="test.timed"):
-            with timed_operation("my_op", logger=test_logger):
-                pass
+        with caplog.at_level(logging.DEBUG, logger="test.timed"), timed_operation("my_op", logger=test_logger):
+            pass
         messages = [r.message for r in caplog.records]
         assert any("Starting my_op" in m for m in messages)
         assert any("Completed my_op" in m for m in messages)
 
     def test_custom_log_level(self, caplog):
         test_logger = logging.getLogger("test.timed")
-        with caplog.at_level(logging.WARNING, logger="test.timed"):
-            with timed_operation("warn_op", logger=test_logger, log_level=logging.WARNING):
-                pass
+        with caplog.at_level(logging.WARNING, logger="test.timed"), timed_operation(
+            "warn_op", logger=test_logger, log_level=logging.WARNING
+        ):
+            pass
         assert any("warn_op" in r.message for r in caplog.records)
 
     def test_log_timing_is_alias(self):
@@ -130,23 +131,23 @@ class TestTimedOperation:
 class TestLogOperation:
     def test_logs_success(self, caplog):
         test_logger = logging.getLogger("test.logop")
-        with caplog.at_level(logging.INFO, logger="test.logop"):
-            with log_operation("good_op", logger=test_logger):
-                pass
+        with caplog.at_level(logging.INFO, logger="test.logop"), log_operation("good_op", logger=test_logger):
+            pass
         messages = [r.message for r in caplog.records]
         assert any("Starting good_op" in m for m in messages)
         assert any("Completed good_op" in m for m in messages)
 
     def test_logs_failure(self, caplog):
         test_logger = logging.getLogger("test.logop")
-        with caplog.at_level(logging.INFO, logger="test.logop"):
-            with pytest.raises(ValueError):
-                with log_operation("bad_op", logger=test_logger):
-                    raise ValueError("fail")
+        with (
+            caplog.at_level(logging.INFO, logger="test.logop"),
+            pytest.raises(ValueError),
+            log_operation("bad_op", logger=test_logger),
+        ):
+            raise ValueError("fail")
         messages = [r.message for r in caplog.records]
         assert any("Failed bad_op" in m for m in messages)
 
     def test_propagates_exception(self):
-        with pytest.raises(TypeError):
-            with log_operation("err_op"):
-                raise TypeError("type err")
+        with pytest.raises(TypeError), log_operation("err_op"):
+            raise TypeError("type err")

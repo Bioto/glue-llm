@@ -3,6 +3,7 @@
 import uuid
 
 import pytest
+from pydantic import ValidationError
 
 from gluellm.models.conversation import Conversation, Message, Role
 
@@ -27,7 +28,7 @@ class TestMessage:
         assert msg.content == "Hello"
 
     def test_requires_all_fields(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             Message(role=Role.USER, content="no id")
 
 

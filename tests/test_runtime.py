@@ -16,7 +16,6 @@ from gluellm.runtime.context import (
 )
 from gluellm.runtime.shutdown import (
     ShutdownContext,
-    _shutdown_callbacks,
     _shutdown_event,
     decrement_in_flight,
     execute_shutdown_callbacks,
@@ -81,9 +80,8 @@ class TestWithCorrelationId:
 
     def test_context_manager_restores_on_exception(self):
         set_correlation_id("original")
-        with pytest.raises(ValueError):
-            with with_correlation_id("temp"):
-                raise ValueError("boom")
+        with pytest.raises(ValueError), with_correlation_id("temp"):
+            raise ValueError("boom")
         assert get_correlation_id() == "original"
 
 
@@ -228,17 +226,15 @@ class TestShutdownContext:
         assert get_in_flight_count() == 0
 
     def test_decrements_on_exception(self):
-        with pytest.raises(RuntimeError):
-            with ShutdownContext():
-                assert get_in_flight_count() == 1
-                raise RuntimeError("fail")
+        with pytest.raises(RuntimeError), ShutdownContext():
+            assert get_in_flight_count() == 1
+            raise RuntimeError("fail")
         assert get_in_flight_count() == 0
 
     def test_raises_when_shutting_down(self):
         _shutdown_event.set()
-        with pytest.raises(RuntimeError, match="shutdown in progress"):
-            with ShutdownContext():
-                pass
+        with pytest.raises(RuntimeError, match="shutdown in progress"), ShutdownContext():
+            pass
 
 
 class TestShutdownCallbacks:

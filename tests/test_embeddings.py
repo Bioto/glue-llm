@@ -3,7 +3,6 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from any_llm.types.completion import CreateEmbeddingResponse
 
 from gluellm import api as gluellm_api

@@ -2,8 +2,6 @@
 
 from unittest.mock import MagicMock
 
-import pytest
-
 import gluellm.telemetry as telemetry_mod
 from gluellm.telemetry import (
     get_default_mlflow_run,

@@ -6,7 +6,7 @@ and optional structured output on the final chunk.
 
 import asyncio
 
-from gluellm import stream_complete, StreamingChunk
+from gluellm import StreamingChunk, stream_complete
 
 
 async def example_basic_streaming():

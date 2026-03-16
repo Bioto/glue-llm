@@ -59,7 +59,7 @@ async def example_with_api_key_override():
     # models = await list_models(provider="openai", api_key="sk-...")
     # For demo we use default (from OPENAI_API_KEY env)
     models = await list_models(provider="openai")
-    print(f"Default: uses OPENAI_API_KEY from environment")
+    print("Default: uses OPENAI_API_KEY from environment")
     print(f"Models returned: {len(models)}")
     print()
 

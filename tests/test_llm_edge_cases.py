@@ -14,6 +14,7 @@ import pytest
 from any_llm import completion
 from pydantic import BaseModel, Field
 
+
 def _openai_key_ok() -> bool:
     key = os.environ.get("OPENAI_API_KEY", "").strip()
     return bool(key and key != "sk-test")

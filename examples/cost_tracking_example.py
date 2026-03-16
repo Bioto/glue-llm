@@ -10,9 +10,9 @@ import os
 from gluellm import complete
 from gluellm.costing.cost_tracker import (
     CostTracker,
+    estimate_cost,
     get_global_tracker,
     reset_global_tracker,
-    estimate_cost,
 )
 from gluellm.costing.pricing_data import list_available_models
 

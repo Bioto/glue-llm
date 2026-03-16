@@ -6,12 +6,12 @@ Demonstrates embed(), EmbeddingResult, batch embedding, and cosine similarity co
 import asyncio
 import math
 
-from gluellm import EmbeddingResult, embed
+from gluellm import embed
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Compute cosine similarity between two vectors."""
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(x * x for x in b))
     if norm_a == 0 or norm_b == 0:
