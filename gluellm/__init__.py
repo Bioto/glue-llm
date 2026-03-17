@@ -117,7 +117,7 @@ from gluellm.eval import (
     get_global_eval_store,
     set_global_eval_store,
 )
-from gluellm.events import ProcessEvent
+from gluellm.events import ConsoleSink, JsonFileSink, ProcessEvent, Sink
 from gluellm.guardrails import (
     GuardrailBlockedError,
     GuardrailRejectedError,
@@ -201,6 +201,9 @@ __all__ = [
     "EmbeddingResult",
     "StreamingChunk",
     "ProcessEvent",
+    "Sink",
+    "ConsoleSink",
+    "JsonFileSink",
     # Session Tracking
     "get_session_summary",
     "list_models",
