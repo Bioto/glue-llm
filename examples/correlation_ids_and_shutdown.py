@@ -124,7 +124,7 @@ async def example_shutdown_context():
     async def process_with_context():
         with ShutdownContext():
             print("Processing request with ShutdownContext...")
-            result = await complete("What is Python?", request_timeout=5.0)
+            result = await complete("What is Python?")
             print(f"Response: {result.final_response[:50]}...")
             print(f"In-flight requests: {get_in_flight_count()}")
 
@@ -161,8 +161,8 @@ async def main():
         await graceful_shutdown(max_wait_time=10.0)
         sys.exit(0)
     except Exception as e:
-        print(f"\nError: {e}", file=sys.stderr)
-        sys.exit(1)
+        print(f"\nError: {type(e).__name__}: {e}", file=sys.stderr)
+        raise
 
 
 if __name__ == "__main__":

@@ -162,6 +162,7 @@ class AuditLogger:
 
     def __init__(self, redact_pii: bool = True):
         self.logs: list[dict[str, Any]] = []
+        self._pending: list[dict[str, Any]] = []
         self.redact_pii = redact_pii
 
     def _redact(self, text: str) -> str:
@@ -179,12 +180,15 @@ class AuditLogger:
         """Create pre-execution audit hook."""
 
         def audit_pre_hook(context: HookContext) -> HookContext:
-            context.metadata["audit_id"] = hashlib.sha256(f"{time.time()}{context.content[:50]}".encode()).hexdigest()[
-                :12
-            ]
-            context.metadata["audit_timestamp"] = datetime.now().isoformat()
-            context.metadata["audit_session"] = session_id
-            context.metadata["audit_input"] = self._redact(context.content)
+            audit_id = hashlib.sha256(f"{time.time()}{context.content[:50]}".encode()).hexdigest()[:12]
+            self._pending.append(
+                {
+                    "audit_id": audit_id,
+                    "audit_timestamp": datetime.now().isoformat(),
+                    "audit_session": session_id,
+                    "audit_input": self._redact(context.content),
+                }
+            )
             return context
 
         return audit_pre_hook
@@ -193,12 +197,13 @@ class AuditLogger:
         """Create post-execution audit hook."""
 
         def audit_post_hook(context: HookContext) -> HookContext:
+            pending = self._pending.pop() if self._pending else {}
             log_entry = {
-                "id": context.metadata.get("audit_id"),
-                "timestamp": context.metadata.get("audit_timestamp"),
-                "session": context.metadata.get("audit_session"),
+                "id": pending.get("audit_id"),
+                "timestamp": pending.get("audit_timestamp"),
+                "session": pending.get("audit_session"),
                 "stage": context.stage.value,
-                "input": context.metadata.get("audit_input"),
+                "input": pending.get("audit_input"),
                 "output": self._redact(context.content),
                 "output_length": len(context.content),
                 "processing_time_ms": (
@@ -254,7 +259,8 @@ async def example_2_audit_logging():
 
     print("Audit logs:")
     for log in audit.get_logs():
-        print(f"  [{log['id']}] Input: {log['input'][:40]}... -> Output length: {log['output_length']}")
+        inp = log.get("input") or ""
+        print(f"  [{log['id']}] Input: {inp[:40]}... -> Output length: {log['output_length']}")
 
 
 # ============================================================================

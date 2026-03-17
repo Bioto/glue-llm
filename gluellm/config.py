@@ -68,6 +68,8 @@ class GlueLLMSettings(BaseSettings):
     default_embedding_dimensions: int | None = None  # e.g., 512 for text-embedding-3-small
     default_system_prompt: str = "You are a helpful assistant."
     default_max_tokens: int | None = None  # Global default; overridable per client and per call (e.g. 8192 for Anthropic)
+    default_reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "auto"] | None = None
+    default_parallel_tool_calls: bool | None = None
 
     # Tool execution settings
     max_tool_iterations: Annotated[int, Field(gt=0)] = 10

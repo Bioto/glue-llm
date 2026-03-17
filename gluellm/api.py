@@ -58,7 +58,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from types import SimpleNamespace
@@ -106,6 +106,9 @@ from gluellm.telemetry import (
 
 # Callback for process status events (sync or async)
 type OnStatusCallback = Callable[[ProcessEvent], None] | Callable[[ProcessEvent], Awaitable[None]] | None
+
+# Reasoning effort for o3, o4-mini, Claude thinking models (any_llm 1.11.0)
+type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "auto"]
 
 
 # ============================================================================
@@ -1754,6 +1757,11 @@ class GlueLLM:
         retry_config: RetryConfig | None = None,
         rate_limit_config: RateLimitConfig | None = None,
         model_kwargs: dict[str, Any] | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        logprobs: bool | None = None,
+        top_logprobs: int | None = None,
+        session_label: str | None = None,
+        parallel_tool_calls: bool | None = None,
     ):
         """Initialize GlueLLM client.
 
@@ -1778,6 +1786,11 @@ class GlueLLM:
             rate_limit_config: Optional rate limit configuration. Set algorithm to override
                 the default (from GLUELLM_RATE_LIMIT_ALGORITHM). E.g. RateLimitConfig(algorithm="leaking_bucket").
             model_kwargs: Optional dict of extra params for acompletion (e.g. temperature, top_p).
+            reasoning_effort: For o3, o4-mini, Claude thinking models: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto".
+            logprobs: Include log probabilities in the response (eval/confidence scoring).
+            top_logprobs: Number of top log probs to return when logprobs=True.
+            session_label: Observability metadata for gateway/mzai traces.
+            parallel_tool_calls: Allow parallel tool calls when multiple tools are requested.
         """
         self.model = model or settings.default_model
         self.embedding_model = embedding_model or settings.default_embedding_model
@@ -1797,6 +1810,19 @@ class GlueLLM:
         self.retry_config = retry_config
         self.rate_limit_config = rate_limit_config
         self.model_kwargs = model_kwargs or {}
+        # Merge explicit LLM params (from config when set)
+        effective_reasoning_effort = reasoning_effort if reasoning_effort is not None else settings.default_reasoning_effort
+        effective_parallel_tool_calls = parallel_tool_calls if parallel_tool_calls is not None else settings.default_parallel_tool_calls
+        if effective_reasoning_effort is not None:
+            self.model_kwargs["reasoning_effort"] = effective_reasoning_effort
+        if logprobs is not None:
+            self.model_kwargs["logprobs"] = logprobs
+        if top_logprobs is not None:
+            self.model_kwargs["top_logprobs"] = top_logprobs
+        if session_label is not None:
+            self.model_kwargs["session_label"] = session_label
+        if effective_parallel_tool_calls is not None:
+            self.model_kwargs["parallel_tool_calls"] = effective_parallel_tool_calls
 
     async def complete(
         self,
@@ -1819,6 +1845,11 @@ class GlueLLM:
         rate_limit_config: RateLimitConfig | None = None,
         track_costs: bool | None = None,
         enable_eval_recording: bool | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        logprobs: bool | None = None,
+        top_logprobs: int | None = None,
+        session_label: str | None = None,
+        parallel_tool_calls: bool | None = None,
         **model_kwargs: Any,
     ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
@@ -1842,6 +1873,11 @@ class GlueLLM:
             rate_limit_config: Per-call rate limit configuration override.
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
+            reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto".
+            logprobs: Include log probabilities (eval/confidence scoring).
+            top_logprobs: Number of top log probs when logprobs=True.
+            session_label: Observability metadata for gateway traces.
+            parallel_tool_calls: Allow parallel tool calls.
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
@@ -1888,6 +1924,16 @@ class GlueLLM:
             effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
         effective_eval_store = None if enable_eval_recording is False else self.eval_store
         effective_model_kwargs = {**self.model_kwargs, **model_kwargs}
+        if reasoning_effort is not None:
+            effective_model_kwargs["reasoning_effort"] = reasoning_effort
+        if logprobs is not None:
+            effective_model_kwargs["logprobs"] = logprobs
+        if top_logprobs is not None:
+            effective_model_kwargs["top_logprobs"] = top_logprobs
+        if session_label is not None:
+            effective_model_kwargs["session_label"] = session_label
+        if parallel_tool_calls is not None:
+            effective_model_kwargs["parallel_tool_calls"] = parallel_tool_calls
 
         # Set correlation ID if provided
         if correlation_id:
@@ -2291,6 +2337,11 @@ class GlueLLM:
         rate_limit_config: RateLimitConfig | None = None,
         track_costs: bool | None = None,
         enable_eval_recording: bool | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        logprobs: bool | None = None,
+        top_logprobs: int | None = None,
+        session_label: str | None = None,
+        parallel_tool_calls: bool | None = None,
         **model_kwargs: Any,
     ) -> ExecutionResult:
         """Complete a request and return structured output.
@@ -2320,6 +2371,11 @@ class GlueLLM:
             rate_limit_config: Per-call rate limit configuration override.
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
+            reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto".
+            logprobs: Include log probabilities (eval/confidence scoring).
+            top_logprobs: Number of top log probs when logprobs=True.
+            session_label: Observability metadata for gateway traces.
+            parallel_tool_calls: Allow parallel tool calls.
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
@@ -2365,6 +2421,16 @@ class GlueLLM:
             effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
         effective_eval_store = None if enable_eval_recording is False else self.eval_store
         effective_model_kwargs = {**self.model_kwargs, **model_kwargs}
+        if reasoning_effort is not None:
+            effective_model_kwargs["reasoning_effort"] = reasoning_effort
+        if logprobs is not None:
+            effective_model_kwargs["logprobs"] = logprobs
+        if top_logprobs is not None:
+            effective_model_kwargs["top_logprobs"] = top_logprobs
+        if session_label is not None:
+            effective_model_kwargs["session_label"] = session_label
+        if parallel_tool_calls is not None:
+            effective_model_kwargs["parallel_tool_calls"] = parallel_tool_calls
 
         # Set correlation ID if provided
         if correlation_id:
@@ -3528,6 +3594,11 @@ async def complete(
     rate_limit_config: RateLimitConfig | None = None,
     track_costs: bool | None = None,
     enable_eval_recording: bool | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+    logprobs: bool | None = None,
+    top_logprobs: int | None = None,
+    session_label: str | None = None,
+    parallel_tool_calls: bool | None = None,
     **model_kwargs: Any,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
@@ -3593,6 +3664,11 @@ async def complete(
         rate_limit_config=rate_limit_config,
         track_costs=track_costs,
         enable_eval_recording=enable_eval_recording,
+        reasoning_effort=reasoning_effort,
+        logprobs=logprobs,
+        top_logprobs=top_logprobs,
+        session_label=session_label,
+        parallel_tool_calls=parallel_tool_calls,
         **model_kwargs,
     )
 
@@ -3621,6 +3697,11 @@ async def structured_complete(
     rate_limit_config: RateLimitConfig | None = None,
     track_costs: bool | None = None,
     enable_eval_recording: bool | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+    logprobs: bool | None = None,
+    top_logprobs: int | None = None,
+    session_label: str | None = None,
+    parallel_tool_calls: bool | None = None,
     **model_kwargs: Any,
 ) -> ExecutionResult:
     """Quick structured completion with optional tool support.
@@ -3727,8 +3808,41 @@ async def structured_complete(
         rate_limit_config=rate_limit_config,
         track_costs=track_costs,
         enable_eval_recording=enable_eval_recording,
+        reasoning_effort=reasoning_effort,
+        logprobs=logprobs,
+        top_logprobs=top_logprobs,
+        session_label=session_label,
+        parallel_tool_calls=parallel_tool_calls,
         **model_kwargs,
     )
+
+
+async def list_models(
+    provider: str = "openai",
+    api_key: str | None = None,
+) -> Sequence[Any]:
+    """List available models for a provider.
+
+    Args:
+        provider: Provider name (e.g. "openai", "anthropic").
+        api_key: Optional API key override.
+
+    Returns:
+        Sequence of Model objects with id, created, owned_by, etc.
+
+    Example:
+        >>> import asyncio
+        >>> from gluellm.api import list_models
+        >>>
+        >>> async def main():
+        ...     models = await list_models("openai")
+        ...     for m in models[:5]:
+        ...         print(m.id)
+        >>>
+        >>> asyncio.run(main())
+    """
+    llm = AnyLLM.create(provider, api_key=api_key)
+    return await asyncio.to_thread(llm.list_models)
 
 
 async def embed(

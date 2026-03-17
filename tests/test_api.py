@@ -2411,5 +2411,80 @@ class TestPerCallConfigGaps:
                 assert call.kwargs.get("eval_store") is None
 
 
+class TestNewParameters:
+    """Tests for reasoning_effort, logprobs, session_label, parallel_tool_calls parameters."""
+
+    async def test_reasoning_effort_passed_to_provider(self):
+        """reasoning_effort is passed through to _llm_call_with_retry."""
+        captured_kwargs: dict = {}
+
+        async def fake_llm(*args, **kwargs):
+            captured_kwargs.clear()
+            captured_kwargs.update(kwargs)
+            return _make_tool_response("Done")
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            await complete(user_message="Hi", reasoning_effort="high")
+
+        assert captured_kwargs.get("reasoning_effort") == "high"
+
+    async def test_logprobs_passed_to_provider(self):
+        """logprobs is passed through to the provider."""
+        captured_kwargs: dict = {}
+
+        async def fake_llm(*args, **kwargs):
+            captured_kwargs.clear()
+            captured_kwargs.update(kwargs)
+            return _make_tool_response("Done")
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            await complete(user_message="Hi", logprobs=True)
+
+        assert captured_kwargs.get("logprobs") is True
+
+    async def test_session_label_passed_to_provider(self):
+        """session_label is passed through to the provider."""
+        captured_kwargs: dict = {}
+
+        async def fake_llm(*args, **kwargs):
+            captured_kwargs.clear()
+            captured_kwargs.update(kwargs)
+            return _make_tool_response("Done")
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            await complete(user_message="Hi", session_label="my-session")
+
+        assert captured_kwargs.get("session_label") == "my-session"
+
+    async def test_parallel_tool_calls_passed_to_provider(self):
+        """parallel_tool_calls is passed through to the provider."""
+        captured_kwargs: dict = {}
+
+        async def fake_llm(*args, **kwargs):
+            captured_kwargs.clear()
+            captured_kwargs.update(kwargs)
+            return _make_tool_response("Done")
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            await complete(user_message="Hi", parallel_tool_calls=True)
+
+        assert captured_kwargs.get("parallel_tool_calls") is True
+
+    async def test_instance_reasoning_effort_merged_with_per_call(self):
+        """Instance reasoning_effort is used; per-call override takes precedence."""
+        captured_kwargs: dict = {}
+
+        async def fake_llm(*args, **kwargs):
+            captured_kwargs.clear()
+            captured_kwargs.update(kwargs)
+            return _make_tool_response("Done")
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            client = GlueLLM(model="openai:gpt-4o-mini", reasoning_effort="low")
+            await client.complete("Hi", reasoning_effort="high")
+
+        assert captured_kwargs.get("reasoning_effort") == "high"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -150,11 +150,8 @@ async def main():
     await example_llm_logging()
     await example_log_configuration()
 
-    # JSON logging example (optional, as it modifies global state)
-    print("\n" + "=" * 60)
-    response = input("Run JSON logging example? (y/n): ")
-    if response.lower() == "y":
-        await example_json_logging()
+    # JSON logging example (modifies global state temporarily)
+    await example_json_logging()
 
     print("\n" + "=" * 60)
     print("Examples completed!")

@@ -50,6 +50,19 @@ async def close_cached_provider_clients():
     await close_providers()
 
 
+# Cache the real AnyLLM.create at first use so we never use a patched reference
+# (avoids "MagicMock can't be used in 'await' expression" when tests run in parallel).
+_original_any_llm_create = None
+
+
+def _get_any_llm_original_create():
+    global _original_any_llm_create
+    if _original_any_llm_create is None:
+        from any_llm.any_llm import AnyLLM
+        _original_any_llm_create = AnyLLM.create.__func__
+    return _original_any_llm_create
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def close_any_llm_created_clients(monkeypatch):
     """Track and close any AnyLLM providers created during a test.
@@ -61,7 +74,7 @@ async def close_any_llm_created_clients(monkeypatch):
     from any_llm.any_llm import AnyLLM
 
     created_providers = []
-    original_create = AnyLLM.create.__func__
+    original_create = _get_any_llm_original_create()
 
     def create_with_tracking(cls, *args, **kwargs):
         provider = original_create(cls, *args, **kwargs)

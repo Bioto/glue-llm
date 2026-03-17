@@ -92,10 +92,12 @@ from gluellm.api import (
     complete,
     embed,
     get_session_summary,
+    list_models,
     reset_session_tracker,
     stream_complete,
     structured_complete,
 )
+from gluellm.responses import ResponseResult, WEB_SEARCH, CODE_INTERPRETER, FILE_SEARCH, responses
 from gluellm.batch import (
     BatchProcessor,
     batch_complete,
@@ -201,6 +203,7 @@ __all__ = [
     "ProcessEvent",
     # Session Tracking
     "get_session_summary",
+    "list_models",
     "reset_session_tracker",
     # Batch Processing
     "BatchProcessor",
@@ -278,6 +281,12 @@ __all__ = [
     "get_in_flight_count",
     "wait_for_shutdown",
     "execute_shutdown_callbacks",
+    # OpenResponses
+    "responses",
+    "ResponseResult",
+    "WEB_SEARCH",
+    "CODE_INTERPRETER",
+    "FILE_SEARCH",
     # Schema Utilities
     "normalize_schema_for_openai",
     "create_normalized_model",

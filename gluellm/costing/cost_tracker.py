@@ -100,7 +100,7 @@ class CostTracker:
         self.alert_threshold = alert_threshold
 
         self._records: list[UsageRecord] = []
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._session_start = datetime.now()
         self._current_date = datetime.now().date()
 
@@ -191,7 +191,7 @@ class CostTracker:
 
             logger.debug(
                 f"Recorded usage: model={model}, tokens={input_tokens}+{output_tokens}, "
-                f"cost=${cost:.6f if cost else 'N/A'}, daily_total=${self._daily_cost:.4f}"
+                f"cost=${f'{cost:.6f}' if cost is not None else 'N/A'}, daily_total=${self._daily_cost:.4f}"
             )
 
             return record

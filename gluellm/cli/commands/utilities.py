@@ -15,6 +15,7 @@ from gluellm.cli.utils import (
     print_info,
     print_step,
     print_success,
+    print_table,
     run_async,
 )
 
@@ -182,6 +183,37 @@ def version() -> None:
     console.print(f"  Tracing enabled: {settings.enable_tracing}")
 
 
+@click.command("list-models")
+@click.option("--provider", "-p", default="openai", help="Provider name (e.g. openai, anthropic)")
+def list_models_cmd(provider: str) -> None:
+    """List available models for a provider."""
+    async def _run() -> None:
+        from gluellm.api import list_models
+
+        print_header("Available Models", f"Provider: {provider}")
+        try:
+            models = await list_models(provider=provider)
+        except Exception as e:
+            print_error(f"Failed to list models: {e}")
+            return
+
+        if not models:
+            print_info("No models found.")
+            return
+
+        rows = []
+        for m in models:
+            model_id = getattr(m, "id", str(m))
+            created = getattr(m, "created", "")
+            owned_by = getattr(m, "owned_by", "")
+            rows.append([model_id, created, owned_by])
+
+        print_table(f"Models ({provider})", ["ID", "Created", "Owned By"], rows)
+        print_success(f"Found {len(rows)} model(s)")
+
+    run_async(_run())
+
+
 @click.command("config")
 def show_config() -> None:
     """Show current GlueLLM configuration."""
@@ -206,6 +238,7 @@ def show_config() -> None:
 
 # Export all commands
 utilities_commands = [
+    list_models_cmd,
     run_tests,
     demo,
     examples,
