@@ -16,17 +16,22 @@ async def example_list_openai_models():
     print("Example 1: List OpenAI Models")
     print("=" * 70)
 
-    models = await list_models(provider="openai")
-    print(f"Found {len(models)} model(s)\n")
-    print(f"{'ID':<40} {'Created':<12} {'Owned By':<15}")
-    print("-" * 70)
-    for m in models[:15]:
-        model_id = getattr(m, "id", "?")
-        created = getattr(m, "created", "")
-        owned_by = getattr(m, "owned_by", "")
-        print(f"{str(model_id):<40} {str(created):<12} {str(owned_by):<15}")
-    if len(models) > 15:
-        print(f"... and {len(models) - 15} more")
+    try:
+        models = await list_models(provider="openai")
+        print(f"Found {len(models)} model(s)\n")
+        print(f"{'ID':<40} {'Created':<12} {'Owned By':<15}")
+        print("-" * 70)
+        for m in models[:15]:
+            model_id = getattr(m, "id", "?")
+            created = getattr(m, "created", "")
+            owned_by = getattr(m, "owned_by", "")
+            print(f"{str(model_id):<40} {str(created):<12} {str(owned_by):<15}")
+        if len(models) > 15:
+            print(f"... and {len(models) - 15} more")
+    except TimeoutError:
+        print("Request timed out while listing models.")
+    except Exception as e:
+        print(f"Error listing OpenAI models: {e}")
     print()
 
 
@@ -58,9 +63,14 @@ async def example_with_api_key_override():
     # Pass api_key to override env/default
     # models = await list_models(provider="openai", api_key="sk-...")
     # For demo we use default (from OPENAI_API_KEY env)
-    models = await list_models(provider="openai")
-    print("Default: uses OPENAI_API_KEY from environment")
-    print(f"Models returned: {len(models)}")
+    try:
+        models = await list_models(provider="openai")
+        print("Default: uses OPENAI_API_KEY from environment")
+        print(f"Models returned: {len(models)}")
+    except TimeoutError:
+        print("Request timed out while listing models.")
+    except Exception as e:
+        print(f"Error: {e}")
     print()
 
 

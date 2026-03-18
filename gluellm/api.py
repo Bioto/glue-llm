@@ -70,7 +70,7 @@ if TYPE_CHECKING:
 
 from any_llm import AnyLLM
 from any_llm.types.completion import ChatCompletion
-from pydantic import BaseModel, Field, field_validator, field_serializer
+from pydantic import BaseModel, Field, ValidationError, field_validator, field_serializer
 from pydantic.functional_validators import SkipValidation
 from gluellm.config import settings
 from gluellm.config import ToolExecutionOrder
@@ -78,12 +78,13 @@ from gluellm.tool_router import (
     ToolMode,
     build_router_tool,
     is_router_call,
+    is_static_tool,
     resolve_tool_route,
 )
 from gluellm.costing.pricing_data import calculate_cost
 from gluellm.eval import get_global_eval_store
 from gluellm.eval.store import EvalStore
-from gluellm.events import ProcessEvent, emit_status
+from gluellm.events import ProcessEvent, Sink, emit_status
 from gluellm.guardrails import GuardrailBlockedError, GuardrailRejectedError, GuardrailsConfig
 from gluellm.guardrails.runner import run_input_guardrails, run_output_guardrails
 from gluellm.models.conversation import Conversation, Role
@@ -1850,6 +1851,7 @@ class GlueLLM:
         top_logprobs: int | None = None,
         session_label: str | None = None,
         parallel_tool_calls: bool | None = None,
+        sinks: list[Sink] | None = None,
         **model_kwargs: Any,
     ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
@@ -1955,12 +1957,15 @@ class GlueLLM:
         # Capture start time for evaluation recording
         start_time = time.time()
         # Resolve active_tools for dynamic vs standard mode
+        all_tools = self.tools
+        static_tools = [t for t in all_tools if is_static_tool(t)]
+        dynamic_tools = [t for t in all_tools if not is_static_tool(t)]
         router_tool = None
-        if effective_tool_mode == "dynamic" and self.tools:
-            router_tool = build_router_tool(self.tools)
-            active_tools: list[Callable] = [router_tool]
+        if effective_tool_mode == "dynamic" and all_tools:
+            router_tool = build_router_tool(dynamic_tools)
+            active_tools: list[Callable] = [router_tool] + static_tools
         else:
-            active_tools = self.tools
+            active_tools = all_tools
         system_prompt_content = self._format_system_prompt(tools=active_tools)
         messages_snapshot: list[dict] = []
         result: ExecutionResult | None = None
@@ -2001,6 +2006,7 @@ class GlueLLM:
                                 message_count=len(messages),
                             ),
                             on_status,
+                            sinks=sinks,
                         )
                         response = await _llm_call_with_retry(
                             messages=messages,
@@ -2045,6 +2051,7 @@ class GlueLLM:
                             token_usage=tokens_used,
                         ),
                         on_status,
+                        sinks=sinks,
                     )
 
                     # Check if model wants to call tools
@@ -2063,12 +2070,12 @@ class GlueLLM:
                                 user_context = query
                             matched = await resolve_tool_route(
                                 user_context,
-                                self.tools,
+                                dynamic_tools,
                                 model=self.tool_route_model,
                                 api_key=api_key,
                                 timeout=request_timeout,
                             )
-                            active_tools = matched
+                            active_tools = matched + static_tools
                             await emit_status(
                                 ProcessEvent(
                                     kind="tool_route",
@@ -2078,6 +2085,7 @@ class GlueLLM:
                                     matched_tools=[t.__name__ for t in matched],
                                 ),
                                 on_status,
+                                sinks=sinks,
                             )
                             # Update system prompt to reflect matched tools (no longer router)
                             messages[0]["content"] = self._format_system_prompt(tools=active_tools)
@@ -2094,6 +2102,7 @@ class GlueLLM:
                             iteration=iteration + 1,
                             correlation_id=correlation_id,
                             on_status=on_status,
+                            sinks=sinks,
                         )
                         tool_calls_made += len(round_results)
                         for r in round_results:
@@ -2220,6 +2229,7 @@ class GlueLLM:
                             response_length=len(final_content),
                         ),
                         on_status,
+                        sinks=sinks,
                     )
 
                     result = ExecutionResult(
@@ -2270,6 +2280,7 @@ class GlueLLM:
                         response_length=len(final_content),
                     ),
                     on_status,
+                    sinks=sinks,
                 )
 
                 result = ExecutionResult(
@@ -2342,6 +2353,8 @@ class GlueLLM:
         top_logprobs: int | None = None,
         session_label: str | None = None,
         parallel_tool_calls: bool | None = None,
+        max_validation_retries: int | None = None,
+        sinks: list[Sink] | None = None,
         **model_kwargs: Any,
     ) -> ExecutionResult:
         """Complete a request and return structured output.
@@ -2376,6 +2389,8 @@ class GlueLLM:
             top_logprobs: Number of top log probs when logprobs=True.
             session_label: Observability metadata for gateway traces.
             parallel_tool_calls: Allow parallel tool calls.
+            max_validation_retries: Max retries when Pydantic validation fails (default 3).
+                On validation error, the error is fed back to the model for self-correction.
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
@@ -2457,12 +2472,15 @@ class GlueLLM:
         # Determine which tools to use: parameter overrides instance tools
         tools_to_use = tools if tools is not None else self.tools
         # Resolve active_tools for dynamic vs standard mode
+        all_tools = tools_to_use
+        static_tools = [t for t in all_tools if is_static_tool(t)]
+        dynamic_tools = [t for t in all_tools if not is_static_tool(t)]
         router_tool = None
-        if effective_tool_mode == "dynamic" and tools_to_use:
-            router_tool = build_router_tool(tools_to_use)
-            active_tools: list[Callable] = [router_tool]
+        if effective_tool_mode == "dynamic" and all_tools:
+            router_tool = build_router_tool(dynamic_tools)
+            active_tools: list[Callable] = [router_tool] + static_tools
         else:
-            active_tools = tools_to_use
+            active_tools = all_tools
         system_prompt_content = self._format_system_prompt(tools=active_tools)
         messages_snapshot: list[dict] = []
         result: ExecutionResult | None = None
@@ -2533,6 +2551,7 @@ class GlueLLM:
                                     message_count=len(messages),
                                 ),
                                 on_status,
+                                sinks=sinks,
                             )
                             response = await _llm_call_with_retry(
                                 messages=messages,
@@ -2558,6 +2577,7 @@ class GlueLLM:
                                     token_usage=_extract_token_usage(response),
                                 ),
                                 on_status,
+                                sinks=sinks,
                             )
                         except LLMError as e:
                             cause_chain = _build_cause_chain(e)
@@ -2588,12 +2608,12 @@ class GlueLLM:
                                     user_context = query
                                 matched = await resolve_tool_route(
                                     user_context,
-                                    tools_to_use,
+                                    dynamic_tools,
                                     model=self.tool_route_model,
                                     api_key=api_key,
                                     timeout=request_timeout,
                                 )
-                                active_tools = matched
+                                active_tools = matched + static_tools
                                 await emit_status(
                                     ProcessEvent(
                                         kind="tool_route",
@@ -2603,6 +2623,7 @@ class GlueLLM:
                                         matched_tools=[t.__name__ for t in matched],
                                     ),
                                     on_status,
+                                    sinks=sinks,
                                 )
                                 # Update system prompt to reflect matched tools (no longer router)
                                 messages[0]["content"] = self._format_system_prompt(tools=active_tools)
@@ -2619,6 +2640,7 @@ class GlueLLM:
                                 iteration=iteration + 1,
                                 correlation_id=correlation_id,
                                 on_status=on_status,
+                                sinks=sinks,
                             )
                             tool_calls_made += len(round_results)
                             for r in round_results:
@@ -2657,6 +2679,7 @@ class GlueLLM:
                             message_count=len(messages),
                         ),
                         on_status,
+                        sinks=sinks,
                     )
                     response = await _llm_call_with_retry(
                         messages=messages,
@@ -2681,6 +2704,7 @@ class GlueLLM:
                             token_usage=_extract_token_usage(response),
                         ),
                         on_status,
+                        sinks=sinks,
                     )
                 except LLMError as e:
                     logger.error(f"Structured output call failed: {e}")
@@ -2785,26 +2809,62 @@ class GlueLLM:
                 if content:
                     self._conversation.add_message(Role.ASSISTANT, content)
 
-                # Parse the structured output
+                # Parse the structured output with validation-aware retry
+                max_val_retries = max_validation_retries if max_validation_retries is not None else 3
+                validation_attempt = 0
                 structured_output = None
-                if isinstance(parsed, response_format):
-                    logger.debug(f"Using parsed Pydantic instance: {response_format.__name__}")
-                    structured_output = parsed
-                elif isinstance(parsed, dict):
-                    logger.debug(f"Instantiating {response_format.__name__} from dict")
-                    structured_output = response_format(**parsed)
-                elif content:
-                    # Fallback: try to parse from JSON string in content
+                while True:
                     try:
-                        data = json.loads(content)
-                        logger.debug(f"Parsed JSON from content, instantiating {response_format.__name__}")
-                        structured_output = response_format(**data)
-                    except (json.JSONDecodeError, TypeError) as e:
-                        logger.warning(f"Failed to parse structured response from content: {e}")
-                        structured_output = parsed
-                else:
-                    logger.warning(f"Using parsed response as-is (type: {type(parsed)})")
-                    structured_output = parsed
+                        if isinstance(parsed, response_format):
+                            logger.debug(f"Using parsed Pydantic instance: {response_format.__name__}")
+                            structured_output = parsed
+                        elif isinstance(parsed, dict):
+                            logger.debug(f"Instantiating {response_format.__name__} from dict")
+                            structured_output = response_format(**parsed)
+                        elif content:
+                            data = json.loads(content)
+                            logger.debug(f"Parsed JSON from content, instantiating {response_format.__name__}")
+                            structured_output = response_format(**data)
+                        else:
+                            logger.warning(f"Using parsed response as-is (type: {type(parsed)})")
+                            structured_output = parsed
+                        break
+                    except (ValidationError, json.JSONDecodeError, TypeError) as e:
+                        validation_attempt += 1
+                        if validation_attempt > max_val_retries:
+                            raise
+                        messages.append({"role": "assistant", "content": content or ""})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Your response failed validation: {e}\n"
+                                    "Please return a corrected JSON response."
+                                ),
+                            },
+                        )
+                        logger.info(
+                            f"Validation retry {validation_attempt}/{max_val_retries}: {e}"
+                        )
+                        response = await _llm_call_with_retry(
+                            messages=messages,
+                            model=model or self.model,
+                            response_format=response_format,
+                            request_timeout=request_timeout,
+                            connect_timeout=connect_timeout,
+                            api_key=api_key,
+                            max_tokens=effective_max_tokens,
+                            retry_config=effective_retry_config,
+                            rate_limit_config=effective_rate_limit_config,
+                            **effective_model_kwargs,
+                        )
+                        _track_usage(response)
+                        if not response.choices:
+                            raise InvalidRequestError(
+                                "Empty response from LLM provider during validation retry"
+                            ) from None
+                        parsed = getattr(response.choices[0].message, "parsed", None)
+                        content = response.choices[0].message.content
 
                 logger.info(f"Structured completion finished: tool_calls={tool_calls_made}, cost=${total_cost:.6f}")
 
@@ -2817,6 +2877,7 @@ class GlueLLM:
                         response_length=len(content) if content else 0,
                     ),
                     on_status,
+                    sinks=sinks,
                 )
 
                 result = ExecutionResult(
@@ -2894,6 +2955,7 @@ class GlueLLM:
         iteration: int,
         correlation_id: str,
         on_status: OnStatusCallback,
+        sinks: list[Sink] | None = None,
     ) -> list[dict[str, Any]]:
         """Execute a round of tool calls (sequential or parallel).
 
@@ -2957,6 +3019,7 @@ class GlueLLM:
                         call_index=call_index,
                     ),
                     on_status,
+                    sinks=sinks,
                 )
             # Build ordered results: errors first, then runnables
             ordered: list[dict[str, Any] | None] = [None] * len(parsed)
@@ -2966,6 +3029,7 @@ class GlueLLM:
                     await emit_status(
                         ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=False, duration_seconds=0, error=err),
                         on_status,
+                        sinks=sinks,
                     )
                     args_str = getattr(tool_call.function, "arguments", "{}")
                     ordered[i] = {"history": {"tool_name": tool_name, "arguments": args_str, "result": err, "error": True}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": err}}
@@ -2987,6 +3051,7 @@ class GlueLLM:
                     await emit_status(
                         ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=not error, duration_seconds=duration, error=result_str if error else None),
                         on_status,
+                        sinks=sinks,
                     )
                     ordered[i] = {"history": {"tool_name": tool_name, "arguments": tool_args or {}, "result": result_str, "error": error}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": result_str}}
             results = [r for r in ordered if r is not None]
@@ -2996,11 +3061,13 @@ class GlueLLM:
                 await emit_status(
                     ProcessEvent(kind="tool_call_start", correlation_id=correlation_id, timestamp=time.time(), iteration=iteration, tool_name=tool_name, call_index=call_index),
                     on_status,
+                    sinks=sinks,
                 )
                 if err is not None:
                     await emit_status(
                         ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=False, duration_seconds=0, error=err),
                         on_status,
+                        sinks=sinks,
                     )
                     results.append({"history": {"tool_name": tool_name, "arguments": getattr(tool_call.function, "arguments", "{}"), "result": err, "error": True}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": err}})
                     continue
@@ -3008,6 +3075,7 @@ class GlueLLM:
                 await emit_status(
                     ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=not error, duration_seconds=duration, error=result_str if error else None),
                     on_status,
+                    sinks=sinks,
                 )
                 results.append({"history": {"tool_name": tool_name, "arguments": tool_args or {}, "result": result_str, "error": error}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": result_str}})
         return results
@@ -3033,6 +3101,7 @@ class GlueLLM:
         rate_limit_config: RateLimitConfig | None = None,
         track_costs: bool | None = None,
         enable_eval_recording: bool | None = None,
+        sinks: list[Sink] | None = None,
     ) -> AsyncIterator[StreamingChunk]:
         """Stream completion with automatic tool execution.
 
@@ -3113,12 +3182,15 @@ class GlueLLM:
             set_correlation_id()
 
         # Resolve active_tools for dynamic vs standard mode
+        all_tools = self.tools
+        static_tools = [t for t in all_tools if is_static_tool(t)]
+        dynamic_tools = [t for t in all_tools if not is_static_tool(t)]
         router_tool = None
-        if effective_tool_mode == "dynamic" and self.tools:
-            router_tool = build_router_tool(self.tools)
-            active_tools: list[Callable] = [router_tool]
+        if effective_tool_mode == "dynamic" and all_tools:
+            router_tool = build_router_tool(dynamic_tools)
+            active_tools: list[Callable] = [router_tool] + static_tools
         else:
-            active_tools = self.tools
+            active_tools = all_tools
 
         # Run input guardrails before processing
         if effective_guardrails:
@@ -3154,6 +3226,7 @@ class GlueLLM:
                             timestamp=time.time(),
                         ),
                         on_status,
+                        sinks=sinks,
                     )
                     # Providers (e.g. OpenAI) do not support response_format with stream=True;
                     # we stream plain text and parse into response_format when the stream ends.
@@ -3188,6 +3261,7 @@ class GlueLLM:
                                         done=False,
                                     ),
                                     on_status,
+                                    sinks=sinks,
                                 )
                                 yield chunk
                     # Final chunk - run output guardrails on accumulated content
@@ -3198,6 +3272,7 @@ class GlueLLM:
                             timestamp=time.time(),
                         ),
                         on_status,
+                        sinks=sinks,
                     )
                     structured_output = None
                     if response_format and accumulated_content:
@@ -3237,6 +3312,7 @@ class GlueLLM:
                         timestamp=time.time(),
                     ),
                     on_status,
+                    sinks=sinks,
                 )
                 await emit_status(
                     ProcessEvent(
@@ -3248,6 +3324,7 @@ class GlueLLM:
                         message_count=len(messages),
                     ),
                     on_status,
+                    sinks=sinks,
                 )
                 stream_iter = await _llm_call_with_retry(
                     messages=messages,
@@ -3274,6 +3351,7 @@ class GlueLLM:
                                 done=False,
                             ),
                             on_status,
+                            sinks=sinks,
                         )
                         yield StreamingChunk(
                             content=content_or_accumulated,
@@ -3296,6 +3374,7 @@ class GlueLLM:
                         token_usage=None,
                     ),
                     on_status,
+                    sinks=sinks,
                 )
             except LLMError as e:
                 cause_chain = _build_cause_chain(e)
@@ -3322,12 +3401,12 @@ class GlueLLM:
                         user_context = query
                     matched = await resolve_tool_route(
                         user_context,
-                        self.tools,
+                        dynamic_tools,
                         model=self.tool_route_model,
                         api_key=None,
                         timeout=request_timeout,
                     )
-                    active_tools = matched
+                    active_tools = matched + static_tools
                     await emit_status(
                         ProcessEvent(
                             kind="tool_route",
@@ -3337,6 +3416,7 @@ class GlueLLM:
                             matched_tools=[t.__name__ for t in matched],
                         ),
                         on_status,
+                        sinks=sinks,
                     )
                     # Update system prompt to reflect matched tools (no longer router)
                     messages[0]["content"] = self._format_system_prompt(tools=active_tools)
@@ -3362,6 +3442,7 @@ class GlueLLM:
                     iteration=iteration + 1,
                     correlation_id=get_correlation_id(),
                     on_status=on_status,
+                    sinks=sinks,
                 )
                 tool_calls_made += len(round_results)
                 for r in round_results:
@@ -3461,6 +3542,7 @@ class GlueLLM:
                     timestamp=time.time(),
                 ),
                 on_status,
+                sinks=sinks,
             )
             structured_output = None
             if response_format and final_content:
@@ -3599,6 +3681,7 @@ async def complete(
     top_logprobs: int | None = None,
     session_label: str | None = None,
     parallel_tool_calls: bool | None = None,
+    sinks: list[Sink] | None = None,
     **model_kwargs: Any,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
@@ -3655,6 +3738,7 @@ async def complete(
         request_timeout=request_timeout,
         connect_timeout=connect_timeout,
         on_status=on_status,
+        sinks=sinks,
         tool_mode=tool_mode,
         tool_execution_order=tool_execution_order,
         max_tokens=max_tokens,
@@ -3702,6 +3786,8 @@ async def structured_complete(
     top_logprobs: int | None = None,
     session_label: str | None = None,
     parallel_tool_calls: bool | None = None,
+    max_validation_retries: int | None = None,
+    sinks: list[Sink] | None = None,
     **model_kwargs: Any,
 ) -> ExecutionResult:
     """Quick structured completion with optional tool support.
@@ -3734,6 +3820,7 @@ async def structured_complete(
         rate_limit_config: Per-call rate limit configuration override.
         track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
+        max_validation_retries: Max retries when Pydantic validation fails (default 3).
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
     Returns:
@@ -3813,6 +3900,8 @@ async def structured_complete(
         top_logprobs=top_logprobs,
         session_label=session_label,
         parallel_tool_calls=parallel_tool_calls,
+        max_validation_retries=max_validation_retries,
+        sinks=sinks,
         **model_kwargs,
     )
 
@@ -3820,12 +3909,15 @@ async def structured_complete(
 async def list_models(
     provider: str = "openai",
     api_key: str | None = None,
+    timeout: float | None = None,
 ) -> Sequence[Any]:
     """List available models for a provider.
 
     Args:
         provider: Provider name (e.g. "openai", "anthropic").
         api_key: Optional API key override.
+        timeout: Timeout in seconds for the request (defaults to
+            settings.default_request_timeout).
 
     Returns:
         Sequence of Model objects with id, created, owned_by, etc.
@@ -3841,8 +3933,10 @@ async def list_models(
         >>>
         >>> asyncio.run(main())
     """
+    if timeout is None:
+        timeout = settings.default_request_timeout
     llm = AnyLLM.create(provider, api_key=api_key)
-    return await asyncio.to_thread(llm.list_models)
+    return await asyncio.wait_for(asyncio.to_thread(llm.list_models), timeout=timeout)
 
 
 async def embed(
@@ -3928,6 +4022,7 @@ async def stream_complete(
     rate_limit_config: RateLimitConfig | None = None,
     track_costs: bool | None = None,
     enable_eval_recording: bool | None = None,
+    sinks: list[Sink] | None = None,
 ) -> AsyncIterator[StreamingChunk]:
     """Stream completion with automatic tool execution.
 
@@ -3997,6 +4092,7 @@ async def stream_complete(
         execute_tools=execute_tools,
         response_format=response_format,
         on_status=on_status,
+        sinks=sinks,
         correlation_id=correlation_id,
         request_timeout=request_timeout,
         connect_timeout=connect_timeout,

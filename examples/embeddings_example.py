@@ -25,15 +25,20 @@ async def example_single_embedding():
     print("Example 1: Single Embedding")
     print("=" * 60)
 
-    result = await embed("The quick brown fox jumps over the lazy dog.")
-    print(f"Model: {result.model}")
-    print(f"Dimension: {result.dimension}")
-    print(f"Count: {result.count}")
-    print(f"Tokens used: {result.tokens_used}")
-    if result.estimated_cost_usd is not None:
-        print(f"Estimated cost: ${result.estimated_cost_usd:.6f}")
-    vec = result.get_embedding(0)
-    print(f"Embedding (first 5 dims): {vec[:5]!r}...")
+    try:
+        result = await embed("The quick brown fox jumps over the lazy dog.")
+        print(f"Model: {result.model}")
+        print(f"Dimension: {result.dimension}")
+        print(f"Count: {result.count}")
+        print(f"Tokens used: {result.tokens_used}")
+        if result.estimated_cost_usd is not None:
+            print(f"Estimated cost: ${result.estimated_cost_usd:.6f}")
+        vec = result.get_embedding(0)
+        print(f"Embedding (first 5 dims): {vec[:5]!r}...")
+    except TimeoutError:
+        print("Request timed out; skipping this example.")
+    except Exception as e:
+        print(f"Error: {e}")
     print()
 
 
@@ -48,12 +53,17 @@ async def example_batch_embedding():
         "JavaScript runs in the browser.",
         "Machine learning uses data to make predictions.",
     ]
-    result = await embed(texts)
-    print(f"Input count: {len(texts)}, Embedding count: {result.count}")
-    assert result.count == len(texts)
-    for i, text in enumerate(texts):
-        vec = result.get_embedding(i)
-        print(f"  [{i}] {text[:40]!r}... -> dim={len(vec)}")
+    try:
+        result = await embed(texts)
+        print(f"Input count: {len(texts)}, Embedding count: {result.count}")
+        assert result.count == len(texts)
+        for i, text in enumerate(texts):
+            vec = result.get_embedding(i)
+            print(f"  [{i}] {text[:40]!r}... -> dim={len(vec)}")
+    except TimeoutError:
+        print("Request timed out; skipping this example.")
+    except Exception as e:
+        print(f"Error: {e}")
     print()
 
 
@@ -68,17 +78,22 @@ async def example_similarity_comparison():
         "The feline rests on the rug.",
         "The stock market surged today.",
     ]
-    result = await embed(texts)
-    a, b, c = result.get_embedding(0), result.get_embedding(1), result.get_embedding(2)
+    try:
+        result = await embed(texts)
+        a, b, c = result.get_embedding(0), result.get_embedding(1), result.get_embedding(2)
 
-    sim_ab = cosine_similarity(a, b)
-    sim_ac = cosine_similarity(a, c)
-    sim_bc = cosine_similarity(b, c)
+        sim_ab = cosine_similarity(a, b)
+        sim_ac = cosine_similarity(a, c)
+        sim_bc = cosine_similarity(b, c)
 
-    print(f"Similarity (cat/feline): {sim_ab:.4f}")
-    print(f"Similarity (cat/stock):  {sim_ac:.4f}")
-    print(f"Similarity (feline/stock): {sim_bc:.4f}")
-    print("Semantically similar pairs should have higher similarity.")
+        print(f"Similarity (cat/feline): {sim_ab:.4f}")
+        print(f"Similarity (cat/stock):  {sim_ac:.4f}")
+        print(f"Similarity (feline/stock): {sim_bc:.4f}")
+        print("Semantically similar pairs should have higher similarity.")
+    except TimeoutError:
+        print("Request timed out; skipping this example.")
+    except Exception as e:
+        print(f"Error: {e}")
     print()
 
 

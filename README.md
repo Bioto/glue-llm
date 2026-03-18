@@ -187,6 +187,36 @@ result = await client.complete("Check the weather and search flights...")
 
 Dynamic routing is most effective when you have 6+ tools and the task only uses a few of them per call. For small toolsets or when every call uses most tools, standard mode is simpler and equally efficient.
 
+#### Always-available tools with `@static_tool`
+
+Some tools should never go through routing — utility functions like getting the current time, fetching the user's profile, or anything that should always be in scope. Decorate them with `@static_tool` to pin them to every LLM call, bypassing the router entirely.
+
+```python
+from gluellm import GlueLLM, static_tool
+
+@static_tool
+def get_current_time() -> str:
+    """Get the current UTC time."""
+    return datetime.utcnow().isoformat()
+
+def search_products(query: str) -> list[str]:
+    """Search the product catalog."""
+    ...
+
+def check_inventory(sku: str) -> int:
+    """Check stock level for a product."""
+    ...
+
+client = GlueLLM(
+    tools=[get_current_time, search_products, check_inventory],
+    tool_mode="dynamic",
+)
+# get_current_time is always injected; search_products and check_inventory go through routing
+result = await client.complete("Find a widget and tell me if it's in stock, also what time is it?")
+```
+
+In `tool_mode="standard"` the decorator has no effect — all tools are always present anyway.
+
 Both `condense_tool_messages` and `tool_mode` can be combined:
 
 ```python

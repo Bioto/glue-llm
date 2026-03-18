@@ -105,7 +105,7 @@ from gluellm.batch import (
     batch_structured_complete,
 )
 from gluellm.config import GlueLLMSettings, ToolExecutionOrder, configure, get_settings, reload_settings, settings
-from gluellm.tool_router import ToolMode
+from gluellm.tool_router import ToolMode, static_tool
 from gluellm.eval import (
     CallbackStore,
     EvalRecord,
@@ -117,7 +117,7 @@ from gluellm.eval import (
     get_global_eval_store,
     set_global_eval_store,
 )
-from gluellm.events import ProcessEvent
+from gluellm.events import ConsoleSink, JsonFileSink, ProcessEvent, Sink
 from gluellm.guardrails import (
     GuardrailBlockedError,
     GuardrailRejectedError,
@@ -201,6 +201,9 @@ __all__ = [
     "EmbeddingResult",
     "StreamingChunk",
     "ProcessEvent",
+    "Sink",
+    "ConsoleSink",
+    "JsonFileSink",
     # Session Tracking
     "get_session_summary",
     "list_models",
@@ -255,6 +258,7 @@ __all__ = [
     "get_global_eval_store",
     # Tool routing
     "ToolMode",
+    "static_tool",
     "ToolExecutionOrder",
     # Configuration
     "GlueLLMSettings",

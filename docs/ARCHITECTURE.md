@@ -101,11 +101,14 @@ classDiagram
 
 ```mermaid
 flowchart TD
-    Start([Start]) --> ToolMode{tool_mode?}
-    ToolMode -->|standard| BuildMessages[Build Messages<br/>System + All Tool Schemas]
-    ToolMode -->|dynamic| RouterCall[Router Call<br/>which tools needed?]
-    RouterCall --> MatchedSchemas[Inject matched<br/>tool schemas only]
-    MatchedSchemas --> BuildMessages
+    Start([Start]) --> Split["Split tools:\nstatic vs dynamic"]
+    Split --> ToolMode{tool_mode?}
+    ToolMode -->|standard| BuildMessages["Build Messages\n(all tools)"]
+    ToolMode -->|dynamic| RouterStart["Router tool +\nstatic tools"]
+    RouterStart --> RouterCall[LLM calls router]
+    RouterCall --> MatchedSchemas["resolve_tool_route\n(dynamic tools only)"]
+    MatchedSchemas --> MergeStatic["Matched dynamic tools\n+ static tools"]
+    MergeStatic --> BuildMessages
     BuildMessages --> CallLLM[Call LLM with<br/>Retry Logic]
     CallLLM --> ToolCalls{Tool Calls?}
     ToolCalls -->|Yes| ExecuteTools[Execute Tools]
@@ -117,7 +120,9 @@ flowchart TD
     AppendCondensed --> CallLLM
 ```
 
-Both optimizations are **opt-in and off by default**. See [`docs/CONTEXT_OPTIMIZATION.md`](CONTEXT_OPTIMIZATION.md) for full details.
+**Static tools** (decorated with `@static_tool`) are always injected into every LLM call regardless of `tool_mode`. In dynamic mode they bypass the router and are merged back alongside whatever the router matches. In standard mode the decorator has no effect.
+
+All three features are **opt-in and off by default**. See [TOOL_EXECUTION.md](TOOL_EXECUTION.md) for full details.
 
 ### 3. Workflow System
 
@@ -541,14 +546,15 @@ flowchart TD
 
 - **Rate Limiting:** Five algorithms (sliding window, fixed window, leaking bucket, token bucket, GCRA) via `throttled-py`. Memory or Redis backend. Configurable globally via `gluellm.configure()` or per-call via `RateLimitConfig`.
 - **Connection Pooling:** Handled by any-llm SDK; providers are cached so the same httpx client and connection pool are reused across calls
-- **Dual Timeouts:** `connect_timeout` is enforced at the httpx transport layer; `request_timeout` is an `asyncio.wait_for` guard over the full coroutine. Both default to configurable settings and are clamped to per-setting maximums. See [`docs/TIMEOUTS.md`](TIMEOUTS.md).
-- **Retry Logic:** Exponential backoff with jitter. For per-call and per-client customisation (`RetryConfig`, `retry_on`, callback), see [`docs/RETRY.md`](RETRY.md).
+- **Dual Timeouts:** `connect_timeout` is enforced at the httpx transport layer; `request_timeout` is an `asyncio.wait_for` guard over the full coroutine. Both default to configurable settings and are clamped to per-setting maximums. See [CONFIGURATION.md](CONFIGURATION.md).
+- **Retry Logic:** Exponential backoff with jitter. For per-call and per-client customisation (`RetryConfig`, `retry_on`, callback), see [ERROR_HANDLING.md](ERROR_HANDLING.md).
 - **Parallel Execution:** Workflows use `asyncio.gather()` for parallel agent execution
 - **Token Tracking:** Minimal overhead, optional MLflow integration
 - **Context Condensing** *(opt-in)*: each completed tool round collapsed to 1 message, preventing linear context growth in long chains. Enable with `condense_tool_messages=True`.
 - **Dynamic Tool Routing** *(opt-in)*: only inject schemas for tools the model actually needs, reducing per-call prompt tokens for large toolsets. Enable with `tool_mode="dynamic"`.
+- **Static Tool Pinning** *(opt-in)*: individual tools can be decorated with `@static_tool` to bypass dynamic routing and remain available in every LLM call. Useful for utility tools (timestamps, user context) that should always be in scope.
 
-See [`docs/CONTEXT_OPTIMIZATION.md`](CONTEXT_OPTIMIZATION.md) for benchmarks and usage guidance.
+See [TOOL_EXECUTION.md](TOOL_EXECUTION.md) and [PERFORMANCE.md](PERFORMANCE.md) for usage guidance.
 
 ## Security Considerations
 

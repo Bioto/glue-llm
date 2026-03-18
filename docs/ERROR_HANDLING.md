@@ -1,149 +1,171 @@
-# Error Handling
+# GlueLLM Error Handling
 
-GlueLLM uses a unified exception hierarchy for LLM-related errors and separate exceptions for guardrails. This document covers all exception types, how they are classified from provider errors, and practical patterns for handling them.
+GlueLLM provides a consistent exception hierarchy and automatic retry logic for LLM API calls.
 
 ## Exception Hierarchy
 
-### LLM Errors
+```mermaid
+classDiagram
+    class LLMError {
+        <<base>>
+    }
+    class TokenLimitError
+    class RateLimitError
+    class APIConnectionError
+    class APITimeoutError
+    class InvalidRequestError
+    class AuthenticationError
 
-All LLM errors inherit from `LLMError`. These are raised from `complete()`, `structured_complete()`, `stream_complete()`, and `embed()` when the underlying provider (e.g. OpenAI, Anthropic) fails.
-
+    LLMError <|-- TokenLimitError
+    LLMError <|-- RateLimitError
+    LLMError <|-- APIConnectionError
+    LLMError <|-- InvalidRequestError
+    LLMError <|-- AuthenticationError
+    APIConnectionError <|-- APITimeoutError
 ```
-LLMError (base)
-├── TokenLimitError      # Context/token limit exceeded
-├── RateLimitError       # Rate limit or quota hit (429)
-├── APIConnectionError   # Network/connection failures
-│   └── APITimeoutError  # Request timed out (subclass of APIConnectionError)
-├── InvalidRequestError  # Bad parameters, validation (400)
-└── AuthenticationError  # API key invalid, unauthorized (401, 403)
-```
 
-| Exception | When raised |
+### Exception Types
+
+| Exception | When Raised |
 |-----------|-------------|
-| `LLMError` | Base class; also used as fallback when provider error cannot be classified |
-| `TokenLimitError` | Context length exceeded, too many tokens |
-| `RateLimitError` | Rate limit (429), quota exceeded, throttled |
-| `APIConnectionError` | Connection failed, network unreachable, 502, 503, 504 |
+| `LLMError` | Base class; generic LLM errors |
+| `TokenLimitError` | Context length exceeded, token limit exceeded |
+| `RateLimitError` | 429, quota exceeded, rate limit hit |
+| `APIConnectionError` | Network issues, 502, 503, 504 |
 | `APITimeoutError` | Request timed out (subclass of `APIConnectionError`) |
-| `InvalidRequestError` | Invalid params, bad request, validation (400) |
-| `AuthenticationError` | Invalid API key, unauthorized (401, 403) |
+| `InvalidRequestError` | Bad params, validation errors, 400 |
+| `AuthenticationError` | 401, 403, invalid API key |
 
-### Guardrail Errors
+### Guardrail Exceptions
 
-Guardrail exceptions do **not** subclass `LLMError`. They are raised when using guardrails (e.g. `GuardrailsConfig`).
-
-| Exception | When raised |
+| Exception | When Raised |
 |-----------|-------------|
-| `GuardrailBlockedError` | Input guardrail blocks user content, or output guardrail blocks after max retries exhausted. No retry. |
-| `GuardrailRejectedError` | Output guardrail rejects response. Caught internally to retry the LLM call with feedback. |
-
-Both guardrail errors have `reason` and `guardrail_name` attributes.
+| `GuardrailBlockedError` | Input guardrails block the request; no retry |
+| `GuardrailRejectedError` | Output guardrails reject content; triggers retry |
 
 ## Error Classification
 
-GlueLLM maps raw provider errors to its exception types via `classify_llm_error`. The classifier inspects the error message (case-insensitive) and type name. Keywords are checked in order; the first match wins.
+Raw exceptions from the underlying API (any-llm) are classified via `classify_llm_error()` into GlueLLM exception types. Classification uses error message text and exception type.
 
-| Exception | Keywords (message or type) |
-|-----------|---------------------------|
-| `TokenLimitError` | `context length`, `token limit`, `maximum context`, `too many tokens`, `context_length_exceeded`, `max_tokens` |
-| `RateLimitError` | `rate limit`, `rate_limit`, `too many requests`, `quota exceeded`, `resource exhausted`, `throttled`, `429` |
-| `APITimeoutError` | `timeout`, `timed out`, or `error_type == "APITimeoutError"` |
-| `APIConnectionError` | `connection`, `network`, `unreachable`, `503`, `502`, `504` |
-| `AuthenticationError` | `unauthorized`, `invalid api key`, `authentication`, `auth`, `401`, `403` |
-| `InvalidRequestError` | `invalid`, `bad request`, `400`, `validation` |
-| `LLMError` | Fallback when no other match |
+## Retry Logic
 
-Timeouts are checked before connection errors, so timeout messages map to `APITimeoutError` rather than `APIConnectionError`.
+### Retryable vs Non-Retryable
 
-## Handling Errors
+| Retryable | Non-Retryable |
+|-----------|---------------|
+| `RateLimitError` | `TokenLimitError` |
+| `APIConnectionError` | `AuthenticationError` |
+| | `InvalidRequestError` |
 
-### Basic pattern
+### Default Behavior
 
-```python
-from gluellm import complete, LLMError, TokenLimitError, RateLimitError, AuthenticationError, APIConnectionError
+- **Retries**: Up to 3 attempts (configurable via `RetryConfig` or `GLUELLM_RETRY_MAX_ATTEMPTS`)
+- **Backoff**: Exponential with jitter between `min_wait` and `max_wait`
+- **Only on**: `RateLimitError` and `APIConnectionError`
 
-try:
-    result = await complete("What is 2+2?")
-    print(result.final_response)
-except TokenLimitError as e:
-    print(f"Input too long: {e}")
-except RateLimitError as e:
-    print(f"Rate limit hit: {e}")
-except AuthenticationError as e:
-    print(f"Auth failed: {e}")
-except APIConnectionError as e:
-    print(f"Connection failed: {e}")
-except LLMError as e:
-    print(f"LLM error: {e}")
-```
-
-### Checking subtypes
-
-When you catch a parent type, use `isinstance()` to distinguish subtypes:
+### RetryConfig
 
 ```python
-from gluellm import complete, APIConnectionError, APITimeoutError
+from gluellm import RetryConfig, GlueLLM
 
-try:
-    result = await complete("...")
-except APIConnectionError as e:
-    if isinstance(e, APITimeoutError):
-        print("Request timed out")
-    else:
-        print("Other connection error (network, 502, 503, etc.)")
+# Disable retries entirely
+client = GlueLLM(retry_config=RetryConfig(retry_enabled=False))
+
+# Custom retry limits
+client = GlueLLM(retry_config=RetryConfig(
+    max_attempts=5,
+    min_wait=1.0,
+    max_wait=60.0,
+    multiplier=2.0,
+))
+
+# Per-call override
+result = await client.complete("Hello", retry_config=RetryConfig(retry_enabled=False))
 ```
 
-You can also inspect the exact type:
+### Custom Retry with retry_on
+
+Restrict retries to specific exception types:
 
 ```python
-type(e).__name__  # "APITimeoutError" or "APIConnectionError"
+from gluellm import RetryConfig, RateLimitError
+
+client = GlueLLM(retry_config=RetryConfig(
+    retry_on=[RateLimitError],  # Only retry on rate limit, not connection errors
+))
 ```
 
-### Catch-all for LLM errors
+### Custom Retry with Callback
 
-`LLMError` is the base for all LLM exceptions, so catching it handles every LLM error:
+Full control over retry decisions and per-attempt parameters:
 
 ```python
-except LLMError as e:
-    print(f"LLM failed: {type(e).__name__}: {e}")
+async def my_retry_callback(error: Exception, attempt: int) -> tuple[bool, dict | None]:
+    if attempt >= 2:
+        return False, None  # Stop retrying
+    # Lower temperature on retry
+    return True, {"temperature": 0.3}
+
+client = GlueLLM(retry_config=RetryConfig(
+    callback=my_retry_callback,
+))
 ```
 
-### Guardrail errors
+Callback signature: `(error, attempt) -> (should_retry, next_params | None)`.
+- `should_retry`: `False` stops retrying and re-raises
+- `next_params`: Merged into model kwargs for next attempt; `None` keeps current params
 
-When using guardrails, also handle guardrail exceptions:
+## Handling Errors in Your Code
 
 ```python
-from gluellm import complete, GuardrailBlockedError, GuardrailRejectedError
+from gluellm import complete
+from gluellm.api import (
+    LLMError,
+    TokenLimitError,
+    RateLimitError,
+    APIConnectionError,
+    InvalidRequestError,
+    AuthenticationError,
+)
 
-try:
-    result = await complete("...", guardrails_config=config)
-except GuardrailBlockedError as e:
-    print(f"Blocked: {e.reason} (guardrail: {e.guardrail_name})")
-except GuardrailRejectedError:
-    # Usually caught internally for retry; re-raised if retries exhausted
-    print("Output rejected by guardrail")
+async def safe_complete():
+    try:
+        result = await complete("Hello")
+        return result.final_response
+    except TokenLimitError as e:
+        # Reduce context or split input
+        log.error("Context too long: %s", e)
+        raise
+    except RateLimitError as e:
+        # Wait and retry, or use API key pool
+        log.warning("Rate limited: %s", e)
+        raise
+    except AuthenticationError as e:
+        # Check API key configuration
+        log.error("Auth failed: %s", e)
+        raise
+    except InvalidRequestError as e:
+        # Fix request parameters
+        log.error("Invalid request: %s", e)
+        raise
+    except LLMError as e:
+        # Catch-all for other LLM errors
+        log.error("LLM error: %s", e)
+        raise
 ```
 
-## Retryable vs Non-Retryable
+## Shutdown Handling
 
-By default, GlueLLM retries on:
+When `is_shutting_down()` is True (e.g., SIGTERM received), new requests raise `RuntimeError`:
 
-- `RateLimitError`
-- `APIConnectionError` (including `APITimeoutError`)
+```python
+RuntimeError: Cannot process request: shutdown in progress
+```
 
-It does **not** retry on:
+Complete in-flight requests before shutdown. See [RUNTIME.md](RUNTIME.md) for details.
 
-- `TokenLimitError`
-- `InvalidRequestError`
-- `AuthenticationError`
-- `GuardrailBlockedError`
+## See Also
 
-`GuardrailRejectedError` is caught internally to retry the LLM call with feedback; it is not surfaced to the user unless retries are exhausted (then converted to `GuardrailBlockedError`).
-
-To customise retries (per-call, per-client, callback, backoff), see [RETRY.md](RETRY.md).
-
-## See also
-
-- [RETRY.md](RETRY.md) — Retry configuration, `RetryConfig`, callbacks, backoff
-- [TIMEOUTS.md](TIMEOUTS.md) — `connect_timeout`, `request_timeout`, defaults, env vars
-- [`examples/error_handling_example.py`](../examples/error_handling_example.py) — Runnable error-handling examples
+- [API.md](API.md) - API reference
+- [CONFIGURATION.md](CONFIGURATION.md) - Retry and timeout settings
+- [RUNTIME.md](RUNTIME.md) - Graceful shutdown

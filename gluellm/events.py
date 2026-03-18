@@ -2,12 +2,14 @@
 
 This module defines event types emitted during complete(), stream_complete(),
 and structured_complete() so callers can observe progress (LLM calls, tool
-execution, streaming chunks) via an optional on_status callback.
+execution, streaming chunks) via an optional on_status callback or typed sinks.
 """
 
 import inspect
+import sys
 from collections.abc import Awaitable, Callable
-from typing import Literal
+from pathlib import Path
+from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -65,17 +67,50 @@ class ProcessEvent(BaseModel):
     model_config = {"extra": "allow"}
 
 
+@runtime_checkable
+class Sink(Protocol):
+    """Protocol for ProcessEvent sinks. Implement handle() to receive events."""
+
+    async def handle(self, event: ProcessEvent) -> None:
+        """Process the event. Sync or async implementations supported."""
+        ...
+
+
+class ConsoleSink:
+    """Prints events to stderr."""
+
+    async def handle(self, event: ProcessEvent) -> None:
+        print(f"[{event.kind}] {event.model_dump_json()}", file=sys.stderr)
+
+
+class JsonFileSink:
+    """Appends events as JSON lines to a file."""
+
+    def __init__(self, path: str | Path) -> None:
+        self._path = Path(path)
+
+    async def handle(self, event: ProcessEvent) -> None:
+        import aiofiles
+
+        async with aiofiles.open(self._path, "a") as f:
+            await f.write(event.model_dump_json() + "\n")
+
+
 async def emit_status(
     event: ProcessEvent,
-    on_status: Callable[[ProcessEvent], None] | Callable[[ProcessEvent], Awaitable[None]] | None,
+    on_status: Callable[[ProcessEvent], None] | Callable[[ProcessEvent], Awaitable[None]] | None = None,
+    sinks: list[Sink] | None = None,
 ) -> None:
-    """Invoke on_status with the event if set; supports sync and async callbacks.
+    """Invoke on_status and sinks with the event.
 
-    Call from api.py with: await emit_status(event, on_status).
-    No-op when on_status is None. Exceptions from the callback are not caught.
+    Call from api.py with: await emit_status(event, on_status, sinks=sinks).
+    Both on_status and sinks are optional; no-op when neither is provided.
+    Supports sync and async callbacks for on_status. Exceptions are not caught.
     """
-    if on_status is None:
-        return
-    result = on_status(event)
-    if inspect.iscoroutine(result):
-        await result
+    if on_status is not None:
+        result = on_status(event)
+        if inspect.iscoroutine(result):
+            await result
+    if sinks:
+        for sink in sinks:
+            await sink.handle(event)

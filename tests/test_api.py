@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 from typing import Annotated
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from pydantic import BaseModel, Field
@@ -17,7 +17,7 @@ from gluellm.api import (
     stream_complete,
     structured_complete,
 )
-from gluellm.events import ProcessEvent
+from gluellm.events import ConsoleSink, JsonFileSink, ProcessEvent
 
 # Mark all tests as async
 pytestmark = pytest.mark.asyncio
@@ -650,6 +650,257 @@ class TestStructuredOutputEdgeCases:
         assert isinstance(result.structured_output.matrix, list)
         if len(result.structured_output.matrix) > 0:
             assert isinstance(result.structured_output.matrix[0], list)
+
+
+class TestStructuredCompleteValidationRetry:
+    """Test validation-aware retry on structured_complete()."""
+
+    @patch("gluellm.api._safe_llm_call")
+    async def test_structured_complete_retries_on_validation_error(self, mock_safe_call):
+        """Mock LLM returns invalid JSON first, valid second; assert success on retry."""
+
+        class TestModel(BaseModel):
+            name: str
+            value: int
+
+        invalid_content = '{"name": "test"}'
+        valid_content = '{"name": "ok", "value": 42}'
+
+        def make_response(content: str, parsed=None):
+            resp = Mock()
+            choice = Mock()
+            msg = Mock()
+            msg.parsed = parsed
+            msg.content = content
+            msg.tool_calls = None
+            choice.message = msg
+            resp.choices = [choice]
+            resp.usage = Mock(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+            return resp
+
+        mock_safe_call.side_effect = [
+            make_response(invalid_content),
+            make_response(valid_content),
+        ]
+
+        client = GlueLLM(model="openai:gpt-4o-mini")
+        result = await client.structured_complete("Test", TestModel)
+
+        assert mock_safe_call.call_count == 2
+        assert result.structured_output is not None
+        assert result.structured_output.name == "ok"
+        assert result.structured_output.value == 42
+
+    @patch("gluellm.api._safe_llm_call")
+    async def test_structured_complete_raises_after_max_validation_retries(self, mock_safe_call):
+        """Mock LLM always returns invalid; assert ValidationError after exhausting retries."""
+        from pydantic import ValidationError
+
+        class TestModel(BaseModel):
+            name: str
+            value: int
+
+        def make_response():
+            resp = Mock()
+            choice = Mock()
+            msg = Mock()
+            msg.parsed = None
+            msg.content = '{"name": "test"}'
+            msg.tool_calls = None
+            choice.message = msg
+            resp.choices = [choice]
+            resp.usage = Mock(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+            return resp
+
+        mock_safe_call.return_value = make_response()
+
+        client = GlueLLM(model="openai:gpt-4o-mini")
+        with pytest.raises(ValidationError):
+            await client.structured_complete("Test", TestModel, max_validation_retries=2)
+
+        assert mock_safe_call.call_count == 3
+
+    @patch("gluellm.api._safe_llm_call")
+    async def test_structured_complete_no_validation_retry_on_success(self, mock_safe_call):
+        """Valid on first try; assert only one LLM call."""
+        class TestModel(BaseModel):
+            name: str
+            value: int
+
+        def make_response():
+            resp = Mock()
+            choice = Mock()
+            msg = Mock()
+            msg.parsed = TestModel(name="a", value=1)
+            msg.content = '{"name": "a", "value": 1}'
+            msg.tool_calls = None
+            choice.message = msg
+            resp.choices = [choice]
+            resp.usage = Mock(prompt_tokens=10, completion_tokens=20, total_tokens=30)
+            return resp
+
+        mock_safe_call.return_value = make_response()
+
+        client = GlueLLM(model="openai:gpt-4o-mini")
+        result = await client.structured_complete("Test", TestModel)
+
+        assert mock_safe_call.call_count == 1
+        assert result.structured_output.name == "a"
+        assert result.structured_output.value == 1
+
+
+class TestSinkSystem:
+    """Test typed sink system for ProcessEvent observation."""
+
+    @patch("gluellm.api._safe_llm_call")
+    async def test_sink_receives_all_events(self, mock_safe_call):
+        """Attach a list-collecting sink, run complete(), assert events received."""
+        events_received: list[ProcessEvent] = []
+
+        class ListSink:
+            async def handle(self, event: ProcessEvent) -> None:
+                events_received.append(event)
+
+        def make_response():
+            resp = Mock()
+            choice = Mock()
+            msg = Mock()
+            msg.content = "Hello"
+            msg.tool_calls = None
+            choice.message = msg
+            resp.choices = [choice]
+            resp.usage = Mock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+            return resp
+
+        mock_safe_call.return_value = make_response()
+
+        client = GlueLLM(model="openai:gpt-4o-mini")
+        await client.complete("Hi", sinks=[ListSink()])
+
+        assert len(events_received) >= 2
+        kinds = [e.kind for e in events_received]
+        assert "llm_call_start" in kinds
+        assert "llm_call_end" in kinds
+        assert "complete" in kinds
+
+    @patch("gluellm.api._safe_llm_call")
+    async def test_multiple_sinks_all_invoked(self, mock_safe_call):
+        """Two sinks, both called."""
+        events_1: list[ProcessEvent] = []
+        events_2: list[ProcessEvent] = []
+
+        class Sink1:
+            async def handle(self, event: ProcessEvent) -> None:
+                events_1.append(event)
+
+        class Sink2:
+            async def handle(self, event: ProcessEvent) -> None:
+                events_2.append(event)
+
+        def make_response():
+            resp = Mock()
+            choice = Mock()
+            msg = Mock()
+            msg.content = "Hello"
+            msg.tool_calls = None
+            choice.message = msg
+            resp.choices = [choice]
+            resp.usage = Mock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+            return resp
+
+        mock_safe_call.return_value = make_response()
+
+        client = GlueLLM(model="openai:gpt-4o-mini")
+        await client.complete("Hi", sinks=[Sink1(), Sink2()])
+
+        assert len(events_1) == len(events_2) >= 2
+
+    @patch("gluellm.api._safe_llm_call")
+    async def test_on_status_and_sinks_coexist(self, mock_safe_call):
+        """Both on_status callback and sinks fire."""
+        callback_events: list[ProcessEvent] = []
+        sink_events: list[ProcessEvent] = []
+
+        class ListSink:
+            async def handle(self, event: ProcessEvent) -> None:
+                sink_events.append(event)
+
+        def make_response():
+            resp = Mock()
+            choice = Mock()
+            msg = Mock()
+            msg.content = "Hello"
+            msg.tool_calls = None
+            choice.message = msg
+            resp.choices = [choice]
+            resp.usage = Mock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+            return resp
+
+        mock_safe_call.return_value = make_response()
+
+        client = GlueLLM(
+            model="openai:gpt-4o-mini",
+        )
+        await client.complete(
+            "Hi",
+            on_status=lambda e: callback_events.append(e),
+            sinks=[ListSink()],
+        )
+
+        assert len(callback_events) >= 2
+        assert len(sink_events) == len(callback_events)
+
+    @patch("gluellm.api._safe_llm_call")
+    async def test_json_file_sink_writes_jsonl(self, mock_safe_call, tmp_path):
+        """Run with JsonFileSink, read file, assert valid JSONL."""
+        trace_file = tmp_path / "trace.jsonl"
+
+        def make_response():
+            resp = Mock()
+            choice = Mock()
+            msg = Mock()
+            msg.content = "Hello"
+            msg.tool_calls = None
+            choice.message = msg
+            resp.choices = [choice]
+            resp.usage = Mock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+            return resp
+
+        mock_safe_call.return_value = make_response()
+
+        client = GlueLLM(model="openai:gpt-4o-mini")
+        await client.complete("Hi", sinks=[JsonFileSink(trace_file)])
+
+        assert trace_file.exists()
+        lines = trace_file.read_text().strip().split("\n")
+        assert len(lines) >= 2
+        import json
+
+        for line in lines:
+            parsed = json.loads(line)
+            assert "kind" in parsed
+
+    @patch("gluellm.api._safe_llm_call")
+    async def test_console_sink_prints_to_stderr(self, mock_safe_call, capsys):
+        """Capture stderr, assert output from ConsoleSink."""
+        def make_response():
+            resp = Mock()
+            choice = Mock()
+            msg = Mock()
+            msg.content = "Hello"
+            msg.tool_calls = None
+            choice.message = msg
+            resp.choices = [choice]
+            resp.usage = Mock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+            return resp
+
+        mock_safe_call.return_value = make_response()
+
+        client = GlueLLM(model="openai:gpt-4o-mini")
+        await client.complete("Hi", sinks=[ConsoleSink()])
+
+        captured = capsys.readouterr()
+        assert "[llm_call_start]" in captured.err or "[complete]" in captured.err
 
 
 class TestToolResultSerialization:
@@ -2285,6 +2536,90 @@ class TestPerCallConfigGaps:
             )
 
         assert captured_model == "openai:gpt-4o"
+
+    async def test_static_tool_always_available_in_dynamic_mode(self):
+        """@static_tool decorator marks tools as always available, bypassing dynamic routing."""
+        from unittest.mock import patch
+
+        from gluellm import static_tool
+        from gluellm.tool_router import ROUTER_TOOL_NAME
+
+        @static_tool
+        def get_time() -> str:
+            """Get current time."""
+            return "12:00"
+
+        def search_db(query: str) -> str:
+            """Search the database."""
+            return "results"
+
+        captured_tools_passed_to_resolve = []
+        captured_tools_after_route = []
+
+        async def fake_resolve(user_context, tools, *, model, **kwargs):
+            captured_tools_passed_to_resolve.append(list(tools))
+            # Router returns only the dynamic tool (search_db)
+            return [search_db] if search_db in tools else []
+
+        call_count = 0
+
+        def make_router_tool_call():
+            return SimpleNamespace(
+                index=0,
+                id="call_router",
+                function=SimpleNamespace(
+                    name=ROUTER_TOOL_NAME,
+                    arguments='{"query": "search"}',
+                ),
+            )
+
+        async def fake_llm(*, messages, tools=None, stream=False, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if tools:
+                captured_tools_after_route.append([t.__name__ for t in tools])
+            if stream:
+                async def s():
+                    yield SimpleNamespace(
+                        choices=[SimpleNamespace(delta=SimpleNamespace(content="Hi", tool_calls=None))]
+                    )
+                return s()
+            if call_count == 1:
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content=None,
+                                tool_calls=[make_router_tool_call()],
+                            ),
+                        )
+                    ],
+                    usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+                )
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="Done", tool_calls=None),
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+            )
+
+        with (
+            patch("gluellm.api.resolve_tool_route", side_effect=fake_resolve),
+            patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm),
+        ):
+            await complete(
+                user_message="What time is it and search for X",
+                tools=[get_time, search_db],
+                tool_mode="dynamic",
+            )
+
+        # resolve_tool_route receives only dynamic tools (search_db), not static (get_time)
+        assert captured_tools_passed_to_resolve == [[search_db]]
+        # After routing: matched (search_db) + static (get_time) = both available
+        assert "get_time" in captured_tools_after_route[-1]
+        assert "search_db" in captured_tools_after_route[-1]
 
     async def test_condense_tool_messages_default_from_settings(self):
         """GLUELLM_DEFAULT_CONDENSE_TOOL_MESSAGES is used when condense_tool_messages is not passed."""
