@@ -658,7 +658,6 @@ class TestStructuredCompleteValidationRetry:
     @patch("gluellm.api._safe_llm_call")
     async def test_structured_complete_retries_on_validation_error(self, mock_safe_call):
         """Mock LLM returns invalid JSON first, valid second; assert success on retry."""
-        from pydantic import ValidationError
 
         class TestModel(BaseModel):
             name: str
@@ -2537,6 +2536,90 @@ class TestPerCallConfigGaps:
             )
 
         assert captured_model == "openai:gpt-4o"
+
+    async def test_static_tool_always_available_in_dynamic_mode(self):
+        """@static_tool decorator marks tools as always available, bypassing dynamic routing."""
+        from unittest.mock import patch
+
+        from gluellm import static_tool
+        from gluellm.tool_router import ROUTER_TOOL_NAME
+
+        @static_tool
+        def get_time() -> str:
+            """Get current time."""
+            return "12:00"
+
+        def search_db(query: str) -> str:
+            """Search the database."""
+            return "results"
+
+        captured_tools_passed_to_resolve = []
+        captured_tools_after_route = []
+
+        async def fake_resolve(user_context, tools, *, model, **kwargs):
+            captured_tools_passed_to_resolve.append(list(tools))
+            # Router returns only the dynamic tool (search_db)
+            return [search_db] if search_db in tools else []
+
+        call_count = 0
+
+        def make_router_tool_call():
+            return SimpleNamespace(
+                index=0,
+                id="call_router",
+                function=SimpleNamespace(
+                    name=ROUTER_TOOL_NAME,
+                    arguments='{"query": "search"}',
+                ),
+            )
+
+        async def fake_llm(*, messages, tools=None, stream=False, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if tools:
+                captured_tools_after_route.append([t.__name__ for t in tools])
+            if stream:
+                async def s():
+                    yield SimpleNamespace(
+                        choices=[SimpleNamespace(delta=SimpleNamespace(content="Hi", tool_calls=None))]
+                    )
+                return s()
+            if call_count == 1:
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content=None,
+                                tool_calls=[make_router_tool_call()],
+                            ),
+                        )
+                    ],
+                    usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+                )
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="Done", tool_calls=None),
+                    )
+                ],
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+            )
+
+        with (
+            patch("gluellm.api.resolve_tool_route", side_effect=fake_resolve),
+            patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm),
+        ):
+            await complete(
+                user_message="What time is it and search for X",
+                tools=[get_time, search_db],
+                tool_mode="dynamic",
+            )
+
+        # resolve_tool_route receives only dynamic tools (search_db), not static (get_time)
+        assert captured_tools_passed_to_resolve == [[search_db]]
+        # After routing: matched (search_db) + static (get_time) = both available
+        assert "get_time" in captured_tools_after_route[-1]
+        assert "search_db" in captured_tools_after_route[-1]
 
     async def test_condense_tool_messages_default_from_settings(self):
         """GLUELLM_DEFAULT_CONDENSE_TOOL_MESSAGES is used when condense_tool_messages is not passed."""

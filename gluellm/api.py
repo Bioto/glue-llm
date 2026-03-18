@@ -78,6 +78,7 @@ from gluellm.tool_router import (
     ToolMode,
     build_router_tool,
     is_router_call,
+    is_static_tool,
     resolve_tool_route,
 )
 from gluellm.costing.pricing_data import calculate_cost
@@ -1956,12 +1957,15 @@ class GlueLLM:
         # Capture start time for evaluation recording
         start_time = time.time()
         # Resolve active_tools for dynamic vs standard mode
+        all_tools = self.tools
+        static_tools = [t for t in all_tools if is_static_tool(t)]
+        dynamic_tools = [t for t in all_tools if not is_static_tool(t)]
         router_tool = None
-        if effective_tool_mode == "dynamic" and self.tools:
-            router_tool = build_router_tool(self.tools)
-            active_tools: list[Callable] = [router_tool]
+        if effective_tool_mode == "dynamic" and all_tools:
+            router_tool = build_router_tool(dynamic_tools)
+            active_tools: list[Callable] = [router_tool] + static_tools
         else:
-            active_tools = self.tools
+            active_tools = all_tools
         system_prompt_content = self._format_system_prompt(tools=active_tools)
         messages_snapshot: list[dict] = []
         result: ExecutionResult | None = None
@@ -2066,12 +2070,12 @@ class GlueLLM:
                                 user_context = query
                             matched = await resolve_tool_route(
                                 user_context,
-                                self.tools,
+                                dynamic_tools,
                                 model=self.tool_route_model,
                                 api_key=api_key,
                                 timeout=request_timeout,
                             )
-                            active_tools = matched
+                            active_tools = matched + static_tools
                             await emit_status(
                                 ProcessEvent(
                                     kind="tool_route",
@@ -2468,12 +2472,15 @@ class GlueLLM:
         # Determine which tools to use: parameter overrides instance tools
         tools_to_use = tools if tools is not None else self.tools
         # Resolve active_tools for dynamic vs standard mode
+        all_tools = tools_to_use
+        static_tools = [t for t in all_tools if is_static_tool(t)]
+        dynamic_tools = [t for t in all_tools if not is_static_tool(t)]
         router_tool = None
-        if effective_tool_mode == "dynamic" and tools_to_use:
-            router_tool = build_router_tool(tools_to_use)
-            active_tools: list[Callable] = [router_tool]
+        if effective_tool_mode == "dynamic" and all_tools:
+            router_tool = build_router_tool(dynamic_tools)
+            active_tools: list[Callable] = [router_tool] + static_tools
         else:
-            active_tools = tools_to_use
+            active_tools = all_tools
         system_prompt_content = self._format_system_prompt(tools=active_tools)
         messages_snapshot: list[dict] = []
         result: ExecutionResult | None = None
@@ -2601,12 +2608,12 @@ class GlueLLM:
                                     user_context = query
                                 matched = await resolve_tool_route(
                                     user_context,
-                                    tools_to_use,
+                                    dynamic_tools,
                                     model=self.tool_route_model,
                                     api_key=api_key,
                                     timeout=request_timeout,
                                 )
-                                active_tools = matched
+                                active_tools = matched + static_tools
                                 await emit_status(
                                     ProcessEvent(
                                         kind="tool_route",
@@ -3175,12 +3182,15 @@ class GlueLLM:
             set_correlation_id()
 
         # Resolve active_tools for dynamic vs standard mode
+        all_tools = self.tools
+        static_tools = [t for t in all_tools if is_static_tool(t)]
+        dynamic_tools = [t for t in all_tools if not is_static_tool(t)]
         router_tool = None
-        if effective_tool_mode == "dynamic" and self.tools:
-            router_tool = build_router_tool(self.tools)
-            active_tools: list[Callable] = [router_tool]
+        if effective_tool_mode == "dynamic" and all_tools:
+            router_tool = build_router_tool(dynamic_tools)
+            active_tools: list[Callable] = [router_tool] + static_tools
         else:
-            active_tools = self.tools
+            active_tools = all_tools
 
         # Run input guardrails before processing
         if effective_guardrails:
@@ -3391,12 +3401,12 @@ class GlueLLM:
                         user_context = query
                     matched = await resolve_tool_route(
                         user_context,
-                        self.tools,
+                        dynamic_tools,
                         model=self.tool_route_model,
                         api_key=None,
                         timeout=request_timeout,
                     )
-                    active_tools = matched
+                    active_tools = matched + static_tools
                     await emit_status(
                         ProcessEvent(
                             kind="tool_route",
@@ -3899,12 +3909,15 @@ async def structured_complete(
 async def list_models(
     provider: str = "openai",
     api_key: str | None = None,
+    timeout: float | None = None,
 ) -> Sequence[Any]:
     """List available models for a provider.
 
     Args:
         provider: Provider name (e.g. "openai", "anthropic").
         api_key: Optional API key override.
+        timeout: Timeout in seconds for the request (defaults to
+            settings.default_request_timeout).
 
     Returns:
         Sequence of Model objects with id, created, owned_by, etc.
@@ -3920,8 +3933,10 @@ async def list_models(
         >>>
         >>> asyncio.run(main())
     """
+    if timeout is None:
+        timeout = settings.default_request_timeout
     llm = AnyLLM.create(provider, api_key=api_key)
-    return await asyncio.to_thread(llm.list_models)
+    return await asyncio.wait_for(asyncio.to_thread(llm.list_models), timeout=timeout)
 
 
 async def embed(
