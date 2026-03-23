@@ -93,7 +93,7 @@ class ConstitutionalWorkflow(Workflow):
                 # Build revision prompt with previous critique
                 prompt = self._build_revision_prompt(initial_input, current_output, interactions[-1])
 
-            current_output = await self.generator.execute(prompt)
+            current_output = (await self.generator.execute(prompt)).final_response
             interactions.append(
                 {
                     "revision": revision_num + 1,
@@ -106,7 +106,7 @@ class ConstitutionalWorkflow(Workflow):
 
             # Critique against principles
             critique_prompt = self._build_critique_prompt(initial_input, current_output)
-            critique_result = await self.critic.execute(critique_prompt)
+            critique_result = (await self.critic.execute(critique_prompt)).final_response
             interactions.append(
                 {
                     "revision": revision_num + 1,

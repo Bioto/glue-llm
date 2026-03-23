@@ -77,7 +77,7 @@ class RoundRobinWorkflow(Workflow):
                 prompt = self._build_contribution_prompt(initial_input, current_state, contributions, agent_name)
 
                 # Get contribution
-                contribution = await executor.execute(prompt)
+                contribution = (await executor.execute(prompt)).final_response
                 round_contributions.append((agent_name, contribution))
                 contributions.append((round_num + 1, agent_name, contribution))
 
@@ -98,7 +98,7 @@ class RoundRobinWorkflow(Workflow):
             synthesis_prompt = self._build_synthesis_prompt(initial_input, contributions)
             # Use first agent for synthesis
             synthesizer = self.agents[0][1]
-            final_output = await synthesizer.execute(synthesis_prompt)
+            final_output = (await synthesizer.execute(synthesis_prompt)).final_response
             interactions.append(
                 {
                     "stage": "synthesis",

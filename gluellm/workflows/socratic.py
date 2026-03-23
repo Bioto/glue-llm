@@ -78,7 +78,7 @@ class SocraticWorkflow(Workflow):
                 questioner_prompt = self._build_followup_question_prompt(initial_input, dialogue_history)
 
             # Questioner asks a question
-            question = await self.questioner.execute(questioner_prompt)
+            question = (await self.questioner.execute(questioner_prompt)).final_response
             interactions.append(
                 {
                     "exchange": exchange_num + 1,
@@ -92,7 +92,7 @@ class SocraticWorkflow(Workflow):
             responder_prompt = self._build_answer_prompt(initial_input, dialogue_history, question)
 
             # Responder answers
-            answer = await self.responder.execute(responder_prompt)
+            answer = (await self.responder.execute(responder_prompt)).final_response
             interactions.append(
                 {
                     "exchange": exchange_num + 1,
@@ -109,7 +109,7 @@ class SocraticWorkflow(Workflow):
         if self.config.synthesis_at_end:
             synthesis_prompt = self._build_synthesis_prompt(initial_input, dialogue_history)
             synthesizer = self.responder  # Use responder for synthesis
-            final_output = await synthesizer.execute(synthesis_prompt)
+            final_output = (await synthesizer.execute(synthesis_prompt)).final_response
             interactions.append(
                 {
                     "stage": "synthesis",

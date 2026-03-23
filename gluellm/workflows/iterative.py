@@ -115,9 +115,7 @@ Feedback from critics:
 
 Please revise the content based on this feedback."""
 
-            # Execute producer (Executor.execute returns str; some wrappers may return object with .final_response)
-            raw = await self.producer.execute(producer_input)
-            current_output = raw if isinstance(raw, str) else getattr(raw, "final_response", None) or str(raw)
+            current_output = (await self.producer.execute(producer_input)).final_response
             interactions.append(
                 {
                     "iteration": iteration + 1,
@@ -213,7 +211,7 @@ Please revise the content based on this feedback."""
         Returns:
             The critic's feedback
         """
-        return await critic_config.executor.execute(prompt)
+        return (await critic_config.executor.execute(prompt)).final_response
 
     def _build_critic_prompt(self, critic_config: CriticConfig, content: str) -> str:
         """Build a specialized prompt for a critic.

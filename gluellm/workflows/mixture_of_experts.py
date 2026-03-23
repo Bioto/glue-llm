@@ -125,7 +125,7 @@ class MixtureOfExpertsWorkflow(Workflow):
             final_output = expert_outputs[0][1]
         else:
             combine_prompt = self._build_combine_prompt(initial_input, expert_outputs)
-            final_output = await self.combiner.execute(combine_prompt)
+            final_output = (await self.combiner.execute(combine_prompt)).final_response
             interactions.append(
                 {
                     "stage": "combination",
@@ -212,7 +212,7 @@ Provide your expert response:"""
         Returns:
             Expert output
         """
-        return await executor.execute(prompt)
+        return (await executor.execute(prompt)).final_response
 
     def _build_combine_prompt(self, query: str, expert_outputs: list[tuple[str, str]]) -> str:
         """Build a prompt for combining expert outputs.

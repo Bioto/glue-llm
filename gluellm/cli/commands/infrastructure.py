@@ -61,7 +61,7 @@ def test_hooks() -> None:
 
     async def run_test():
         executor = SimpleExecutor(hook_registry=registry)
-        return await executor.execute("My email is test@example.com. What is Python?")
+        return (await executor.execute("My email is test@example.com. What is Python?")).final_response
 
     try:
         result = run_async(run_test())

@@ -8,6 +8,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any
 
+from gluellm.api import ExecutionResult
 from gluellm.hooks import manager as hooks_manager
 from gluellm.hooks.manager import HookManager
 from gluellm.models.hook import HookRegistry, HookStage
@@ -25,9 +26,11 @@ class Executor(ABC):
 
     Example:
         >>> class MyExecutor(Executor):
-        ...     async def _execute_internal(self, query: str) -> str:
+        ...     async def _execute_internal(self, query: str) -> ExecutionResult:
         ...         # Custom execution logic
-        ...         return "Response"
+        ...         return ExecutionResult(
+        ...             final_response="Response", tool_calls_made=0, tool_execution_history=[]
+        ...         )
     """
 
     def __init__(self, hook_registry: HookRegistry | None = None):
@@ -39,7 +42,7 @@ class Executor(ABC):
         self.hook_registry = hook_registry
         self._hook_manager = HookManager()
 
-    async def execute(self, query: str) -> str:
+    async def execute(self, query: str) -> ExecutionResult:
         """Execute a query with webhook support and return the response.
 
         This method wraps the internal execution with pre/post-executor webhooks.
@@ -48,7 +51,7 @@ class Executor(ABC):
             query: The query string to execute
 
         Returns:
-            str: The response from the LLM after webhook processing
+            ExecutionResult: Full result from the LLM after webhook processing
         """
         executor_start_time = time.time()
         executor_type = self.__class__.__name__
@@ -70,10 +73,13 @@ class Executor(ABC):
         result = await self._execute_internal(processed_query)
         logger.debug(f"Executor internal execution completed: result_length={len(result)}")
 
-        # Execute post-executor hooks
+        # Execute post-executor hooks on final_response text
         metadata["original_query"] = query
         metadata["processed_query"] = processed_query
-        final_result = await self._hook_manager.execute_hooks(result, HookStage.POST_EXECUTOR, metadata, post_hooks)
+        hooked_text = await self._hook_manager.execute_hooks(
+            result.final_response, HookStage.POST_EXECUTOR, metadata, post_hooks
+        )
+        final_result = result.model_copy(update={"final_response": hooked_text})
 
         executor_elapsed = time.time() - executor_start_time
         logger.info(
@@ -84,8 +90,8 @@ class Executor(ABC):
         return final_result
 
     @abstractmethod
-    async def _execute_internal(self, query: str) -> str:
-        """Execute a query and return the response.
+    async def _execute_internal(self, query: str) -> ExecutionResult:
+        """Execute a query and return the full execution result.
 
         This is the internal implementation that subclasses must provide.
         This method is called by execute() after pre-executor hooks have run.
@@ -94,7 +100,7 @@ class Executor(ABC):
             query: The query string to execute (may have been modified by webhooks)
 
         Returns:
-            str: The response from the LLM
+            ExecutionResult: The response from the LLM
 
         Raises:
             NotImplementedError: If not implemented by subclass

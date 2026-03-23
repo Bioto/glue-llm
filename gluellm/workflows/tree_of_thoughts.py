@@ -193,7 +193,7 @@ to progress toward solving this problem. Be creative and explore different angle
         Returns:
             List of (thought_text, new_state, parent) tuples
         """
-        response = await executor.execute(prompt)
+        response = (await executor.execute(prompt)).final_response
 
         # Parse multiple thoughts (simplified - split by numbering or bullets)
         import re
@@ -251,7 +251,7 @@ Provide only a numeric score."""
         Returns:
             Score (0.0 to 1.0)
         """
-        response = await executor.execute(prompt)
+        response = (await executor.execute(prompt)).final_response
 
         # Extract numeric score
         import re

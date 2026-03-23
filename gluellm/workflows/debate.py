@@ -98,7 +98,7 @@ class DebateWorkflow(Workflow):
                     prompt += f"Previous arguments:\n{debate_context}\n\n"
                 prompt += "Your argument:"
 
-                response = await executor.execute(prompt)
+                response = (await executor.execute(prompt)).final_response
                 debate_history.append((participant_name, response))
                 interactions.append(
                     {
@@ -117,7 +117,7 @@ class DebateWorkflow(Workflow):
                 + "\n\nProvide your final judgment:"
             )
 
-            final_output = await self.judge.execute(judge_input)
+            final_output = (await self.judge.execute(judge_input)).final_response
             interactions.append(
                 {
                     "stage": "judgment",

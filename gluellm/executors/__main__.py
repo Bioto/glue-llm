@@ -19,7 +19,7 @@ async def main():
         system_prompt="You are a simple executor that can execute a query",
         tools=[],
     )
-    print(await executor.execute("What is the weather in Tokyo?"))
+        print((await executor.execute("What is the weather in Tokyo?")).final_response)
 
 
 if __name__ == "__main__":

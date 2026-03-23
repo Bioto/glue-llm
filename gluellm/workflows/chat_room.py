@@ -86,7 +86,7 @@ class ChatRoomWorkflow(Workflow):
             # Each participant speaks in fixed order
             for participant_name, executor in self.participants:
                 prompt = self._build_discussion_prompt(initial_input, discussion_history, participant_name)
-                response = await executor.execute(prompt)
+                response = (await executor.execute(prompt)).final_response
                 discussion_history.append((participant_name, response))
                 round_interactions.append(
                     {
@@ -215,7 +215,7 @@ Respond with:
 
 Your evaluation:"""
 
-        return await self.moderator.execute(prompt)
+        return (await self.moderator.execute(prompt)).final_response
 
     def _parse_moderator_decision(self, moderator_response: str) -> bool:
         """Parse moderator response to determine if discussion should continue.
@@ -272,7 +272,7 @@ As {self.participants[0][0]}, synthesize the discussion into a clear, comprehens
 Incorporate the key points, insights, and conclusions from the discussion.
 Your draft answer:"""
 
-        current_answer = await self.participants[0][1].execute(draft_prompt)
+        current_answer = (await self.participants[0][1].execute(draft_prompt)).final_response
         interactions.append(
             {
                 "stage": "synthesis",
@@ -301,7 +301,7 @@ As {participant_name}, refine and improve this answer. You can:
 
 Your refined answer:"""
 
-                refined_answer = await executor.execute(refine_prompt)
+                refined_answer = (await executor.execute(refine_prompt)).final_response
                 interactions.append(
                     {
                         "stage": "synthesis",

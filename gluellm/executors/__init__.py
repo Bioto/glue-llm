@@ -9,7 +9,7 @@ from typing import Optional, TypeVar
 
 from pydantic import BaseModel
 
-from gluellm.api import GlueLLM
+from gluellm.api import ExecutionResult, GlueLLM
 from gluellm.config import settings
 from gluellm.models.agent import Agent
 
@@ -39,8 +39,8 @@ class SimpleExecutor(Executor):
         ...         system_prompt="You are a helpful assistant.",
         ...         tools=[]
         ...     )
-        ...     response = await executor.execute("What is 2+2?")
-        ...     print(response)
+        ...     result = await executor.execute("What is 2+2?")
+        ...     print(result.final_response)
         >>>
         >>> asyncio.run(main())
     """
@@ -68,14 +68,14 @@ class SimpleExecutor(Executor):
         self.tools = tools
         self.max_tool_iterations = max_tool_iterations
 
-    async def _execute_internal(self, query: str) -> str:
+    async def _execute_internal(self, query: str) -> ExecutionResult:
         """Execute a query using the configured LLM.
 
         Args:
             query: The query string to process
 
         Returns:
-            The LLM's final response text
+            Full execution result from the LLM
         """
         client = GlueLLM(
             model=self.model,
@@ -83,8 +83,7 @@ class SimpleExecutor(Executor):
             tools=self.tools,
             max_tool_iterations=self.max_tool_iterations,
         )
-        result = await client.complete(query)
-        return result.final_response
+        return await client.complete(query)
 
 
 class AgentExecutor(Executor):
@@ -113,8 +112,8 @@ class AgentExecutor(Executor):
         >>>
         >>> async def main():
         ...     executor = AgentExecutor(agent=agent)
-        ...     response = await executor.execute("Hello!")
-        ...     print(response)
+        ...     result = await executor.execute("Hello!")
+        ...     print(result.final_response)
         >>>
         >>> asyncio.run(main())
     """
@@ -129,14 +128,14 @@ class AgentExecutor(Executor):
         super().__init__(hook_registry=hook_registry)
         self.agent = agent
 
-    async def _execute_internal(self, query: str) -> str:
+    async def _execute_internal(self, query: str) -> ExecutionResult:
         """Execute a query using the agent's configuration.
 
         Args:
             query: The query string to process
 
         Returns:
-            The LLM's final response text
+            Full execution result from the LLM
         """
         from gluellm.api import _current_agent
 
@@ -149,8 +148,7 @@ class AgentExecutor(Executor):
                 max_tool_iterations=self.agent.max_tool_iterations,
                 max_tokens=self.agent.max_tokens,
             )
-            result = await client.complete(query)
-            return result.final_response
+            return await client.complete(query)
         finally:
             _current_agent.reset(token)
 
@@ -163,7 +161,7 @@ class AgentStructuredExecutor(Executor):
         self.agent = agent
         self.response_format = response_format
 
-    async def _execute_internal(self, query: str) -> str:
+    async def _execute_internal(self, query: str) -> ExecutionResult:
         """Execute a query using the agent's configuration and return structured output as JSON."""
         from gluellm.api import _current_agent
 
@@ -176,16 +174,16 @@ class AgentStructuredExecutor(Executor):
                 max_tool_iterations=self.agent.max_tool_iterations,
                 max_tokens=self.agent.max_tokens,
             )
-            result = await client.structured_complete(query, self.response_format)
-            return result.final_response
+            return await client.structured_complete(query, self.response_format)
         finally:
             _current_agent.reset(token)
 
 
 __all__ = [
+    "AgentExecutor",
+    "AgentStructuredExecutor",
     "Executor",
     "SimpleExecutor",
-    "AgentExecutor",
 ]
 
 
@@ -213,6 +211,6 @@ if __name__ == "__main__":
             system_prompt="You are a simple executor that can execute a query",
             tools=[],
         )
-        print(await executor.execute("What is the weather in Tokyo?"))
+        print((await executor.execute("What is the weather in Tokyo?")).final_response)
 
     asyncio.run(main())

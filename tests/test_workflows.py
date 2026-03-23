@@ -3,6 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
+from gluellm.api import ExecutionResult
 from gluellm.executors._base import Executor
 from gluellm.models.workflow import (
     ChainOfDensityConfig,
@@ -55,21 +56,25 @@ class MockExecutor(Executor):
         self.responses = responses or []
         self.call_count = 0
 
-    async def _execute_internal(self, query: str) -> str:
+    async def _execute_internal(self, query: str) -> ExecutionResult:
         """Execute query and return mock response.
 
         Args:
             query: The query string
 
         Returns:
-            Mock response string
+            Mock execution result
         """
         if self.responses:
             response = self.responses[self.call_count % len(self.responses)]
         else:
             response = f"Mock response to: {query[:50]}"
         self.call_count += 1
-        return response
+        return ExecutionResult(
+            final_response=response,
+            tool_calls_made=0,
+            tool_execution_history=[],
+        )
 
 
 @pytest.mark.asyncio
@@ -310,7 +315,7 @@ async def test_iterative_workflow_critic_error_handling():
 
     # Create a critic that raises an exception
     class FailingExecutor(Executor):
-        async def _execute_internal(self, query: str) -> str:
+        async def _execute_internal(self, query: str) -> ExecutionResult:
             raise Exception("Critic failed")
 
     critic_bad = FailingExecutor()
@@ -738,9 +743,13 @@ async def test_iterative_workflow_critic_prompt_formatting():
     captured_prompts = []
 
     class CapturingExecutor(Executor):
-        async def _execute_internal(self, query: str) -> str:
+        async def _execute_internal(self, query: str) -> ExecutionResult:
             captured_prompts.append(query)
-            return "Feedback"
+            return ExecutionResult(
+                final_response="Feedback",
+                tool_calls_made=0,
+                tool_execution_history=[],
+            )
 
     critic = CapturingExecutor()
 
@@ -827,8 +836,12 @@ async def test_pipeline_workflow_data_flow():
             super().__init__()
             self.name = name
 
-        async def _execute_internal(self, query: str) -> str:
-            return f"{query} -> {self.name}"
+        async def _execute_internal(self, query: str) -> ExecutionResult:
+            return ExecutionResult(
+                final_response=f"{query} -> {self.name}",
+                tool_calls_made=0,
+                tool_execution_history=[],
+            )
 
     stage1 = AppendExecutor("stage1")
     stage2 = AppendExecutor("stage2")
@@ -1521,9 +1534,13 @@ async def test_chat_room_workflow_discussion_history_context():
             super().__init__()
             self.response = response
 
-        async def _execute_internal(self, query: str) -> str:
+        async def _execute_internal(self, query: str) -> ExecutionResult:
             received_prompts.append(query)
-            return self.response
+            return ExecutionResult(
+                final_response=self.response,
+                tool_calls_made=0,
+                tool_execution_history=[],
+            )
 
     alice = TrackingExecutor("Alice's comment")
     bob = TrackingExecutor("Bob's comment")

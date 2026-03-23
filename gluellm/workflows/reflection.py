@@ -79,7 +79,7 @@ class ReflectionWorkflow(Workflow):
             else:
                 # Refinement based on reflection
                 reflection_prompt = self._build_reflection_prompt(previous_output, current_output)
-                reflection = await self.reflector.execute(reflection_prompt)
+                reflection = (await self.reflector.execute(reflection_prompt)).final_response
                 interactions.append(
                     {
                         "reflection": reflection_num,
@@ -101,7 +101,7 @@ Reflection and feedback:
 Please revise the content based on this reflection."""
 
             # Generate/refine content
-            current_output = await self.generator.execute(prompt)
+            current_output = (await self.generator.execute(prompt)).final_response
             interactions.append(
                 {
                     "reflection": reflection_num + 1,

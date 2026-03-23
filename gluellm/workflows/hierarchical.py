@@ -76,7 +76,7 @@ class HierarchicalWorkflow(Workflow):
 
         # Manager breaks down task
         decomposition_prompt = self._build_decomposition_prompt(initial_input)
-        subtasks_text = await self.manager.execute(decomposition_prompt)
+        subtasks_text = (await self.manager.execute(decomposition_prompt)).final_response
         interactions.append(
             {
                 "stage": "decomposition",
@@ -124,7 +124,7 @@ class HierarchicalWorkflow(Workflow):
             for i, subtask in enumerate(subtasks):
                 worker_name, worker_executor = self.workers[i % len(self.workers)]
                 prompt = self._build_worker_prompt(subtask, initial_input)
-                worker_result = await worker_executor.execute(prompt)
+                worker_result = (await worker_executor.execute(prompt)).final_response
                 worker_results.append((worker_name, subtask, worker_result))
                 interactions.append(
                     {
@@ -138,7 +138,7 @@ class HierarchicalWorkflow(Workflow):
 
         # Manager synthesizes results
         synthesis_prompt = self._build_synthesis_prompt(initial_input, subtasks, worker_results)
-        final_output = await self.manager.execute(synthesis_prompt)
+        final_output = (await self.manager.execute(synthesis_prompt)).final_response
         interactions.append(
             {
                 "stage": "synthesis",
@@ -237,7 +237,7 @@ Execute this subtask and provide a detailed result. Be thorough and specific."""
         Returns:
             Worker result
         """
-        return await executor.execute(prompt)
+        return (await executor.execute(prompt)).final_response
 
     def _build_synthesis_prompt(
         self, original_task: str, subtasks: list[str], worker_results: list[tuple[str, str, str]]

@@ -166,7 +166,7 @@ class ConsensusWorkflow(Workflow):
         Returns:
             The proposal
         """
-        return await executor.execute(prompt)
+        return (await executor.execute(prompt)).final_response
 
     def _build_proposal_prompt(
         self, initial_input: str, proposals_history: list, round_num: int, agent_name: str
@@ -236,7 +236,7 @@ Consider what worked and what didn't in earlier rounds."""
         async def _get_agent_vote(agent_name: str, executor: Executor) -> tuple[str, str]:
             """Execute voting for a single agent."""
             try:
-                vote_response = await executor.execute(voting_prompt)
+                vote_response = (await executor.execute(voting_prompt)).final_response
                 return (agent_name, vote_response)
             except Exception as e:
                 logger.warning(f"Agent {agent_name} failed to vote: {e}")

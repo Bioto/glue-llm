@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from gluellm.api import ExecutionResult
 from gluellm.executors import SimpleExecutor
 from gluellm.hooks import (
     HookManager,
@@ -32,9 +33,13 @@ from gluellm.workflows.reflection import ReflectionWorkflow
 class MockExecutor(SimpleExecutor):
     """Mock executor for testing hooks."""
 
-    async def _execute_internal(self, query: str) -> str:
+    async def _execute_internal(self, query: str) -> ExecutionResult:
         """Return a simple response."""
-        return f"Response to: {query}"
+        return ExecutionResult(
+            final_response=f"Response to: {query}",
+            tool_calls_made=0,
+            tool_execution_history=[],
+        )
 
 
 class TestHookContext:
@@ -258,7 +263,7 @@ class TestExecutorHooks:
 
         executor = MockExecutor(hook_registry=registry)
         result = await executor.execute("test")
-        assert "PRE_test" in result
+        assert "PRE_test" in result.final_response
 
     @pytest.mark.asyncio
     async def test_executor_post_hook(self):
@@ -274,7 +279,7 @@ class TestExecutorHooks:
 
         executor = MockExecutor(hook_registry=registry)
         result = await executor.execute("test")
-        assert result.endswith("_POST")
+        assert result.final_response.endswith("_POST")
 
     @pytest.mark.asyncio
     async def test_executor_both_hooks(self):
@@ -297,8 +302,8 @@ class TestExecutorHooks:
 
         executor = MockExecutor(hook_registry=registry)
         result = await executor.execute("test")
-        assert "PRE_" in result
-        assert result.endswith("_POST")
+        assert "PRE_" in result.final_response
+        assert result.final_response.endswith("_POST")
 
 
 class TestWorkflowHooks:
@@ -434,4 +439,4 @@ class TestGlobalHooks:
 
         executor = MockExecutor()  # No instance registry
         result = await executor.execute("test")
-        assert "GLOBAL_" in result
+        assert "GLOBAL_" in result.final_response

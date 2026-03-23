@@ -120,7 +120,7 @@ class RAGWorkflow(Workflow):
             # Fallback: generate without context
             generation_prompt = initial_input
 
-        generated_response = await self.generator.execute(generation_prompt)
+        generated_response = (await self.generator.execute(generation_prompt)).final_response
         interactions.append(
             {
                 "stage": "generation",
@@ -134,7 +134,7 @@ class RAGWorkflow(Workflow):
         verified = False
         if self.config.verify_facts and self.verifier and retrieved_chunks:
             verification_prompt = self._build_verification_prompt(initial_input, generated_response, context_text)
-            verification_result = await self.verifier.execute(verification_prompt)
+            verification_result = (await self.verifier.execute(verification_prompt)).final_response
             interactions.append(
                 {
                     "stage": "verification",

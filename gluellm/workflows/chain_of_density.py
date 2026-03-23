@@ -90,7 +90,7 @@ Previous version (iteration {iteration}):
 Generate an improved version with increased density."""
 
             # Generate/refine content
-            current_output = await self.generator.execute(prompt)
+            current_output = (await self.generator.execute(prompt)).final_response
 
             # Record target length from first iteration if preserving length
             if iteration == 0 and self.config.preserve_length:

@@ -67,7 +67,7 @@ class ReActWorkflow(Workflow):
             prompt = self._build_step_prompt(initial_input, step_history, step_num + 1)
 
             # Execute reasoner
-            response = await self.reasoner.execute(prompt)
+            response = (await self.reasoner.execute(prompt)).final_response
             interactions.append(
                 {
                     "step": step_num + 1,

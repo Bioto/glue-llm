@@ -112,7 +112,7 @@ class MapReduceWorkflow(Workflow):
 
         # Reduce phase: aggregate results
         reduce_prompt = self._build_reduce_prompt([result for _, _, result in map_results])
-        final_output = await self.reducer.execute(reduce_prompt)
+        final_output = (await self.reducer.execute(reduce_prompt)).final_response
         interactions.append(
             {
                 "stage": "reduce",
@@ -186,7 +186,7 @@ Provide your analysis/processing of this chunk."""
         Returns:
             Map result
         """
-        return await executor.execute(prompt)
+        return (await executor.execute(prompt)).final_response
 
     def _build_reduce_prompt(self, map_results: list[str]) -> str:
         """Build a prompt for the reduce phase.

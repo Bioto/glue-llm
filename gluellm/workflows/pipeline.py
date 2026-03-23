@@ -59,7 +59,7 @@ class PipelineWorkflow(Workflow):
         current_output = initial_input
 
         for stage_name, executor in self.stages:
-            output = await executor.execute(current_output)
+            output = (await executor.execute(current_output)).final_response
             interactions.append(
                 {
                     "stage": stage_name,

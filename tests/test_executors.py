@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import BaseModel
 
+from gluellm.api import ExecutionResult
 from gluellm.executors import AgentExecutor, AgentStructuredExecutor, Executor, SimpleExecutor
 from gluellm.models.agent import Agent
 from gluellm.models.hook import HookConfig, HookErrorStrategy, HookRegistry, HookStage
@@ -25,12 +26,12 @@ def _fake_llm_response(content: str = "Hello"):
 
 @pytest.mark.asyncio
 class TestSimpleExecutor:
-    async def test_returns_string(self):
+    async def test_returns_execution_result(self):
         with patch("gluellm.api._llm_call_with_retry", return_value=_fake_llm_response("Hi")):
             executor = SimpleExecutor(system_prompt="Be helpful.")
             result = await executor.execute("Hello")
-        assert isinstance(result, str)
-        assert result == "Hi"
+        assert isinstance(result, ExecutionResult)
+        assert result.final_response == "Hi"
 
     async def test_uses_configured_model(self):
         executor = SimpleExecutor(model="openai:gpt-4o")
@@ -48,7 +49,8 @@ class TestSimpleExecutor:
         with patch("gluellm.api._llm_call_with_retry", return_value=_fake_llm_response("done")):
             executor = SimpleExecutor(tools=[dummy_tool])
             result = await executor.execute("Use the tool")
-        assert result == "done"
+        assert isinstance(result, ExecutionResult)
+        assert result.final_response == "done"
 
 
 @pytest.mark.asyncio
@@ -64,13 +66,13 @@ class TestAgentExecutor:
         defaults.update(overrides)
         return Agent(**defaults)
 
-    async def test_returns_string(self):
+    async def test_returns_execution_result(self):
         agent = self._make_agent()
         with patch("gluellm.api._llm_call_with_retry", return_value=_fake_llm_response("Agent says hi")):
             executor = AgentExecutor(agent)
             result = await executor.execute("Hello agent")
-        assert isinstance(result, str)
-        assert result == "Agent says hi"
+        assert isinstance(result, ExecutionResult)
+        assert result.final_response == "Agent says hi"
 
     async def test_uses_agent_model(self):
         agent = self._make_agent(model="anthropic:claude-3-5-sonnet-20241022")
@@ -82,7 +84,8 @@ class TestAgentExecutor:
         with patch("gluellm.api._llm_call_with_retry", return_value=_fake_llm_response("ok")):
             executor = AgentExecutor(agent)
             result = await executor.execute("test")
-        assert result == "ok"
+        assert isinstance(result, ExecutionResult)
+        assert result.final_response == "ok"
 
 
 @pytest.mark.asyncio
@@ -99,14 +102,16 @@ class TestAgentStructuredExecutor:
             max_tool_iterations=3,
         )
 
-    async def test_returns_string(self):
+    async def test_returns_execution_result_with_structured_output(self):
         agent = self._make_agent()
         resp = _fake_llm_response('{"value": 42}')
         resp.choices[0].message.parsed = self.Answer(value=42)
         with patch("gluellm.api._llm_call_with_retry", return_value=resp):
             executor = AgentStructuredExecutor(agent, response_format=self.Answer)
             result = await executor.execute("What is 6*7?")
-        assert isinstance(result, str)
+        assert isinstance(result, ExecutionResult)
+        assert result.structured_output is not None
+        assert result.structured_output.value == 42
 
 
 class TestExecutorIsAbstract:
@@ -131,7 +136,8 @@ class TestExecutorHookIntegration:
         with patch("gluellm.api._llm_call_with_retry", return_value=_fake_llm_response("done")):
             executor = SimpleExecutor(hook_registry=registry)
             result = await executor.execute("hello")
-        assert result == "done"
+        assert isinstance(result, ExecutionResult)
+        assert result.final_response == "done"
 
     async def test_post_hook_modifies_result(self):
         def suffix_hook(context):
@@ -147,4 +153,5 @@ class TestExecutorHookIntegration:
         with patch("gluellm.api._llm_call_with_retry", return_value=_fake_llm_response("response")):
             executor = SimpleExecutor(hook_registry=registry)
             result = await executor.execute("query")
-        assert result == "response [reviewed]"
+        assert isinstance(result, ExecutionResult)
+        assert result.final_response == "response [reviewed]"

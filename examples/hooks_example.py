@@ -51,7 +51,7 @@ async def example_1_pii_removal():
 
     # Query with PII
     query = "My email is john@example.com and my phone is 555-123-4567. What is AI?"
-    result = await executor.execute(query)
+    result = (await executor.execute(query)).final_response
     print(f"Query: {query}")
     print(f"Result: {result[:100]}...")
 
@@ -86,7 +86,7 @@ async def example_2_output_validation():
 
     query = "Explain quantum computing"
     try:
-        result = await executor.execute(query)
+        result = (await executor.execute(query)).final_response
         print(f"Result: {result[:200]}...")
     except ValueError as e:
         print(f"Validation error: {e}")
@@ -131,7 +131,7 @@ async def example_3_chaining():
     )
 
     executor = SimpleExecutor(hook_registry=registry)
-    result = await executor.execute("Tell me about artificial intelligence")
+    result = (await executor.execute("Tell me about artificial intelligence")).final_response
     print(f"Result: {result}")
 
 
@@ -152,7 +152,7 @@ async def example_4_global_vs_instance():
 
     # Create executor without instance hooks (uses global only)
     executor1 = SimpleExecutor()
-    result1 = await executor1.execute("My email is test@example.com. What is Python?")
+    result1 = (await executor1.execute("My email is test@example.com. What is Python?")).final_response
     print(f"Executor 1 (global only): {result1[:100]}...")
 
     # Create executor with instance hooks (global + instance)
@@ -167,7 +167,7 @@ async def example_4_global_vs_instance():
     )
 
     executor2 = SimpleExecutor(hook_registry=instance_registry)
-    result2 = await executor2.execute("My email is test@example.com. What is Python?")
+    result2 = (await executor2.execute("My email is test@example.com. What is Python?")).final_response
     print(f"Executor 2 (global + instance): {result2[:100]}...")
 
 
@@ -205,7 +205,7 @@ async def example_5_error_handling():
     )
 
     executor_skip = SimpleExecutor(hook_registry=registry_skip)
-    result = await executor_skip.execute("Short query")
+    result = (await executor_skip.execute("Short query")).final_response
     print(f"SKIP strategy continued: {result[:50]}...")
 
     # FALLBACK strategy: Uses fallback value
@@ -221,7 +221,7 @@ async def example_5_error_handling():
     )
 
     executor_fallback = SimpleExecutor(hook_registry=registry_fallback)
-    result = await executor_fallback.execute("Short query")
+    result = (await executor_fallback.execute("Short query")).final_response
     print(f"FALLBACK strategy used fallback: {result}")
 
 
@@ -248,7 +248,7 @@ async def example_6_custom_async():
     )
 
     executor = SimpleExecutor(hook_registry=registry)
-    result = await executor.execute("Test query")
+    result = (await executor.execute("Test query")).final_response
     print(f"Result with custom async hook: {result}")
 
 
