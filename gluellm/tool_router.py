@@ -34,6 +34,10 @@ import os
 from collections.abc import Callable
 from typing import Any, Literal
 
+from gluellm.observability.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 ROUTER_TOOL_NAME = "request_tools"
 
 ToolMode = Literal["standard", "dynamic"]
@@ -167,7 +171,14 @@ async def resolve_tool_route(
     get a usable toolset even when routing fails.
     """
     if not tools:
+        logger.debug("resolve_tool_route called with empty tools list")
         return []
+
+    tool_names_available = [getattr(fn, "__name__", str(fn)) for fn in tools]
+    logger.debug(
+        f"Starting dynamic tool routing: model={model}, available_tools={tool_names_available}, "
+        f"context_preview={user_context[:100]}..."
+    )
 
     tool_descriptions = []
     name_to_fn: dict[str, Callable[..., Any]] = {}
@@ -203,8 +214,10 @@ async def resolve_tool_route(
             ),
             timeout=request_timeout,
         )
-    except Exception:
-        # Network error, timeout, or any other failure: fall back to all tools
+    except Exception as e:
+        logger.warning(
+            f"Tool routing failed ({type(e).__name__}: {e}), falling back to all {len(tools)} tools"
+        )
         return list(tools)
 
     text = ""
@@ -216,10 +229,25 @@ async def resolve_tool_route(
     try:
         parsed = json.loads(text)
         if not isinstance(parsed, list):
+            logger.warning(
+                f"Tool routing returned non-list response: {type(parsed).__name__}, "
+                f"falling back to all {len(tools)} tools"
+            )
             return list(tools)
         names = parsed
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as e:
+        logger.warning(
+            f"Tool routing returned invalid JSON ({type(e).__name__}): {text[:200]}, "
+            f"falling back to all {len(tools)} tools"
+        )
         return list(tools)
 
     result = [name_to_fn[n] for n in names if n in name_to_fn]
+    unrecognized = [n for n in names if n not in name_to_fn]
+    if unrecognized:
+        logger.warning(f"Tool routing returned unrecognized tool names: {unrecognized}")
+
+    logger.info(
+        f"Tool routing selected {len(result)}/{len(tools)} tools: {[fn.__name__ for fn in result]}"
+    )
     return result

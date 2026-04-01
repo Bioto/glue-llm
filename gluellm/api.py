@@ -62,7 +62,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar, get_type_hints
 
 if TYPE_CHECKING:
     from gluellm.models.agent import Agent
@@ -2076,6 +2076,10 @@ class GlueLLM:
                                 timeout=request_timeout,
                             )
                             active_tools = matched + static_tools
+                            logger.debug(
+                                f"[{correlation_id}] Dynamic tool routing complete: "
+                                f"matched={len(matched)}, static={len(static_tools)}, total_active={len(active_tools)}"
+                            )
                             await emit_status(
                                 ProcessEvent(
                                     kind="tool_route",
@@ -2614,6 +2618,10 @@ class GlueLLM:
                                     timeout=request_timeout,
                                 )
                                 active_tools = matched + static_tools
+                                logger.debug(
+                                    f"[{correlation_id}] Dynamic tool routing complete: "
+                                    f"matched={len(matched)}, static={len(static_tools)}, total_active={len(active_tools)}"
+                                )
                                 await emit_status(
                                     ProcessEvent(
                                         kind="tool_route",
@@ -2947,6 +2955,39 @@ class GlueLLM:
                 return tool
         return None
 
+    @staticmethod
+    def _coerce_args_to_pydantic(tool_func: Callable, tool_args: dict[str, Any]) -> dict[str, Any]:
+        """Coerce dict arguments to Pydantic model instances where the annotation demands it.
+
+        When the LLM produces tool arguments they arrive as plain dicts from
+        ``json.loads``.  If the tool function declares a parameter with a
+        ``BaseModel`` subclass annotation we automatically coerce the dict to
+        the correct model via ``model_validate``, giving tool authors natural
+        attribute access (``arg.field``) without any boilerplate inside the tool.
+
+        Coercion is best-effort: if the annotation cannot be resolved or
+        ``model_validate`` raises, the original dict is passed through unchanged
+        so existing error handling continues to work.
+        """
+        try:
+            hints = get_type_hints(tool_func)
+        except Exception:
+            return tool_args
+
+        if not hints:
+            return tool_args
+
+        coerced = dict(tool_args)
+        for param_name, value in tool_args.items():
+            annotation = hints.get(param_name)
+            if annotation is not None and isinstance(value, dict):
+                try:
+                    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+                        coerced[param_name] = annotation.model_validate(value)
+                except Exception:
+                    pass  # leave as dict; the tool or error handler will surface the problem
+        return coerced
+
     async def _execute_tool_calls_round(
         self,
         tool_calls: list[Any],
@@ -2962,6 +3003,12 @@ class GlueLLM:
         Returns a list of dicts, each with "history" and "message" keys for
         appending to tool_execution_history and messages.
         """
+        mode = "parallel" if parallel else "sequential"
+        logger.debug(
+            f"[{correlation_id}] Starting tool execution round: iteration={iteration}, "
+            f"tool_count={len(tool_calls)}, mode={mode}"
+        )
+
         # Phase 1: parse and resolve each tool call
         Parsed = tuple[int, Any, str, dict[str, Any] | None, Callable | None, str | None]
         parsed: list[Parsed] = []
@@ -2970,16 +3017,31 @@ class GlueLLM:
             try:
                 tool_args = json.loads(tool_call.function.arguments)
             except json.JSONDecodeError as e:
+                logger.warning(
+                    f"[{correlation_id}] Tool call {call_index} '{tool_name}' has invalid JSON arguments: {e}"
+                )
                 parsed.append((call_index, tool_call, tool_name, None, None, f"Invalid JSON in tool arguments: {str(e)}"))
                 continue
             tool_func = self._find_tool(tool_name, tools=active_tools)
             if not tool_func:
+                logger.warning(
+                    f"[{correlation_id}] Tool call {call_index} '{tool_name}' not found in available tools"
+                )
                 parsed.append((call_index, tool_call, tool_name, tool_args, None, f"Tool '{tool_name}' not found in available tools"))
                 continue
             parsed.append((call_index, tool_call, tool_name, tool_args, tool_func, None))
 
+        def _truncate_for_log(value: Any, max_len: int = 200) -> str:
+            """Truncate a value for logging purposes."""
+            s = str(value)
+            return s if len(s) <= max_len else s[:max_len] + "..."
+
         async def run_one(call_index: int, tool_call: Any, tool_name: str, tool_args: dict[str, Any], tool_func: Callable) -> tuple[str, bool, float]:
             """Execute a single tool and return (result_str, error, duration)."""
+            logger.debug(
+                f"[{correlation_id}] Executing tool '{tool_name}' (call {call_index}): "
+                f"args={_truncate_for_log(tool_args)}"
+            )
             start = time.time()
             try:
                 if is_tracing_enabled():
@@ -2995,14 +3057,23 @@ class GlueLLM:
                                     "tool.success": True,
                                 },
                             )
+                tool_args = self._coerce_args_to_pydantic(tool_func, tool_args)
                 if asyncio.iscoroutinefunction(tool_func):
                     result = await tool_func(**tool_args)
                 else:
                     result = await asyncio.to_thread(tool_func, **tool_args)
                 elapsed = time.time() - start
+                logger.debug(
+                    f"[{correlation_id}] Tool '{tool_name}' (call {call_index}) completed successfully "
+                    f"in {elapsed:.3f}s: result={_truncate_for_log(result)}"
+                )
                 return (str(result), False, elapsed)
             except Exception as e:
                 elapsed = time.time() - start
+                logger.warning(
+                    f"[{correlation_id}] Tool '{tool_name}' (call {call_index}) failed "
+                    f"in {elapsed:.3f}s: {type(e).__name__}: {e}"
+                )
                 return (f"Error executing tool: {type(e).__name__}: {str(e)}", True, elapsed)
 
         results: list[dict[str, Any]] = []
@@ -3078,6 +3149,14 @@ class GlueLLM:
                     sinks=sinks,
                 )
                 results.append({"history": {"tool_name": tool_name, "arguments": tool_args or {}, "result": result_str, "error": error}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": result_str}})
+
+        # Log summary of tool execution round
+        successful = sum(1 for r in results if not r["history"].get("error"))
+        failed = len(results) - successful
+        logger.info(
+            f"[{correlation_id}] Tool execution round {iteration} complete: "
+            f"{successful} succeeded, {failed} failed, mode={mode}"
+        )
         return results
 
     async def stream_complete(
@@ -3407,6 +3486,10 @@ class GlueLLM:
                         timeout=request_timeout,
                     )
                     active_tools = matched + static_tools
+                    logger.debug(
+                        f"[{get_correlation_id()}] Dynamic tool routing complete: "
+                        f"matched={len(matched)}, static={len(static_tools)}, total_active={len(active_tools)}"
+                    )
                     await emit_status(
                         ProcessEvent(
                             kind="tool_route",
