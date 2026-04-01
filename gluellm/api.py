@@ -1022,6 +1022,95 @@ def _condense_tool_round(messages: list[dict[str, Any]]) -> None:
     messages.append({"role": "user", "content": condensed_content})
 
 
+_SUMMARIZE_SYSTEM_PROMPT = (
+    "You are a conversation summarizer. Produce a concise, factual summary of the "
+    "conversation history provided. Preserve all key facts, decisions, and context "
+    "that would be needed to continue the conversation coherently. Do not add "
+    "opinions or filler — just the essential content, in plain prose."
+)
+
+_SUMMARIZE_USER_PREFIX = (
+    "Summarize the following conversation history concisely so it can be used as "
+    "context for continuing the conversation:\n\n"
+)
+
+
+async def _summarize_old_messages(
+    messages: list[dict[str, Any]],
+    keep_recent: int,
+    model: str,
+) -> list[dict[str, Any]]:
+    """Compress older conversation messages into a single summary message.
+
+    Preserves the system prompt (index 0) and the most recent ``keep_recent``
+    messages verbatim. Everything in between is sent to the LLM for summarization
+    and replaced with one ``role: "user"`` summary message.
+
+    Returns the original list unchanged when there is nothing old enough to
+    summarize (i.e. the non-system messages number ``keep_recent`` or fewer).
+
+    Args:
+        messages: Full message list including the system prompt at index 0.
+        keep_recent: Number of trailing messages to keep verbatim.
+        model: Model identifier used for the summarization call.
+
+    Returns:
+        A shortened message list: [system] + [summary] + recent_messages,
+        or the original list if no summarization was needed.
+    """
+    if len(messages) < 2:
+        return messages
+
+    system_msg = messages[0]
+    non_system = messages[1:]
+
+    if len(non_system) <= keep_recent:
+        return messages
+
+    old_messages = non_system[: len(non_system) - keep_recent]
+    recent_messages = non_system[len(non_system) - keep_recent :]
+
+    # Build a readable transcript of the old messages for the summarizer.
+    # Skip messages with non-string content (e.g. tool-call dicts) gracefully.
+    transcript_lines: list[str] = []
+    for msg in old_messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content") or ""
+        if isinstance(content, list):
+            # Multi-part content (vision, tool results) — join text parts only
+            text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+            content = " ".join(text_parts)
+        transcript_lines.append(f"{role.upper()}: {content}")
+
+    transcript = "\n".join(transcript_lines)
+
+    summarize_messages = [
+        {"role": "system", "content": _SUMMARIZE_SYSTEM_PROMPT},
+        {"role": "user", "content": _SUMMARIZE_USER_PREFIX + transcript},
+    ]
+
+    try:
+        provider_cache = _ProviderCache()
+        provider, model_id = provider_cache.get_provider(model, api_key=None)
+        response = await provider.acompletion(model=model_id, messages=summarize_messages)
+        summary_text = response.choices[0].message.content or ""
+    except Exception:
+        logger.warning("Context summarization failed; continuing with original messages.", exc_info=True)
+        return messages
+
+    summary_msg: dict[str, Any] = {
+        "role": "user",
+        "content": f"[Conversation Summary]\n{summary_text}",
+    }
+
+    logger.debug(
+        f"Context summarized: {len(old_messages)} old messages → 1 summary message "
+        f"({len(recent_messages)} recent messages kept verbatim)"
+    )
+
+    return [system_msg, summary_msg, *recent_messages]
+
+
 async def _consume_stream_with_tools(
     stream_iter: AsyncIterator[Any],
 ) -> AsyncIterator[tuple[bool, str, SimpleNamespace | None]]:
@@ -1782,6 +1871,10 @@ class GlueLLM:
         session_label: str | None = None,
         parallel_tool_calls: bool | None = None,
         hook_registry: HookRegistry | None = None,
+        summarize_context: bool = False,
+        summarize_context_threshold: int | None = None,
+        summarize_context_model: str | None = None,
+        summarize_context_keep_recent: int | None = None,
     ):
         """Initialize GlueLLM client.
 
@@ -1813,6 +1906,15 @@ class GlueLLM:
             parallel_tool_calls: Allow parallel tool calls when multiple tools are requested.
             hook_registry: Optional hook registry for pre/post tool and iteration hooks. Merged
                 with the global registry at call time so global hooks always apply.
+            summarize_context: If True, older conversation messages are automatically summarized
+                into a single message when the context exceeds summarize_context_threshold messages.
+                Defaults to False.
+            summarize_context_threshold: Number of messages (excluding the system prompt) that
+                triggers summarization. Defaults to settings.default_summarize_context_threshold (20).
+            summarize_context_model: Model used for the summarization call. Defaults to the
+                client's primary model. A cheaper/faster model is often sufficient here.
+            summarize_context_keep_recent: Number of most-recent messages to always keep verbatim.
+                Defaults to settings.default_summarize_context_keep_recent (6).
         """
         self.model = model or settings.default_model
         self.embedding_model = embedding_model or settings.default_embedding_model
@@ -1847,6 +1949,18 @@ class GlueLLM:
             self.model_kwargs["parallel_tool_calls"] = effective_parallel_tool_calls
         self._hook_registry = hook_registry or HookRegistry()
         self._hook_manager = HookManager()
+        self.summarize_context = summarize_context
+        self.summarize_context_threshold = (
+            summarize_context_threshold
+            if summarize_context_threshold is not None
+            else settings.default_summarize_context_threshold
+        )
+        self.summarize_context_model = summarize_context_model
+        self.summarize_context_keep_recent = (
+            summarize_context_keep_recent
+            if summarize_context_keep_recent is not None
+            else settings.default_summarize_context_keep_recent
+        )
 
     def _get_merged_hook_registry(self) -> HookRegistry:
         """Return the global hook registry merged with this instance's registry."""
@@ -2033,6 +2147,10 @@ class GlueLLM:
         session_label: str | None = None,
         parallel_tool_calls: bool | None = None,
         sinks: list[Sink] | None = None,
+        summarize_context: bool | None = None,
+        summarize_context_threshold: int | None = None,
+        summarize_context_model: str | None = None,
+        summarize_context_keep_recent: int | None = None,
         **model_kwargs: Any,
     ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
@@ -2061,6 +2179,10 @@ class GlueLLM:
             top_logprobs: Number of top log probs when logprobs=True.
             session_label: Observability metadata for gateway traces.
             parallel_tool_calls: Allow parallel tool calls.
+            summarize_context: Override the instance-level summarize_context setting for this call.
+            summarize_context_threshold: Override the message-count threshold that triggers summarization.
+            summarize_context_model: Override the model used for the summarization call.
+            summarize_context_keep_recent: Override how many recent messages are kept verbatim.
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
@@ -2117,6 +2239,18 @@ class GlueLLM:
             effective_model_kwargs["session_label"] = session_label
         if parallel_tool_calls is not None:
             effective_model_kwargs["parallel_tool_calls"] = parallel_tool_calls
+        effective_summarize_context = summarize_context if summarize_context is not None else self.summarize_context
+        effective_summarize_context_threshold = (
+            summarize_context_threshold
+            if summarize_context_threshold is not None
+            else self.summarize_context_threshold
+        )
+        effective_summarize_context_model = summarize_context_model or self.summarize_context_model or self.model
+        effective_summarize_context_keep_recent = (
+            summarize_context_keep_recent
+            if summarize_context_keep_recent is not None
+            else self.summarize_context_keep_recent
+        )
 
         # Set correlation ID if provided
         if correlation_id:
@@ -2185,6 +2319,14 @@ class GlueLLM:
                 for iteration in range(self.max_tool_iterations):
                     logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
                     try:
+                        # Context summarization: compress old messages when threshold is exceeded
+                        if effective_summarize_context and len(messages) > effective_summarize_context_threshold:
+                            messages = await _summarize_old_messages(
+                                messages,
+                                keep_recent=effective_summarize_context_keep_recent,
+                                model=effective_summarize_context_model,
+                            )
+
                         # PRE_ITERATION hook: content is the last user message in the conversation
                         if _pre_iteration_hooks:
                             last_user_msg = next(
@@ -2584,6 +2726,10 @@ class GlueLLM:
         parallel_tool_calls: bool | None = None,
         max_validation_retries: int | None = None,
         sinks: list[Sink] | None = None,
+        summarize_context: bool | None = None,
+        summarize_context_threshold: int | None = None,
+        summarize_context_model: str | None = None,
+        summarize_context_keep_recent: int | None = None,
         **model_kwargs: Any,
     ) -> ExecutionResult:
         """Complete a request and return structured output.
@@ -2620,6 +2766,10 @@ class GlueLLM:
             parallel_tool_calls: Allow parallel tool calls.
             max_validation_retries: Max retries when Pydantic validation fails (default 3).
                 On validation error, the error is fed back to the model for self-correction.
+            summarize_context: Override the instance-level summarize_context setting for this call.
+            summarize_context_threshold: Override the message-count threshold that triggers summarization.
+            summarize_context_model: Override the model used for the summarization call.
+            summarize_context_keep_recent: Override how many recent messages are kept verbatim.
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
@@ -2675,6 +2825,18 @@ class GlueLLM:
             effective_model_kwargs["session_label"] = session_label
         if parallel_tool_calls is not None:
             effective_model_kwargs["parallel_tool_calls"] = parallel_tool_calls
+        effective_summarize_context = summarize_context if summarize_context is not None else self.summarize_context
+        effective_summarize_context_threshold = (
+            summarize_context_threshold
+            if summarize_context_threshold is not None
+            else self.summarize_context_threshold
+        )
+        effective_summarize_context_model = summarize_context_model or self.summarize_context_model or self.model
+        effective_summarize_context_keep_recent = (
+            summarize_context_keep_recent
+            if summarize_context_keep_recent is not None
+            else self.summarize_context_keep_recent
+        )
 
         # Set correlation ID if provided
         if correlation_id:
@@ -2775,6 +2937,14 @@ class GlueLLM:
                         logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
 
                         try:
+                            # Context summarization: compress old messages when threshold is exceeded
+                            if effective_summarize_context and len(messages) > effective_summarize_context_threshold:
+                                messages = await _summarize_old_messages(
+                                    messages,
+                                    keep_recent=effective_summarize_context_keep_recent,
+                                    model=effective_summarize_context_model,
+                                )
+
                             if _sc_pre_iter_hooks:
                                 _last_user_msg = next(
                                     (m.get("content", "") or "" for m in reversed(messages) if m.get("role") == "user"),
@@ -3426,6 +3596,10 @@ class GlueLLM:
         track_costs: bool | None = None,
         enable_eval_recording: bool | None = None,
         sinks: list[Sink] | None = None,
+        summarize_context: bool | None = None,
+        summarize_context_threshold: int | None = None,
+        summarize_context_model: str | None = None,
+        summarize_context_keep_recent: int | None = None,
     ) -> AsyncIterator[StreamingChunk]:
         """Stream completion with automatic tool execution.
 
@@ -3461,6 +3635,10 @@ class GlueLLM:
             retry_config: Per-call retry configuration override (includes optional callback).
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
+            summarize_context: Override the instance-level summarize_context setting for this call.
+            summarize_context_threshold: Override the message-count threshold that triggers summarization.
+            summarize_context_model: Override the model used for the summarization call.
+            summarize_context_keep_recent: Override how many recent messages are kept verbatim.
 
         Yields:
             StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)
@@ -3498,6 +3676,18 @@ class GlueLLM:
         effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else self.rate_limit_config
         if rate_limit_algorithm is not None:
             effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
+        effective_summarize_context = summarize_context if summarize_context is not None else self.summarize_context
+        effective_summarize_context_threshold = (
+            summarize_context_threshold
+            if summarize_context_threshold is not None
+            else self.summarize_context_threshold
+        )
+        effective_summarize_context_model = summarize_context_model or self.summarize_context_model or self.model
+        effective_summarize_context_keep_recent = (
+            summarize_context_keep_recent
+            if summarize_context_keep_recent is not None
+            else self.summarize_context_keep_recent
+        )
 
         # Set correlation ID if provided
         if correlation_id:
@@ -3546,6 +3736,14 @@ class GlueLLM:
         # Tool execution loop
         for iteration in range(self.max_tool_iterations):
             try:
+                # Context summarization: compress old messages when threshold is exceeded
+                if effective_summarize_context and len(messages) > effective_summarize_context_threshold:
+                    messages = await _summarize_old_messages(
+                        messages,
+                        keep_recent=effective_summarize_context_keep_recent,
+                        model=effective_summarize_context_model,
+                    )
+
                 if _stream_pre_iter_hooks:
                     _stream_last_user = next(
                         (m.get("content", "") or "" for m in reversed(messages) if m.get("role") == "user"),
@@ -4064,6 +4262,10 @@ async def complete(
     parallel_tool_calls: bool | None = None,
     sinks: list[Sink] | None = None,
     hook_registry: HookRegistry | None = None,
+    summarize_context: bool = False,
+    summarize_context_threshold: int | None = None,
+    summarize_context_model: str | None = None,
+    summarize_context_keep_recent: int | None = None,
     **model_kwargs: Any,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
@@ -4092,6 +4294,10 @@ async def complete(
         track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
         hook_registry: Optional hook registry for pre/post tool and iteration hooks.
+        summarize_context: If True, older messages are summarized when context exceeds threshold. Defaults to False.
+        summarize_context_threshold: Message count that triggers summarization (defaults to settings value).
+        summarize_context_model: Model used for summarization (defaults to primary model).
+        summarize_context_keep_recent: Number of recent messages kept verbatim (defaults to settings value).
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
     Returns:
@@ -4114,6 +4320,10 @@ async def complete(
         rate_limit_config=rate_limit_config,
         model_kwargs=model_kwargs if model_kwargs else None,
         hook_registry=hook_registry,
+        summarize_context=summarize_context,
+        summarize_context_threshold=summarize_context_threshold,
+        summarize_context_model=summarize_context_model,
+        summarize_context_keep_recent=summarize_context_keep_recent,
     )
     return await client.complete(
         user_message,
@@ -4173,6 +4383,10 @@ async def structured_complete(
     max_validation_retries: int | None = None,
     sinks: list[Sink] | None = None,
     hook_registry: HookRegistry | None = None,
+    summarize_context: bool = False,
+    summarize_context_threshold: int | None = None,
+    summarize_context_model: str | None = None,
+    summarize_context_keep_recent: int | None = None,
     **model_kwargs: Any,
 ) -> ExecutionResult:
     """Quick structured completion with optional tool support.
@@ -4262,6 +4476,10 @@ async def structured_complete(
         rate_limit_config=rate_limit_config,
         model_kwargs=model_kwargs if model_kwargs else None,
         hook_registry=hook_registry,
+        summarize_context=summarize_context,
+        summarize_context_threshold=summarize_context_threshold,
+        summarize_context_model=summarize_context_model,
+        summarize_context_keep_recent=summarize_context_keep_recent,
     )
     return await client.structured_complete(
         user_message,
@@ -4409,6 +4627,10 @@ async def stream_complete(
     track_costs: bool | None = None,
     enable_eval_recording: bool | None = None,
     sinks: list[Sink] | None = None,
+    summarize_context: bool = False,
+    summarize_context_threshold: int | None = None,
+    summarize_context_model: str | None = None,
+    summarize_context_keep_recent: int | None = None,
 ) -> AsyncIterator[StreamingChunk]:
     """Stream completion with automatic tool execution.
 
@@ -4472,6 +4694,10 @@ async def stream_complete(
         tool_route_model=tool_route_model,
         retry_config=retry_config,
         rate_limit_config=rate_limit_config,
+        summarize_context=summarize_context,
+        summarize_context_threshold=summarize_context_threshold,
+        summarize_context_model=summarize_context_model,
+        summarize_context_keep_recent=summarize_context_keep_recent,
     )
     async for chunk in client.stream_complete(
         user_message,

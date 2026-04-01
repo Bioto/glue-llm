@@ -156,9 +156,123 @@ result = await complete(
 
 ---
 
-## Combining Both
+## Conversation Summarization
 
-The two features are independent and compose cleanly:
+### What it does
+
+In a long multi-turn conversation the full message history is sent to the LLM on every call. As turns accumulate the context window fills, costs rise, and older content competes for the model's attention against the current task.
+
+With `summarize_context=True`, GlueLLM monitors the number of messages before each LLM call. When the count exceeds `summarize_context_threshold` (default: 20), it automatically:
+
+1. Keeps the system prompt and the most recent `summarize_context_keep_recent` messages (default: 6) verbatim.
+2. Sends everything in between to a summarizer LLM call.
+3. Replaces the old messages with a single `[Conversation Summary]` message containing the condensed history.
+
+The summarization call is transparent — if it fails for any reason, GlueLLM logs a warning and continues with the original messages unchanged.
+
+### Why it helps
+
+Without summarization, a 40-turn conversation sends 40 messages (plus system prompt) on every call. With summarization triggered at 20 messages and keeping the last 6, the context stays bounded at roughly 8 messages regardless of how long the conversation runs — `[system] + [summary] + 6 recent`.
+
+This is particularly valuable for:
+
+- Long user-facing chat sessions where history accumulates across many turns.
+- Agentic loops where the model iterates on a task over many iterations.
+- Any scenario where the conversation grows longer than the model's effective context window.
+
+### How to enable
+
+Off by default. Enable on the `GlueLLM` client:
+
+```python
+from gluellm import GlueLLM
+
+client = GlueLLM(summarize_context=True)
+result = await client.complete("Continue from where we left off...")
+```
+
+Or per-call:
+
+```python
+result = await client.complete(
+    "Summarize what we discussed.",
+    summarize_context=True,
+    summarize_context_threshold=15,   # trigger earlier
+    summarize_context_keep_recent=4,  # keep fewer recent messages
+)
+```
+
+Or via the stateless helper:
+
+```python
+from gluellm import complete
+
+result = await complete(
+    "Continue our discussion.",
+    summarize_context=True,
+)
+```
+
+### Using a cheaper model for summarization
+
+The summarization call is cheap and doesn't need the full capability of your primary model. Set `summarize_context_model` to a fast, low-cost model:
+
+```python
+client = GlueLLM(
+    model="openai:gpt-4o",
+    summarize_context=True,
+    summarize_context_model="openai:gpt-4o-mini",  # cheaper summarizer
+)
+```
+
+If `summarize_context_model` is not set, the primary model is used.
+
+### Global defaults via configure()
+
+Set summarization defaults globally so all clients pick them up without per-call configuration:
+
+```python
+import gluellm
+
+gluellm.configure(
+    default_summarize_context=True,
+    default_summarize_context_threshold=25,
+    default_summarize_context_keep_recent=8,
+)
+```
+
+Or via environment variables:
+
+```
+GLUELLM_DEFAULT_SUMMARIZE_CONTEXT=true
+GLUELLM_DEFAULT_SUMMARIZE_CONTEXT_THRESHOLD=25
+GLUELLM_DEFAULT_SUMMARIZE_CONTEXT_KEEP_RECENT=8
+```
+
+### When to use it
+
+- Chat sessions expected to run longer than ~15–20 turns.
+- Agentic workflows that iterate many times on a complex task.
+- When you want predictable, bounded context cost regardless of conversation length.
+
+### When to skip it
+
+- Short sessions (fewer turns than the threshold) — no benefit, no overhead.
+- Tasks where verbatim recall of early messages is critical (e.g. the user gave a long spec at turn 1 that the model must re-read in full at every step). Consider raising `summarize_context_keep_recent` in this case instead.
+- Debugging conversations — the full raw history is easier to inspect.
+
+### Interaction with condense_tool_messages
+
+Both features reduce context size but target different sources of growth:
+
+- `condense_tool_messages` compresses **tool-call rounds** within a single `complete()` call.
+- `summarize_context` compresses **conversation turns** that have accumulated across multiple calls.
+
+They are independent and compose cleanly when both are enabled. In a long agentic session with heavy tool use, combining them provides the maximum context reduction.
+
+---
+
+## Combining Both (condense + dynamic routing)
 
 ```python
 from gluellm import GlueLLM
@@ -327,3 +441,7 @@ The context size progression tells the story: standard raw ends at 20 messages, 
 | `tool_mode` | `"standard" \| "dynamic"` | `"standard"` | `GlueLLM.__init__`, `complete()`, `structured_complete()`, `stream_complete()` |
 | `tool_route_model` | `str \| None` | `settings.tool_route_model` | `GlueLLM.__init__` only |
 | `max_tokens` | `int \| None` | `None` (provider default) | `GlueLLM.__init__`, `complete()`, `structured_complete()`, `stream_complete()` |
+| `summarize_context` | `bool` | `False` | `GlueLLM.__init__`, `complete()`, `structured_complete()`, `stream_complete()` |
+| `summarize_context_threshold` | `int` | `20` | `GlueLLM.__init__`, `complete()`, `structured_complete()`, `stream_complete()` |
+| `summarize_context_model` | `str \| None` | `None` (uses primary model) | `GlueLLM.__init__`, `complete()`, `structured_complete()`, `stream_complete()` |
+| `summarize_context_keep_recent` | `int` | `6` | `GlueLLM.__init__`, `complete()`, `structured_complete()`, `stream_complete()` |
