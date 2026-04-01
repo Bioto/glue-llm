@@ -159,6 +159,12 @@ from gluellm.runtime.shutdown import (
     unregister_shutdown_callback,
     wait_for_shutdown,
 )
+from gluellm.hooks.manager import (
+    clear_global_hooks,
+    register_global_hook,
+    unregister_global_hook,
+)
+from gluellm.models.hook import HookConfig, HookContext, HookErrorStrategy, HookRegistry, HookStage
 from gluellm.schema import (
     create_normalized_model,
     create_openai_response_format,
@@ -295,6 +301,15 @@ __all__ = [
     "normalize_schema_for_openai",
     "create_normalized_model",
     "create_openai_response_format",
+    # Hooks
+    "HookStage",
+    "HookConfig",
+    "HookContext",
+    "HookErrorStrategy",
+    "HookRegistry",
+    "register_global_hook",
+    "unregister_global_hook",
+    "clear_global_hooks",
 ]
 
 __version__ = get_version()

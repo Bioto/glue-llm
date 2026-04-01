@@ -13,6 +13,7 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from gluellm.api import GlueLLM, _build_cause_chain
+from gluellm.hooks.manager import HookManager, _get_global_registry
 from gluellm.models.batch import (
     APIKeyConfig,
     BatchConfig,
@@ -21,6 +22,7 @@ from gluellm.models.batch import (
     BatchResponse,
     BatchResult,
 )
+from gluellm.models.hook import HookRegistry, HookStage
 from gluellm.observability.logging_config import get_logger
 from gluellm.rate_limiting.api_key_pool import APIKeyPool, extract_provider_from_model
 
@@ -55,6 +57,7 @@ class BatchProcessor:
         tools: list[Callable] | None = None,
         max_tool_iterations: int | None = None,
         config: BatchConfig | None = None,
+        hook_registry: HookRegistry | None = None,
     ):
         """Initialize the batch processor.
 
@@ -64,12 +67,15 @@ class BatchProcessor:
             tools: Default tools
             max_tool_iterations: Default max tool iterations
             config: Batch processing configuration
+            hook_registry: Optional instance-level hook registry
         """
         self.model = model
         self.system_prompt = system_prompt
         self.tools = tools
         self.max_tool_iterations = max_tool_iterations
         self.config = config or BatchConfig()
+        self._hook_registry = hook_registry or HookRegistry()
+        self._hook_manager = HookManager()
         # Initialize API key pool if keys are provided
         self.key_pool: APIKeyPool | None = None
         if self.config.api_keys:
@@ -81,6 +87,10 @@ class BatchProcessor:
             ]
             self.key_pool = APIKeyPool(keys=key_configs)
             logger.info(f"Initialized API key pool with {len(self.config.api_keys)} keys")
+
+    def _get_merged_hook_registry(self) -> HookRegistry:
+        """Return the global hook registry merged with this instance's registry."""
+        return _get_global_registry().merge(self._hook_registry)
 
     async def process(self, requests: list[BatchRequest]) -> BatchResponse:
         """Process a batch of requests.
@@ -180,8 +190,20 @@ class BatchProcessor:
         async with semaphore:
             start_time = time.time()
             request_id = request.id or f"batch-{uuid.uuid4()}"
+            merged = self._get_merged_hook_registry()
+            pre_batch_hooks = merged.get_hooks(HookStage.PRE_BATCH_ITEM)
+            post_batch_hooks = merged.get_hooks(HookStage.POST_BATCH_ITEM)
 
             logger.debug(f"Processing request {request_id}: {request.user_message[:50]}...")
+
+            # PRE_BATCH_ITEM hook: content is the user message
+            if pre_batch_hooks:
+                await self._hook_manager.execute_hooks(
+                    content=request.user_message,
+                    stage=HookStage.PRE_BATCH_ITEM,
+                    metadata={"batch_request_id": request_id, "index": 0, "attempt": 0},
+                    hooks=pre_batch_hooks,
+                )
 
             # Retry logic: attempt once, retry once if enabled
             max_attempts = 2 if self.config.retry_failed else 1
@@ -205,6 +227,7 @@ class BatchProcessor:
                         tools=request.tools if request.tools is not None else self.tools,
                         max_tool_iterations=request.max_tool_iterations or self.max_tool_iterations,
                         tool_execution_order=request.tool_execution_order,
+                        hook_registry=self._hook_registry,
                     )
 
                     # Execute the request — structured or plain
@@ -234,7 +257,7 @@ class BatchProcessor:
                         f"Request {request_id} succeeded: elapsed={elapsed_time:.3f}s, tool_calls={result.tool_calls_made}"
                     )
 
-                    return BatchResult(
+                    batch_result = BatchResult(
                         id=request_id,
                         success=True,
                         response=result.final_response,
@@ -245,6 +268,21 @@ class BatchProcessor:
                         metadata=request.metadata,
                         elapsed_time=elapsed_time,
                     )
+
+                    if post_batch_hooks:
+                        await self._hook_manager.execute_hooks(
+                            content=result.final_response or "",
+                            stage=HookStage.POST_BATCH_ITEM,
+                            metadata={
+                                "batch_request_id": request_id,
+                                "index": attempt,
+                                "attempt": attempt,
+                                "success": True,
+                            },
+                            hooks=post_batch_hooks,
+                        )
+
+                    return batch_result
 
                 except Exception as e:
                     last_exception = e
@@ -263,6 +301,18 @@ class BatchProcessor:
 
             # All attempts failed
             elapsed_time = time.time() - start_time
+            if post_batch_hooks:
+                await self._hook_manager.execute_hooks(
+                    content=str(last_exception) if last_exception else "Unknown error",
+                    stage=HookStage.POST_BATCH_ITEM,
+                    metadata={
+                        "batch_request_id": request_id,
+                        "index": max_attempts - 1,
+                        "attempt": max_attempts - 1,
+                        "success": False,
+                    },
+                    hooks=post_batch_hooks,
+                )
             return BatchResult(
                 id=request_id,
                 success=False,
