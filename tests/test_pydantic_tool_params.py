@@ -1480,3 +1480,148 @@ class TestDictAttributeErrorRegression:
         assert len(results) >= 1
         assert isinstance(results[0], str)
         assert len(results[0]) > 0
+
+
+# ---------------------------------------------------------------------------
+# list[Model] coercion
+# ---------------------------------------------------------------------------
+
+
+class LineItem(BaseModel):
+    """A single line item in an invoice."""
+
+    description: Annotated[str, Field(description="Short description of the item")]
+    amount: Annotated[float, Field(description="Amount in USD")]
+
+
+class TestListOfPydanticModelParameter:
+    """Verify that tools annotated with list[SomeModel] receive a list of
+    model instances, not a list of plain dicts.
+
+    This covers the bug where _coerce_args_to_pydantic only checked
+    ``isinstance(value, dict)`` and never walked into list annotations.
+    """
+
+    async def test_tool_receives_list_of_model_instances(self):
+        """Tool with list[LineItem] parameter gets actual LineItem instances.
+
+        Before the fix, each element of the list arrived as a plain dict
+        and ``item.description`` would raise AttributeError.
+        """
+        received: list[object] = []
+        attribute_errors: list[AttributeError] = []
+
+        def sum_line_items(items: list[LineItem]) -> str:
+            """Sum a list of line items and return the total.
+
+            Args:
+                items: The line items to sum
+            """
+            try:
+                total = sum(item.amount for item in items)
+                received.extend(items)
+                return f"Total: {total:.2f} USD"
+            except AttributeError as exc:
+                attribute_errors.append(exc)
+                return f"AttributeError: {exc}"
+
+        result = await complete(
+            user_message=(
+                "Sum these two line items using the sum_line_items tool: "
+                "1) 'Consulting' for 1500.00 USD, "
+                "2) 'Expenses' for 320.50 USD."
+            ),
+            system_prompt="You are a helpful assistant. You MUST use the sum_line_items tool.",
+            tools=[sum_line_items],
+        )
+
+        assert isinstance(result, ExecutionResult)
+        assert result.tool_calls_made >= 1
+
+        assert len(attribute_errors) == 0, (
+            f"Got AttributeError — list elements were plain dicts instead of LineItem: "
+            f"{attribute_errors[0]}"
+        )
+        assert len(received) >= 1
+        for item in received:
+            assert isinstance(item, LineItem), (
+                f"Expected LineItem instance, got {type(item).__name__}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Union[A, B] / A | B coercion
+# ---------------------------------------------------------------------------
+
+
+class SimpleQuantity(BaseModel):
+    """A quantity without a year label."""
+
+    value: Annotated[float, Field(description="Numeric value")]
+    unit: Annotated[str, Field(description="Unit, e.g. USD million")]
+
+
+class YearlyQuantity(SimpleQuantity):
+    """A quantity tied to a specific year."""
+
+    year: Annotated[int, Field(description="The year this quantity applies to")]
+
+
+class TestUnionPydanticModelParameter:
+    """Verify that tools annotated with Union[A, B] / A | B receive model
+    instances rather than plain dicts.
+
+    This covers the pattern ``list[Quantity | QuantityYearName]`` used in
+    real finance tools (e.g. ``sum_values``) where the previous coercion
+    logic skipped non-dict, non-bare-BaseModel annotations entirely.
+    """
+
+    async def test_tool_receives_union_model_instances(self):
+        """Tool with list[SimpleQuantity | YearlyQuantity] gets model instances.
+
+        Each element in the list must be coerced to the appropriate concrete
+        type; none should be left as a plain dict.
+        """
+        received: list[object] = []
+        attribute_errors: list[AttributeError] = []
+
+        def aggregate_quantities(quantities: list[SimpleQuantity | YearlyQuantity]) -> str:
+            """Aggregate a mixed list of quantities.
+
+            Args:
+                quantities: The quantities to aggregate, each with a value and unit
+            """
+            try:
+                total = sum(q.value for q in quantities)
+                received.extend(quantities)
+                return f"Aggregated {len(quantities)} quantities, total={total:.2f}"
+            except AttributeError as exc:
+                attribute_errors.append(exc)
+                return f"AttributeError: {exc}"
+
+        result = await complete(
+            user_message=(
+                "Aggregate these quantities using the aggregate_quantities tool: "
+                "1) value=1200.0, unit='EUR million', year=2023; "
+                "2) value=850.5, unit='EUR million' (no year). "
+                "You MUST call the aggregate_quantities tool."
+            ),
+            system_prompt=(
+                "You are a financial assistant. "
+                "You MUST use the aggregate_quantities tool."
+            ),
+            tools=[aggregate_quantities],
+        )
+
+        assert isinstance(result, ExecutionResult)
+        assert result.tool_calls_made >= 1
+
+        assert len(attribute_errors) == 0, (
+            f"Got AttributeError — union list elements were plain dicts: "
+            f"{attribute_errors[0]}"
+        )
+        assert len(received) >= 1
+        for item in received:
+            assert isinstance(item, (SimpleQuantity, YearlyQuantity)), (
+                f"Expected model instance, got {type(item).__name__}"
+            )

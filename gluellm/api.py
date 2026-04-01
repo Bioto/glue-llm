@@ -62,7 +62,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar, get_type_hints
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar, Union, get_args, get_origin, get_type_hints
 
 if TYPE_CHECKING:
     from gluellm.models.agent import Agent
@@ -1738,6 +1738,54 @@ class StreamingChunk(BaseModel):
     ] = None
 
 
+def _coerce_pydantic_value(value: Any, annotation: Any) -> Any:
+    """Recursively coerce *value* toward *annotation*.
+
+    Handles the following annotation forms so that tool functions always
+    receive proper Pydantic model instances rather than raw dicts:
+
+    * ``MyModel`` — bare BaseModel subclass
+    * ``list[MyModel]`` — list of models (each element coerced)
+    * ``Union[A, B]`` / ``A | B`` — tries each concrete type in order
+    * ``Optional[MyModel]`` — Union[MyModel, None], None arm skipped
+
+    Coercion is best-effort: if every attempt raises the original value
+    is returned unchanged.
+    """
+    import types as _types
+
+    origin = get_origin(annotation)
+
+    # bare BaseModel subclass
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        if isinstance(value, dict):
+            return annotation.model_validate(value)
+        return value
+
+    # list[X]
+    if origin is list:
+        args = get_args(annotation)
+        if args and isinstance(value, list):
+            return [_coerce_pydantic_value(item, args[0]) for item in value]
+        return value
+
+    # Union[X, Y] / X | Y (Python 3.10+)
+    is_union = origin is Union or (
+        hasattr(_types, "UnionType") and isinstance(annotation, _types.UnionType)
+    )
+    if is_union:
+        for arg in get_args(annotation):
+            if arg is type(None):
+                continue
+            try:
+                return _coerce_pydantic_value(value, arg)
+            except Exception:
+                pass
+        return value
+
+    return value
+
+
 class GlueLLM:
     """High-level API for LLM interactions with automatic tool execution."""
 
@@ -2965,8 +3013,11 @@ class GlueLLM:
         the correct model via ``model_validate``, giving tool authors natural
         attribute access (``arg.field``) without any boilerplate inside the tool.
 
+        Coercion handles bare ``BaseModel`` subclasses, ``list[Model]``,
+        ``Union[A, B]`` / ``A | B``, and ``Optional[Model]`` annotations.
+
         Coercion is best-effort: if the annotation cannot be resolved or
-        ``model_validate`` raises, the original dict is passed through unchanged
+        ``model_validate`` raises, the original value is passed through unchanged
         so existing error handling continues to work.
         """
         try:
@@ -2980,12 +3031,12 @@ class GlueLLM:
         coerced = dict(tool_args)
         for param_name, value in tool_args.items():
             annotation = hints.get(param_name)
-            if annotation is not None and isinstance(value, dict):
-                try:
-                    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
-                        coerced[param_name] = annotation.model_validate(value)
-                except Exception:
-                    pass  # leave as dict; the tool or error handler will surface the problem
+            if annotation is None:
+                continue
+            try:
+                coerced[param_name] = _coerce_pydantic_value(value, annotation)
+            except Exception:
+                pass  # leave as-is; the tool or error handler will surface the problem
         return coerced
 
     async def _execute_tool_calls_round(
