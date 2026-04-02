@@ -3118,7 +3118,8 @@ class GlueLLM:
                     f"[{correlation_id}] Tool '{tool_name}' (call {call_index}) completed successfully "
                     f"in {elapsed:.3f}s: result={_truncate_for_log(result)}"
                 )
-                return (str(result), False, elapsed)
+                result_str = result.model_dump_json() if isinstance(result, BaseModel) else str(result)
+                return (result_str, False, elapsed)
             except Exception as e:
                 elapsed = time.time() - start
                 logger.warning(

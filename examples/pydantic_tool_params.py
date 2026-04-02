@@ -12,7 +12,6 @@ from pydantic import BaseModel, Field
 
 from gluellm.api import complete
 
-
 # ---------------------------------------------------------------------------
 # Example 1 – flat Pydantic model parameter
 # ---------------------------------------------------------------------------

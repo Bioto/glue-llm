@@ -1044,6 +1044,38 @@ class TestToolResultSerialization:
             assert isinstance(result.tool_execution_history[0]["result"], str)
             assert "Unicode" in result.tool_execution_history[0]["result"]
 
+    async def test_tool_returning_pydantic_model_serializes_as_json(self):
+        """Pydantic model return values must be serialized as JSON, not str() repr.
+
+        Regression: previously str(result) produced the Python repr
+        (e.g. "value=42 label='hi'"), which is not parseable JSON and is
+        opaque to the LLM. model_dump_json() must be used instead.
+        """
+        import json
+
+        class MyModel(BaseModel):
+            value: float
+            label: str
+
+        def pydantic_tool() -> MyModel:
+            """Return a Pydantic model."""
+            return MyModel(value=42.0, label="hello")
+
+        result = await complete(
+            user_message="Use pydantic_tool",
+            system_prompt="Use the pydantic_tool when asked.",
+            tools=[pydantic_tool],
+        )
+
+        assert isinstance(result, ExecutionResult)
+        if result.tool_execution_history:
+            raw = result.tool_execution_history[0]["result"]
+            assert isinstance(raw, str)
+            # Must be valid JSON, not a Python repr
+            parsed = json.loads(raw)
+            assert parsed["value"] == 42.0
+            assert parsed["label"] == "hello"
+
 
 class TestProcessStatusEvents:
     """Test on_status callback and process events."""
