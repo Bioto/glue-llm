@@ -1004,7 +1004,7 @@ class TestEcommerceOrderComplexRelationships:
             """
             received.append(order)
             total = sum(line.line_total for line in order.lines)
-            physical = [l for l in order.lines if l.product.weight_kg is not None]
+            physical = [ln for ln in order.lines if ln.product.weight_kg is not None]
             return (
                 f"Order {order.order_id}: total=${total:.2f}, "
                 f"ship_to={order.shipping_address.city}, "
@@ -1487,8 +1487,8 @@ class TestDictAttributeErrorRegression:
 # ---------------------------------------------------------------------------
 
 
-class LineItem(BaseModel):
-    """A single line item in an invoice."""
+class ListCoercionLineItem(BaseModel):
+    """A single line item in an invoice (list-coercion tests; distinct from LineItem above)."""
 
     description: Annotated[str, Field(description="Short description of the item")]
     amount: Annotated[float, Field(description="Amount in USD")]
@@ -1503,7 +1503,7 @@ class TestListOfPydanticModelParameter:
     """
 
     async def test_tool_receives_list_of_model_instances(self):
-        """Tool with list[LineItem] parameter gets actual LineItem instances.
+        """Tool with list[ListCoercionLineItem] parameter gets actual model instances.
 
         Before the fix, each element of the list arrived as a plain dict
         and ``item.description`` would raise AttributeError.
@@ -1511,7 +1511,7 @@ class TestListOfPydanticModelParameter:
         received: list[object] = []
         attribute_errors: list[AttributeError] = []
 
-        def sum_line_items(items: list[LineItem]) -> str:
+        def sum_line_items(items: list[ListCoercionLineItem]) -> str:
             """Sum a list of line items and return the total.
 
             Args:
@@ -1539,13 +1539,13 @@ class TestListOfPydanticModelParameter:
         assert result.tool_calls_made >= 1
 
         assert len(attribute_errors) == 0, (
-            f"Got AttributeError — list elements were plain dicts instead of LineItem: "
+            f"Got AttributeError — list elements were plain dicts instead of ListCoercionLineItem: "
             f"{attribute_errors[0]}"
         )
         assert len(received) >= 1
         for item in received:
-            assert isinstance(item, LineItem), (
-                f"Expected LineItem instance, got {type(item).__name__}"
+            assert isinstance(item, ListCoercionLineItem), (
+                f"Expected ListCoercionLineItem instance, got {type(item).__name__}"
             )
 
 

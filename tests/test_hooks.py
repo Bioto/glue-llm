@@ -874,8 +874,8 @@ class TestLLMRetryHook:
             })
             return ctx
 
-        from gluellm.api import RetryConfig, RateLimitError
-        from gluellm.models.hook import HookRegistry, HookStage, HookConfig
+        from gluellm.api import RateLimitError, RetryConfig
+        from gluellm.models.hook import HookConfig, HookRegistry, HookStage
 
         registry = HookRegistry()
         registry.add_hook(HookStage.ON_LLM_RETRY, HookConfig(handler=capture, name="capture"))
@@ -1155,6 +1155,7 @@ class TestPreEvalRecordHook:
     async def test_pre_eval_record_can_scrub_user_message(self):
         """PRE_EVAL_RECORD hook may modify user_message before it is written to the eval store."""
         import re
+
         from gluellm.api import _record_eval_data
         from gluellm.hooks.manager import HookManager
         from gluellm.models.hook import HookConfig, HookRegistry, HookStage
