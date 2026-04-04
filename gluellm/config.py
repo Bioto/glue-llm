@@ -121,6 +121,11 @@ class GlueLLMSettings(BaseSettings):
     rate_limit_redis_url: str | None = None
     rate_limit_algorithm: RateLimitAlgorithm = RateLimitAlgorithm.SLIDING_WINDOW
 
+    # Context summarization settings
+    default_summarize_context: bool = False
+    default_summarize_context_threshold: Annotated[int, Field(gt=0)] = 20
+    default_summarize_context_keep_recent: Annotated[int, Field(gt=0)] = 6
+
     # Cost tracking settings
     track_costs: bool = True  # Enable cost tracking and include in responses
     print_session_summary_on_exit: bool = True  # Print token/cost summary when program exits
