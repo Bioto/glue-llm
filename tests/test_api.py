@@ -2853,5 +2853,259 @@ class TestNewParameters:
         assert captured_kwargs.get("reasoning_effort") == "high"
 
 
+# ---------------------------------------------------------------------------
+# Conversation summarization
+# ---------------------------------------------------------------------------
+
+
+def _make_summarize_response(summary_text: str):
+    """Build a minimal mock acompletion response for summarization tests."""
+    msg = SimpleNamespace(content=summary_text)
+    choice = SimpleNamespace(message=msg)
+    return SimpleNamespace(choices=[choice])
+
+
+class TestSummarizeOldMessages:
+    """Unit tests for the _summarize_old_messages helper."""
+
+    async def test_returns_original_when_only_system_message(self):
+        """Single-element list (system only) is returned unchanged without calling the LLM."""
+        from gluellm.api import _summarize_old_messages
+
+        messages = [{"role": "system", "content": "You are helpful."}]
+        result = await _summarize_old_messages(messages, keep_recent=4, model="openai:gpt-4o-mini")
+        assert result is messages
+
+    async def test_returns_original_when_not_enough_messages_to_summarize(self):
+        """When non-system messages ≤ keep_recent, returns original list unchanged."""
+        from gluellm.api import _summarize_old_messages
+
+        messages = [
+            {"role": "system", "content": "System."},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello"},
+        ]
+        result = await _summarize_old_messages(messages, keep_recent=4, model="openai:gpt-4o-mini")
+        assert result is messages
+
+    async def test_summarizes_old_messages_and_keeps_recent(self):
+        """Old messages are replaced by one summary; keep_recent messages are kept verbatim."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from gluellm.api import _summarize_old_messages
+
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Turn 1"},
+            {"role": "assistant", "content": "Reply 1"},
+            {"role": "user", "content": "Turn 2"},
+            {"role": "assistant", "content": "Reply 2"},
+            {"role": "user", "content": "Turn 3 (recent)"},
+            {"role": "assistant", "content": "Reply 3 (recent)"},
+        ]
+        # keep_recent=2 → old=[Turn1,Reply1,Turn2,Reply2] recent=[Turn3,Reply3]
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(return_value=_make_summarize_response("Summary of old turns."))
+
+        with patch("gluellm.api._ProviderCache") as MockCache:
+            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-4o-mini")
+            result = await _summarize_old_messages(messages, keep_recent=2, model="openai:gpt-4o-mini")
+
+        assert result[0] == {"role": "system", "content": "You are helpful."}
+        assert "[Conversation Summary]" in result[1]["content"]
+        assert "Summary of old turns." in result[1]["content"]
+        assert result[2] == {"role": "user", "content": "Turn 3 (recent)"}
+        assert result[3] == {"role": "assistant", "content": "Reply 3 (recent)"}
+        assert len(result) == 4
+
+    async def test_summary_message_has_user_role(self):
+        """The injected summary message uses role 'user' so the LLM can continue."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from gluellm.api import _summarize_old_messages
+
+        messages = [
+            {"role": "system", "content": "Sys."},
+            {"role": "user", "content": "A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "C (recent)"},
+        ]
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(return_value=_make_summarize_response("Summary."))
+
+        with patch("gluellm.api._ProviderCache") as MockCache:
+            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-4o-mini")
+            result = await _summarize_old_messages(messages, keep_recent=1, model="openai:gpt-4o-mini")
+
+        assert result[1]["role"] == "user"
+
+    async def test_summarization_failure_returns_original_messages(self):
+        """When the summarization LLM call throws, the original messages are returned unchanged."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from gluellm.api import _summarize_old_messages
+
+        messages = [
+            {"role": "system", "content": "Sys."},
+            {"role": "user", "content": "A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "C (recent)"},
+        ]
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(side_effect=RuntimeError("LLM down"))
+
+        with patch("gluellm.api._ProviderCache") as MockCache:
+            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-4o-mini")
+            result = await _summarize_old_messages(messages, keep_recent=1, model="openai:gpt-4o-mini")
+
+        assert result is messages
+
+    async def test_multi_part_content_is_joined_for_transcript(self):
+        """Messages with list content (e.g. vision) have text parts joined for the transcript."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from gluellm.api import _summarize_old_messages
+
+        messages = [
+            {"role": "system", "content": "Sys."},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Look at this image:"},
+                    {"type": "image_url", "image_url": {"url": "http://example.com/img.png"}},
+                ],
+            },
+            {"role": "assistant", "content": "I see a cat."},
+            {"role": "user", "content": "Recent message."},
+        ]
+        captured_messages: list = []
+        mock_provider = MagicMock()
+
+        async def capture_acompletion(**kwargs):
+            captured_messages.extend(kwargs.get("messages", []))
+            return _make_summarize_response("Summary.")
+
+        mock_provider.acompletion = capture_acompletion
+
+        with patch("gluellm.api._ProviderCache") as MockCache:
+            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-4o-mini")
+            await _summarize_old_messages(messages, keep_recent=1, model="openai:gpt-4o-mini")
+
+        transcript_content = captured_messages[1]["content"]
+        assert "Look at this image:" in transcript_content
+        # The image_url part should not appear (no 'text' key)
+        assert "http://example.com" not in transcript_content
+
+
+class TestSummarizeContextIntegration:
+    """Integration tests for the summarize_context feature on GlueLLM."""
+
+    async def test_summarize_context_disabled_by_default(self):
+        """GlueLLM.summarize_context defaults to False."""
+        client = GlueLLM(model="openai:gpt-4o-mini")
+        assert client.summarize_context is False
+
+    async def test_summarize_context_can_be_enabled_on_client(self):
+        """summarize_context=True is stored on the client instance."""
+        client = GlueLLM(model="openai:gpt-4o-mini", summarize_context=True)
+        assert client.summarize_context is True
+
+    async def test_summarize_context_threshold_defaults_from_settings(self):
+        """summarize_context_threshold defaults to settings.default_summarize_context_threshold."""
+        from gluellm.config import settings
+
+        client = GlueLLM(model="openai:gpt-4o-mini")
+        assert client.summarize_context_threshold == settings.default_summarize_context_threshold
+
+    async def test_summarize_context_keep_recent_defaults_from_settings(self):
+        """summarize_context_keep_recent defaults to settings.default_summarize_context_keep_recent."""
+        from gluellm.config import settings
+
+        client = GlueLLM(model="openai:gpt-4o-mini")
+        assert client.summarize_context_keep_recent == settings.default_summarize_context_keep_recent
+
+    async def test_summarize_context_threshold_can_be_overridden(self):
+        """Custom summarize_context_threshold is respected."""
+        client = GlueLLM(model="openai:gpt-4o-mini", summarize_context_threshold=10)
+        assert client.summarize_context_threshold == 10
+
+    async def test_summarize_context_keep_recent_can_be_overridden(self):
+        """Custom summarize_context_keep_recent is respected."""
+        client = GlueLLM(model="openai:gpt-4o-mini", summarize_context_keep_recent=3)
+        assert client.summarize_context_keep_recent == 3
+
+    async def test_summarize_context_triggers_when_threshold_exceeded(self):
+        """_summarize_old_messages is called when message count exceeds threshold.
+
+        messages = [system] + conversation.messages_dict + [new user msg]
+        Threshold=4 → need len(messages) > 4 → pre-seed 4 turns (4 conversation
+        messages) so that on entry: system(1)+4+new(1) = 6 > 4.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from gluellm.models.conversation import Role as ConvRole
+
+        summarize_called: list = []
+
+        async def fake_summarize(messages, keep_recent, model):
+            summarize_called.append(True)
+            return messages  # return unchanged so complete() can proceed
+
+        mock_response = _make_tool_response("Done")
+
+        with (
+            patch("gluellm.api._summarize_old_messages", side_effect=fake_summarize) as mock_sum,
+            patch("gluellm.api._llm_call_with_retry", AsyncMock(return_value=mock_response)),
+        ):
+            client = GlueLLM(
+                model="openai:gpt-4o-mini",
+                summarize_context=True,
+                summarize_context_threshold=4,
+            )
+            # Pre-seed conversation: 4 messages → messages list before complete("new")
+            # will be [system, u1, a1, u2, a2, new_user] = 6 > threshold 4
+            client._conversation.add_message(ConvRole.USER, "Msg 1")
+            client._conversation.add_message(ConvRole.ASSISTANT, "Reply 1")
+            client._conversation.add_message(ConvRole.USER, "Msg 2")
+            client._conversation.add_message(ConvRole.ASSISTANT, "Reply 2")
+            await client.complete("Msg 3")
+
+        assert mock_sum.called, "_summarize_old_messages was not called despite threshold being exceeded"
+
+    async def test_summarize_context_not_triggered_below_threshold(self):
+        """_summarize_old_messages is not called when messages are below threshold."""
+        from unittest.mock import AsyncMock, patch
+
+        mock_response = _make_tool_response("Done")
+
+        with (
+            patch("gluellm.api._summarize_old_messages", AsyncMock()) as mock_sum,
+            patch("gluellm.api._llm_call_with_retry", AsyncMock(return_value=mock_response)),
+        ):
+            client = GlueLLM(
+                model="openai:gpt-4o-mini",
+                summarize_context=True,
+                summarize_context_threshold=20,
+            )
+            await client.complete("Hi")
+
+        assert not mock_sum.called, "_summarize_old_messages was called unexpectedly"
+
+    async def test_summarize_context_not_triggered_when_disabled(self):
+        """_summarize_old_messages is never called when summarize_context=False (default)."""
+        from unittest.mock import AsyncMock, patch
+
+        mock_response = _make_tool_response("Done")
+
+        with (
+            patch("gluellm.api._summarize_old_messages", AsyncMock()) as mock_sum,
+            patch("gluellm.api._llm_call_with_retry", AsyncMock(return_value=mock_response)),
+        ):
+            client = GlueLLM(model="openai:gpt-4o-mini")
+            await client.complete("Hi")
+
+        assert not mock_sum.called
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
