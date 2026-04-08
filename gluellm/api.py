@@ -1056,6 +1056,7 @@ async def _summarize_old_messages(
     *,
     use_aaak: bool = False,
     aaak_model: str | None = None,
+    completion_extra: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Compress older conversation messages into a single summary message.
 
@@ -1112,6 +1113,7 @@ async def _summarize_old_messages(
                 old_messages,
                 model=compression_model,
                 api_key=None,
+                completion_extra=completion_extra,
             )
             if not summary_text:
                 logger.warning("AAAK compression empty; continuing with original messages.")
@@ -1128,7 +1130,11 @@ async def _summarize_old_messages(
             ]
             provider_cache = _ProviderCache()
             provider, model_id = provider_cache.get_provider(model, api_key=None)
-            response = await provider.acompletion(model=model_id, messages=summarize_messages)
+            response = await provider.acompletion(
+                model=model_id,
+                messages=summarize_messages,
+                **(completion_extra or {}),
+            )
             summary_text = response.choices[0].message.content or ""
             summary_msg = {
                 "role": "user",

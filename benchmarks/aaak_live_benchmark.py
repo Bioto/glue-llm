@@ -32,16 +32,32 @@ Requires OPENAI_API_KEY in environment.
 Run:
     set -a && source ../.env && set +a
     uv run python benchmarks/aaak_live_benchmark.py
+
+Options:
+    --trials N              Run the full benchmark N times; print mean/min/max recall and
+                            per-question pass rates (default: 1).
+    --only-section-a/b/c/d/e
+                            Run only one section.
+    --concurrency N         Max in-flight API calls across all parallel recall/judge/compress
+                            tasks (default: 10). Sections B-E run concurrently; within B/C/D all
+                            modes run in parallel; Section A and E modes run sequentially (they
+                            patch global provider state). All recall questions within a mode run
+                            in parallel, bounded by this semaphore.
+    --verbose-section-a     After aaak_ctx, print [AAAK CTX] body and recall failures
+                            (answer + judge input) for debugging compression.
+    --no-deterministic-sampling
+                            Do not pass temperature=0, top_p=1 to the API (some models reject it).
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import tiktoken
 
@@ -54,9 +70,20 @@ from gluellm.compression.aaak import (
     transcript_from_messages,
 )
 
+RecallQuestion = dict[str, str | list[str]]
+
 _ENC = tiktoken.encoding_for_model("gpt-4o")
 
-MODEL = "openai:gpt-5.4-nano"
+MODEL = "groq:llama-3.1-8b-instant"
+
+# Benchmark-only: merged into provider.acompletion for judge, recall answers, prose summarize,
+# and AAAK compress. Overridable via --no-deterministic-sampling.
+_benchmark_completion_extra: dict[str, Any] = {"temperature": 0, "top_p": 1}
+_benchmark_verbose_section_a: bool = False
+
+# Semaphore caps in-flight provider calls across all concurrent recall/judge/compress tasks.
+# Initialized in main_async() from --concurrency N (default 10).
+_benchmark_semaphore: asyncio.Semaphore | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -207,34 +234,34 @@ CTX_CONVERSATION: list[dict[str, Any]] = [
     },
 ]
 
-CTX_RECALL_QUESTIONS: list[dict[str, str]] = [
+CTX_RECALL_QUESTIONS: list[RecallQuestion] = [
     {
         "question": "What hashing algorithm did we decide to use for JWTs, and what is the access token expiry in minutes?",
-        "key_facts": "HS256, 15 minutes",
+        "key_facts": ["HS256", "15 minutes"],
     },
     {
         "question": "What is the exact name of the environment variable for the JWT secret key?",
-        "key_facts": "JWT_SECRET_KEY",
+        "key_facts": ["JWT_SECRET_KEY"],
     },
     {
         "question": "What column in the refresh_tokens table enables token-family replay attack detection?",
-        "key_facts": "replaced_by",
+        "key_facts": ["replaced_by"],
     },
     {
         "question": "What is the rate limit on the /auth/login endpoint, and at which layer is it primarily enforced?",
-        "key_facts": "10 req/min, gateway/nginx",
+        "key_facts": ["10 req/min", "gateway/nginx"],
     },
     {
         "question": "What cookie attributes should the refresh token cookie have?",
-        "key_facts": "HttpOnly, Secure, SameSite=Strict",
+        "key_facts": ["HttpOnly", "Secure", "SameSite=Strict"],
     },
     {
         "question": "What are the exact steps for the logout flow?",
-        "key_facts": "DELETE /auth/session, SHA-256 hash, UPDATE revoked_at, 204, clear cookie",
+        "key_facts": ["DELETE /auth/session", "SHA-256 hash", "UPDATE revoked_at", "204", "clear cookie"],
     },
     {
         "question": "What is the expires_in value in the /auth/login success response, and what does it represent?",
-        "key_facts": "900, 15 minutes in seconds",
+        "key_facts": ["900", "15 minutes in seconds"],
     },
 ]
 
@@ -408,34 +435,34 @@ TOOL_RECENT = [
     },
 ]
 
-TOOL_RECALL_QUESTIONS: list[dict[str, str]] = [
+TOOL_RECALL_QUESTIONS: list[RecallQuestion] = [
     {
         "question": "How many ERROR logs did the auth-service produce in the last 60 minutes, and what was the top error?",
-        "key_facts": "847, ConnectionPoolExhausted",
+        "key_facts": ["847", "ConnectionPoolExhausted"],
     },
     {
         "question": "How many ERROR logs did the payment-service produce, and what was its top error message?",
-        "key_facts": "12, Timeout waiting for auth-service",
+        "key_facts": ["12", "Timeout waiting for auth-service"],
     },
     {
         "question": "What are the db_pool_size and db_max_overflow values from the auth-service config file?",
-        "key_facts": "db_pool_size: 10, db_max_overflow: 5",
+        "key_facts": ["db_pool_size: 10", "db_max_overflow: 5"],
     },
     {
         "question": "What was the request_timeout_ms value in the auth-service config?",
-        "key_facts": "8500",
+        "key_facts": ["8500"],
     },
     {
         "question": "How many active database connections were observed for auth-service, and what database was queried?",
-        "key_facts": "267, monitoring",
+        "key_facts": ["267", "monitoring"],
     },
     {
         "question": "What were the average and maximum request durations in milliseconds for auth-service over the last 10 minutes?",
-        "key_facts": "avg 4320ms, max 31800ms",
+        "key_facts": ["avg 4320ms", "max 31800ms"],
     },
     {
         "question": "What were the actual environment variable values for DB_POOL_SIZE, DB_MAX_OVERFLOW, and WORKER_THREADS?",
-        "key_facts": "DB_POOL_SIZE=10, DB_MAX_OVERFLOW=5, WORKER_THREADS=32",
+        "key_facts": ["DB_POOL_SIZE=10", "DB_MAX_OVERFLOW=5", "WORKER_THREADS=32"],
     },
 ]
 
@@ -699,64 +726,64 @@ HARD_TOOL_RECENT = [
     },
 ]
 
-HARD_TOOL_RECALL_QUESTIONS: list[dict[str, str]] = [
+HARD_TOOL_RECALL_QUESTIONS: list[RecallQuestion] = [
     {
         "question": (
             "For the api-gateway config tool result, what is the burst limit and strategy "
             "for the /api/v2/search route?"
         ),
-        "key_facts": "120, token_bucket",
+        "key_facts": ["120", "token_bucket"],
     },
     {
         "question": "Name one TLS cipher suite listed in the api-gateway TLS configuration.",
-        "key_facts": "TLS_AES_256_GCM_SHA384",
+        "key_facts": ["TLS_AES_256_GCM_SHA384"],
     },
     {
         "question": (
             "Which deployment version was a rollback, and which prior version did it roll back from?"
         ),
-        "key_facts": "2.4.0, 2.4.1",
+        "key_facts": ["2.4.0", "2.4.1"],
     },
     {
         "question": "What is the git SHA for deployment version 2.4.2?",
-        "key_facts": "e5f6a7b8c9d0",
+        "key_facts": ["e5f6a7b8c9d0"],
     },
     {
         "question": "In the markdown service comparison table, what is billing's p99 latency in ms?",
-        "key_facts": "210",
+        "key_facts": ["210"],
     },
     {
         "question": (
             "In the same comparison table, which service has the highest error_rate and what is that rate?"
         ),
-        "key_facts": "billing, 0.012",
+        "key_facts": ["billing", "0.012"],
     },
     {
         "question": (
             "In the CSV metrics export at 2025-04-01T10:00:00Z, what are rps and error_pct for billing?"
         ),
-        "key_facts": "890, 1.2",
+        "key_facts": ["890", "1.2"],
     },
     {
         "question": (
             "Across all rows in the CSV export, which service and hour (timestamp hour only, e.g. 11:00) "
             "had the peak error_pct, and what was that percentage?"
         ),
-        "key_facts": "gateway, 11:00, 1.8",
+        "key_facts": ["gateway", "11:00", "1.8"],
     },
     {
         "question": (
             "What are max_connections for auth-service in staging versus production from the parallel "
             "get_config tool results?"
         ),
-        "key_facts": "50, 500",
+        "key_facts": ["50", "500"],
     },
     {
         "question": (
             "From the OOM log analysis: what pod name peaked in RSS, what was the peak RSS value, "
             "and what is the heap dump SHA prefix?"
         ),
-        "key_facts": "auth-7f8a, 2.1Gi, a3f8c91d",
+        "key_facts": ["auth-7f8a", "2.1Gi", "a3f8c91d"],
     },
 ]
 
@@ -925,62 +952,62 @@ EDGE_TOOL_RECENT = [
     },
 ]
 
-EDGE_TOOL_RECALL_QUESTIONS: list[dict[str, str]] = [
+EDGE_TOOL_RECALL_QUESTIONS: list[RecallQuestion] = [
     {
         "question": "From get_latency_percentiles, what is the p99 latency in milliseconds?",
-        "key_facts": "890",
+        "key_facts": ["890"],
     },
     {
         "question": (
             "From get_error_summary for billing: what is the error rate (decimal) and how many errors out of total?"
         ),
-        "key_facts": "0.0128, 542, 42390",
+        "key_facts": ["0.0128", "542", "42390"],
     },
     {
         "question": "From get_db_health: how many slow_queries and what is cache_hit_pct?",
-        "key_facts": "12, 94.7",
+        "key_facts": ["12", "94.7"],
     },
     {
         "question": "From get_queue_stats: what is queue depth and lag_ms for payment-events?",
-        "key_facts": "18923, 4500",
+        "key_facts": ["18923", "4500"],
     },
     {
         "question": "From get_cache_stats: how many keys and what is the hit_rate (decimal)?",
-        "key_facts": "1240983, 0.9831",
+        "key_facts": ["1240983", "0.9831"],
     },
     {
         "question": (
             "From the audit log export: what action and version appear in the earliest entry (09:00:00Z), "
             "and which user approved the payment target?"
         ),
-        "key_facts": "deploy, 2.4.2, admin-rsk",
+        "key_facts": ["deploy", "2.4.2", "admin-rsk"],
     },
     {
         "question": (
             "From run_migration: what exception type occurred, on which source line number, "
             "and what process exit code?"
         ),
-        "key_facts": "LockNotAvailable, 84, 1",
+        "key_facts": ["LockNotAvailable", "84", "1"],
     },
     {
         "question": "From systemctl_status: at what UTC timestamp did auth-service fail?",
-        "key_facts": "2025-04-01 14:32:11",
+        "key_facts": ["2025-04-01 14:32:11"],
     },
     {
         "question": "From get_financial_metrics: what is revenue_usd (exact) and fee_rate (exact decimal)?",
-        "key_facts": "1234567.89, 0.00285",
+        "key_facts": ["1234567.89", "0.00285"],
     },
     {
         "question": "From get_financial_metrics: what are chargeback_rate and yoy_growth_pct?",
-        "key_facts": "0.0000312, 23.7",
+        "key_facts": ["0.0000312", "23.7"],
     },
     {
         "question": "From get_financial_metrics: what is avg_transaction_usd?",
-        "key_facts": "47.32",
+        "key_facts": ["47.32"],
     },
     {
         "question": "From run_migration: what relation name could not be locked?",
-        "key_facts": "users",
+        "key_facts": ["users"],
     },
 ]
 
@@ -1124,30 +1151,30 @@ def _build_pipeline_conversation() -> list[dict[str, Any]]:
     ]
 
 
-PIPELINE_RECALL_QUESTIONS: list[dict[str, str]] = [
+PIPELINE_RECALL_QUESTIONS: list[RecallQuestion] = [
     {
         "question": "From the first embedded tool summary, what is request_timeout_ms?",
-        "key_facts": "8500",
+        "key_facts": ["8500"],
     },
     {
         "question": "From the first embedded tool summary, what is pool_size?",
-        "key_facts": "10",
+        "key_facts": ["10"],
     },
     {
         "question": "From the second embedded tool summary, what is rps?",
-        "key_facts": "3400",
+        "key_facts": ["3400"],
     },
     {
         "question": "From the second embedded tool summary, what is error_pct?",
-        "key_facts": "0.4",
+        "key_facts": ["0.4"],
     },
     {
         "question": "From the second embedded tool summary, what shard value is reported?",
-        "key_facts": "us-east-1a",
+        "key_facts": ["us-east-1a"],
     },
     {
         "question": "From the first [AT] block, what are the exact config values for request_timeout_ms and pool_size?",
-        "key_facts": "8500,10",
+        "key_facts": ["8500", "10"],
     },
 ]
 
@@ -1209,8 +1236,11 @@ class ModeResult:
 async def _call(messages: list[dict], *, model: str = MODEL) -> tuple[str, TokenUsage]:
     from gluellm.api import _provider_cache
 
-    provider, model_id = _provider_cache.get_provider(model, api_key=None)
-    resp = await provider.acompletion(model=model_id, messages=messages)
+    sem = _benchmark_semaphore
+    async with sem if sem is not None else asyncio.Lock():
+        provider, model_id = _provider_cache.get_provider(model, api_key=None)
+        extra = dict(_benchmark_completion_extra)
+        resp = await provider.acompletion(model=model_id, messages=messages, **extra)
     content = resp.choices[0].message.content or ""
     usage = getattr(resp, "usage", None)
     return content, TokenUsage(
@@ -1255,7 +1285,11 @@ async def prepare_ctx_prose(conversation: list[dict], keep_recent: int) -> tuple
     _api._ProviderCache = _TrackingCache
     try:
         result = await _summarize_old_messages(
-            list(conversation), keep_recent=keep_recent, model=MODEL, use_aaak=False
+            list(conversation),
+            keep_recent=keep_recent,
+            model=MODEL,
+            use_aaak=False,
+            completion_extra=_benchmark_completion_extra,
         )
     finally:
         _api._ProviderCache = _orig
@@ -1292,7 +1326,11 @@ async def prepare_ctx_aaak(conversation: list[dict], keep_recent: int) -> tuple[
 
     _provider_cache.get_provider = tracking_get
     try:
-        encoded = await AAAKCompressor.compress_messages(old, model=MODEL)
+        encoded = await AAAKCompressor.compress_messages(
+            old,
+            model=MODEL,
+            completion_extra=_benchmark_completion_extra,
+        )
     finally:
         _provider_cache.get_provider = orig_get
 
@@ -1354,41 +1392,149 @@ async def prepare_edge_aaak() -> tuple[list[dict], TokenUsage]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 JUDGE_SYSTEM = (
-    "You are a strict recall judge. You will be shown a question and a list of key facts "
-    "that a correct answer must contain. Then you will see a response.\n\n"
-    "Score the response: reply with ONLY '1' if ALL key facts are present (even if paraphrased), "
-    "or '0' if any key fact is missing or incorrect. No explanation."
+    "You are a strict recall judge. You will be shown a question, a JSON array of required facts, "
+    "and a response.\n\n"
+    "Treat every array item as an independent checklist item. "
+    "Score the response: reply with ONLY '1' if ALL required facts are present (even if paraphrased), "
+    "or '0' if any key fact is missing or incorrect. No explanation.\n\n"
+    "Important: Ignore formatting differences. Bullet lists, backticks, bold markers (**), markdown, "
+    "and punctuation do not matter — only whether the fact itself is present. "
+    "The order of facts does not matter unless the question explicitly asks for a specific ordering. "
+    "Exact wording is not required; paraphrasing or equivalent expressions count as present. "
+    "For identifiers and constants (e.g. environment variable names, algorithm names, header names), "
+    "treat comparisons as case-insensitive — JWT_SECRET_KEY and jwt_secret_key are the same fact."
 )
+
+
+def _coerce_key_facts(raw: str | list[str]) -> list[str]:
+    """Return key facts as atomic checklist items.
+
+    New fixtures should pass lists directly. Older comma-delimited strings are still
+    supported so benchmark questions remain easy to write and migrate incrementally.
+    """
+    if isinstance(raw, list):
+        return [fact.strip() for fact in raw if fact.strip()]
+    return [fact.strip() for fact in raw.split(",") if fact.strip()]
+
+
+def _normalize_answer(answer: str) -> str:
+    """Strip markdown formatting so the judge focuses on content, not presentation.
+
+    Does NOT lowercase — key facts like JWT_SECRET_KEY are case-sensitive identifiers
+    and must survive normalization intact. Only removes backticks, bold markers (**),
+    leading bullets (-, *, +), and collapses extra whitespace.
+    The original answer is always logged separately.
+    """
+    import re
+    s = answer.replace("`", "")
+    s = s.replace("**", "")
+    s = re.sub(r"^\s*[-*+]\s+", "", s, flags=re.MULTILINE)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _normalize_for_fact_match(text: str) -> str:
+    """Normalize text for deterministic atomic-fact containment checks."""
+    import re
+
+    s = _normalize_answer(text).casefold()
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _contains_atomic_fact(answer: str, fact: str) -> bool:
+    needle = _normalize_for_fact_match(fact)
+    if not needle:
+        return False
+    haystack = f" {_normalize_for_fact_match(answer)} "
+    return f" {needle} " in haystack
+
+
+async def _eval_one_question(
+    messages: list[dict],
+    qa: RecallQuestion,
+    *,
+    collect_debug: bool,
+) -> tuple[int, TokenUsage, dict[str, Any] | None]:
+    """Evaluate a single recall question. Safe to run concurrently."""
+    answer, tok_a = await _call([*messages, {"role": "user", "content": qa["question"]}])
+
+    normalized = _normalize_answer(answer)
+    key_facts = _coerce_key_facts(qa["key_facts"])
+    deterministic_ok = all(_contains_atomic_fact(normalized, fact) for fact in key_facts)
+    judge_user = (
+        f"Question: {qa['question']}\n"
+        f"Required facts JSON: {json.dumps(key_facts, ensure_ascii=True)}\n"
+        f"Model answer: {normalized}"
+    )
+    verdict, tok_j = await _call([
+        {"role": "system", "content": JUDGE_SYSTEM},
+        {"role": "user", "content": judge_user},
+    ])
+    judge_ok = verdict.strip().startswith("1")
+    ok = 1 if deterministic_ok or judge_ok else 0
+    tok = TokenUsage(tok_a.prompt + tok_j.prompt, tok_a.completion + tok_j.completion)
+    row = None
+    if collect_debug:
+        row = {
+            "question": qa["question"],
+            "key_facts": key_facts,
+            "answer": answer,
+            "normalized_answer": normalized,
+            "deterministic_ok": deterministic_ok,
+            "judge_ok": judge_ok,
+            "verdict_raw": verdict.strip(),
+            "judge_user": judge_user,
+            "score": ok,
+        }
+    return ok, tok, row
 
 
 async def run_recall(
     messages: list[dict],
-    questions: list[dict[str, str]],
-) -> tuple[list[int], TokenUsage]:
+    questions: list[RecallQuestion],
+    *,
+    collect_debug: bool = False,
+) -> tuple[list[int], TokenUsage, list[dict[str, Any]] | None]:
+    # All questions are independent — run them concurrently and preserve order.
+    rows = await asyncio.gather(*[
+        _eval_one_question(messages, qa, collect_debug=collect_debug)
+        for qa in questions
+    ])
+    scores = [ok for ok, _, _ in rows]
     total = TokenUsage()
-    scores: list[int] = []
-
-    for qa in questions:
-        answer, tok_a = await _call([*messages, {"role": "user", "content": qa["question"]}])
-        total += tok_a
-
-        verdict, tok_j = await _call([
-            {"role": "system", "content": JUDGE_SYSTEM},
-            {"role": "user", "content": (
-                f"Question: {qa['question']}\n"
-                f"Key facts required: {qa['key_facts']}\n"
-                f"Model answer: {answer}"
-            )},
-        ])
-        total += tok_j
-        scores.append(1 if verdict.strip().startswith("1") else 0)
-
-    return scores, total
+    for _, tok, _ in rows:
+        total += tok
+    debug_rows = [dr for _, _, dr in rows] if collect_debug else None
+    return scores, total, debug_rows
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Runners
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _extract_aaak_ctx_body(msgs: list[dict[str, Any]]) -> str:
+    """Return the AAAK-encoded conversation body from the actual summary message.
+
+    Only inspects role='user' messages whose content begins with '[AAAK CTX]\n'
+    and contains the closing '[/AAAK CTX]' tag. This avoids accidentally matching
+    the system decode hint, which merely mentions the tag as inline text.
+    """
+    for m in msgs:
+        if m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if not isinstance(c, str):
+            continue
+        if not c.startswith("[AAAK CTX]\n") and not c.startswith("[AAAK CTX] "):
+            continue
+        start = len("[AAAK CTX]")
+        end = c.find("[/AAAK CTX]")
+        if end == -1:
+            return c[start:].strip()
+        return c[start:end].strip()
+    return ""
 
 
 async def run_ctx_mode(name: str, lossless: bool, prepare_fn, conversation: list[dict], keep_recent: int) -> ModeResult:
@@ -1398,7 +1544,27 @@ async def run_ctx_mode(name: str, lossless: bool, prepare_fn, conversation: list
     r.elapsed_s = time.perf_counter() - t0
     r.compressed_size = messages_tokens(msgs)
     r.compression_tokens = comp_tok
-    r.recall_scores, r.recall_tokens = await run_recall(msgs, CTX_RECALL_QUESTIONS)
+    collect = name == "aaak_ctx" and _benchmark_verbose_section_a
+    r.recall_scores, r.recall_tokens, dbg = await run_recall(
+        msgs, CTX_RECALL_QUESTIONS, collect_debug=collect
+    )
+    if collect and dbg:
+        body = _extract_aaak_ctx_body(msgs)
+        print("\n  --- verbose Section A (aaak_ctx) ---")
+        print(f"  [AAAK CTX] body ({len(body)} chars):\n{body[:4000]}{'...' if len(body) > 4000 else ''}\n")
+        for row in dbg:
+            if row["score"] == 0:
+                print(f"  MISS: {row['question'][:100]}...")
+                print(f"    key_facts : {row['key_facts']}")
+                orig = row["answer"]
+                norm = row.get("normalized_answer", orig)
+                print(f"    orig answer: {orig[:500]}{'...' if len(orig) > 500 else ''}")
+                print(f"    norm answer: {norm[:500]}{'...' if len(norm) > 500 else ''}")
+                print(f"    deterministic_ok: {row.get('deterministic_ok')!r}")
+                print(f"    judge_ok       : {row.get('judge_ok')!r}")
+                print(f"    judge payload:\n      {row['judge_user'][:800]}")
+                print(f"    judge verdict: {row['verdict_raw']!r}")
+        print("  --- end verbose ---\n")
     return r
 
 
@@ -1410,7 +1576,7 @@ async def run_tool_mode(name: str, lossless: bool, prepare_fn) -> ModeResult:
     r.elapsed_s = time.perf_counter() - t0
     r.compressed_size = messages_tokens(msgs)
     r.compression_tokens = comp_tok
-    r.recall_scores, r.recall_tokens = await run_recall(msgs, TOOL_RECALL_QUESTIONS)
+    r.recall_scores, r.recall_tokens, _ = await run_recall(msgs, TOOL_RECALL_QUESTIONS)
     return r
 
 
@@ -1422,7 +1588,7 @@ async def run_hard_tool_mode(name: str, lossless: bool, prepare_fn) -> ModeResul
     r.elapsed_s = time.perf_counter() - t0
     r.compressed_size = messages_tokens(msgs)
     r.compression_tokens = comp_tok
-    r.recall_scores, r.recall_tokens = await run_recall(msgs, HARD_TOOL_RECALL_QUESTIONS)
+    r.recall_scores, r.recall_tokens, _ = await run_recall(msgs, HARD_TOOL_RECALL_QUESTIONS)
     return r
 
 
@@ -1434,7 +1600,7 @@ async def run_edge_tool_mode(name: str, lossless: bool, prepare_fn) -> ModeResul
     r.elapsed_s = time.perf_counter() - t0
     r.compressed_size = messages_tokens(msgs)
     r.compression_tokens = comp_tok
-    r.recall_scores, r.recall_tokens = await run_recall(msgs, EDGE_TOOL_RECALL_QUESTIONS)
+    r.recall_scores, r.recall_tokens, _ = await run_recall(msgs, EDGE_TOOL_RECALL_QUESTIONS)
     return r
 
 
@@ -1451,8 +1617,95 @@ async def run_pipeline_mode(
     r.elapsed_s = time.perf_counter() - t0
     r.compressed_size = messages_tokens(msgs)
     r.compression_tokens = comp_tok
-    r.recall_scores, r.recall_tokens = await run_recall(msgs, PIPELINE_RECALL_QUESTIONS)
+    r.recall_scores, r.recall_tokens, _ = await run_recall(msgs, PIPELINE_RECALL_QUESTIONS)
     return r
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-trial aggregation
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class BenchmarkSnapshot:
+    ctx_results: list[ModeResult]
+    tool_results: list[ModeResult]
+    hard_tool_results: list[ModeResult]
+    edge_tool_results: list[ModeResult]
+    pipeline_results: list[ModeResult]
+
+
+def _print_aggregate_section(
+    title: str,
+    trials: list[BenchmarkSnapshot],
+    get_modes: Callable[[BenchmarkSnapshot], list[ModeResult]],
+    questions: list[RecallQuestion],
+) -> None:
+    n = len(trials)
+    if n < 2:
+        return
+    template = get_modes(trials[0])
+    if not template:
+        return
+    mode_names = [r.mode for r in template]
+    print(f"\n{'═' * 128}")
+    print(f"  AGGREGATE ({n} trials): {title}")
+    print(f"{'═' * 128}\n")
+    hdr = f"  {'Mode':<14}  {'mean%':>7}  {'min%':>7}  {'max%':>7}  " + " ".join(f"Q{i + 1:>3}%" for i in range(len(questions)))
+    print(hdr)
+    print(f"  {'':─<14}  {'':─<7}  {'':─<7}  {'':─<7}  " + " ".join("────" for _ in questions))
+    for mode in mode_names:
+        recalls: list[float] = []
+        per_q_passes = [0] * len(questions)
+        for snap in trials:
+            mr = next(r for r in get_modes(snap) if r.mode == mode)
+            recalls.append(mr.recall_pct)
+            for qi, sc in enumerate(mr.recall_scores):
+                per_q_passes[qi] += sc
+        mean_r = sum(recalls) / n
+        min_r = min(recalls)
+        max_r = max(recalls)
+        q_cells = " ".join(f"{100.0 * per_q_passes[qi] / n:>4.0f}" for qi in range(len(questions)))
+        print(f"  {mode:<14}  {mean_r:>6.1f}%  {min_r:>6.1f}%  {max_r:>6.1f}%  {q_cells}")
+
+
+def print_aggregate_report(trials: list[BenchmarkSnapshot]) -> None:
+    if len(trials) < 2:
+        return
+    print("\n" + "═" * 128)
+    print(f"  AGGREGATED RECALL OVER {len(trials)} TRIALS (per-question cells = % of trials passed)")
+    print("═" * 128)
+    _print_aggregate_section(
+        "SECTION A — CONTEXT COMPRESSION",
+        trials,
+        lambda s: s.ctx_results,
+        CTX_RECALL_QUESTIONS,
+    )
+    _print_aggregate_section(
+        "SECTION B — TOOL-ROUND CONDENSING",
+        trials,
+        lambda s: s.tool_results,
+        TOOL_RECALL_QUESTIONS,
+    )
+    _print_aggregate_section(
+        "SECTION C — HARD TOOL-ROUND CONDENSING",
+        trials,
+        lambda s: s.hard_tool_results,
+        HARD_TOOL_RECALL_QUESTIONS,
+    )
+    _print_aggregate_section(
+        "SECTION D — EDGE TOOL ROUNDS",
+        trials,
+        lambda s: s.edge_tool_results,
+        EDGE_TOOL_RECALL_QUESTIONS,
+    )
+    _print_aggregate_section(
+        "SECTION E — PIPELINE",
+        trials,
+        lambda s: s.pipeline_results,
+        PIPELINE_RECALL_QUESTIONS,
+    )
+    print(f"\n{'═' * 128}\n")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1469,7 +1722,9 @@ def _bar(pct: float, width: int = 22, neg_char: str = "▓") -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-def _section_report(title: str, results: list[ModeResult], questions: list[dict[str, str]]) -> None:
+def _section_report(title: str, results: list[ModeResult], questions: list[RecallQuestion]) -> None:
+    if not results:
+        return
     SEP = "─" * 128
     raw = next((r for r in results if "raw" in r.mode), results[0])
 
@@ -1555,12 +1810,15 @@ def print_full_report(
         PIPELINE_RECALL_QUESTIONS,
     )
 
+    all_results = ctx_results + tool_results + hard_tool_results + edge_tool_results + pipeline_results
+    if not all_results:
+        return
+
     # Cross-section summary
     print(f"\n{'═' * 128}")
     print("  CROSS-SECTION COMPARISON\n")
     print(f"  {'Mode':<18}  {'Section':<8}  {'lossless':>9}  {'recall%':>8}  {'msg tok Δ':>10}  {'total API tok':>14}")
     print(f"  {'':─<18}  {'':─<8}  {'':─<9}  {'':─<8}  {'':─<10}  {'':─<14}")
-    all_results = ctx_results + tool_results + hard_tool_results + edge_tool_results + pipeline_results
     for r in all_results:
         ref = next((x for x in all_results if x.section == r.section and "raw" in x.mode), r)
         reduc = 100.0 * (ref.compressed_size - r.compressed_size) / ref.compressed_size if ref.compressed_size else 0
@@ -1576,29 +1834,55 @@ def print_full_report(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def main() -> None:
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("ERROR: OPENAI_API_KEY not set.")
-        return
+async def _run_section_b_parallel(tool_modes: list) -> list[ModeResult]:
+    """Run all Section B modes concurrently (pure-Python prep, no monkeypatching)."""
+    return list(await asyncio.gather(*[
+        run_tool_mode(name, lossless, fn)
+        for name, lossless, fn in tool_modes
+    ]))
 
-    keep_recent = 2
-    print("AAAK Live Benchmark")
-    print(f"Model: {MODEL}  |  keep_recent={keep_recent}")
-    print(f"Context: {len(CTX_CONVERSATION)} turns, {len(CTX_RECALL_QUESTIONS)} recall questions")
-    print(f"Tool rounds (B): {len(TOOL_ROUNDS)} rounds, {len(TOOL_RECALL_QUESTIONS)} recall questions")
-    print(
-        f"Hard tool rounds (C): {len(HARD_TOOL_ROUNDS)} rounds, "
-        f"{len(HARD_TOOL_RECALL_QUESTIONS)} recall questions"
-    )
-    print(
-        f"Edge tool rounds (D): {len(EDGE_TOOL_ROUNDS)} rounds, "
-        f"{len(EDGE_TOOL_RECALL_QUESTIONS)} recall questions"
-    )
-    pipeline_conv = _build_pipeline_conversation()
-    print(
-        f"Pipeline (E): {len(pipeline_conv)} turns, {len(PIPELINE_RECALL_QUESTIONS)} recall questions\n"
-    )
 
+async def _run_section_c_parallel(hard_tool_modes: list) -> list[ModeResult]:
+    """Run all Section C modes concurrently (pure-Python prep, no monkeypatching)."""
+    return list(await asyncio.gather(*[
+        run_hard_tool_mode(name, lossless, fn)
+        for name, lossless, fn in hard_tool_modes
+    ]))
+
+
+async def _run_section_d_parallel(edge_tool_modes: list) -> list[ModeResult]:
+    """Run all Section D modes concurrently (pure-Python prep, no monkeypatching)."""
+    return list(await asyncio.gather(*[
+        run_edge_tool_mode(name, lossless, fn)
+        for name, lossless, fn in edge_tool_modes
+    ]))
+
+
+async def _run_section_e_sequential(
+    pipeline_modes: list,
+    pipeline_conv: list[dict[str, Any]],
+    keep_recent: int,
+) -> list[ModeResult]:
+    """Run Section E modes sequentially — pipe_aaak monkeypatches a global."""
+    results = []
+    for name, lossless, fn in pipeline_modes:
+        results.append(await run_pipeline_mode(name, lossless, fn, pipeline_conv, keep_recent))
+    return results
+
+
+def _print_section_results(header: str, results: list[ModeResult]) -> None:
+    """Print section progress lines in the canonical mode order after parallel gather."""
+    print(header)
+    for r in results:
+        print(f"    [{r.mode}]... recall={r.recall_pct:.0f}%  API={r.total_api_tokens} tok  ({r.elapsed_s:.1f}s)")
+
+
+async def run_full_benchmark_once(
+    keep_recent: int,
+    pipeline_conv: list[dict[str, Any]],
+    *,
+    only_section: str | None = None,
+) -> BenchmarkSnapshot:
     ctx_modes = [
         ("raw", False, prepare_ctx_raw),
         ("prose", False, prepare_ctx_prose),
@@ -1609,63 +1893,201 @@ async def main() -> None:
         ("plain", False, prepare_tool_plain),
         ("aaak_tools", True, prepare_tool_aaak),
     ]
-
-    print("  SECTION A: context compression")
-    ctx_results: list[ModeResult] = []
-    for name, lossless, fn in ctx_modes:
-        print(f"    [{name}]...", end=" ", flush=True)
-        r = await run_ctx_mode(name, lossless, fn, CTX_CONVERSATION, keep_recent)
-        ctx_results.append(r)
-        print(f"recall={r.recall_pct:.0f}%  API={r.total_api_tokens} tok  ({r.elapsed_s:.1f}s)")
-
-    print("\n  SECTION B: tool-round condensing")
-    tool_results: list[ModeResult] = []
-    for name, lossless, fn in tool_modes:
-        print(f"    [{name}]...", end=" ", flush=True)
-        r = await run_tool_mode(name, lossless, fn)
-        tool_results.append(r)
-        print(f"recall={r.recall_pct:.0f}%  API={r.total_api_tokens} tok  ({r.elapsed_s:.1f}s)")
-
     hard_tool_modes = [
         ("hard_raw", False, prepare_hard_tool_raw),
         ("hard_plain", False, prepare_hard_tool_plain),
         ("hard_aaak", True, prepare_hard_tool_aaak),
     ]
-    print("\n  SECTION C: hard tool-round condensing")
-    hard_tool_results: list[ModeResult] = []
-    for name, lossless, fn in hard_tool_modes:
-        print(f"    [{name}]...", end=" ", flush=True)
-        r = await run_hard_tool_mode(name, lossless, fn)
-        hard_tool_results.append(r)
-        print(f"recall={r.recall_pct:.0f}%  API={r.total_api_tokens} tok  ({r.elapsed_s:.1f}s)")
-
     edge_tool_modes = [
         ("edge_raw", False, prepare_edge_raw),
         ("edge_plain", False, prepare_edge_plain),
         ("edge_aaak", True, prepare_edge_aaak),
     ]
-    print("\n  SECTION D: edge tool-round condensing")
-    edge_tool_results: list[ModeResult] = []
-    for name, lossless, fn in edge_tool_modes:
-        print(f"    [{name}]...", end=" ", flush=True)
-        r = await run_edge_tool_mode(name, lossless, fn)
-        edge_tool_results.append(r)
-        print(f"recall={r.recall_pct:.0f}%  API={r.total_api_tokens} tok  ({r.elapsed_s:.1f}s)")
-
     pipeline_modes = [
         ("pipe_raw", False, prepare_ctx_raw),
         ("pipe_aaak", True, prepare_ctx_aaak),
     ]
-    print("\n  SECTION E: pipeline (compress history with embedded [AT])")
-    pipeline_results: list[ModeResult] = []
-    for name, lossless, fn in pipeline_modes:
-        print(f"    [{name}]...", end=" ", flush=True)
-        r = await run_pipeline_mode(name, lossless, fn, pipeline_conv, keep_recent)
-        pipeline_results.append(r)
-        print(f"recall={r.recall_pct:.0f}%  API={r.total_api_tokens} tok  ({r.elapsed_s:.1f}s)")
 
-    print_full_report(ctx_results, tool_results, hard_tool_results, edge_tool_results, pipeline_results)
+    ctx_results: list[ModeResult] = []
+    tool_results: list[ModeResult] = []
+    hard_tool_results: list[ModeResult] = []
+    edge_tool_results: list[ModeResult] = []
+    pipeline_results: list[ModeResult] = []
+
+    # Section A modes monkeypatch global provider state — must run sequentially.
+    if only_section in (None, "a"):
+        print("  SECTION A: context compression")
+        for name, lossless, fn in ctx_modes:
+            print(f"    [{name}]...", end=" ", flush=True)
+            r = await run_ctx_mode(name, lossless, fn, CTX_CONVERSATION, keep_recent)
+            ctx_results.append(r)
+            print(f"recall={r.recall_pct:.0f}%  API={r.total_api_tokens} tok  ({r.elapsed_s:.1f}s)")
+
+    # Sections B-E are independent of A (A is already done) and of each other.
+    # B/C/D run all their modes in parallel; E runs modes sequentially (pipe_aaak monkeypatches).
+    parallel_sections: list[tuple[str, str, Any]] = []
+    if only_section in (None, "b"):
+        parallel_sections.append(("b", "\n  SECTION B: tool-round condensing", _run_section_b_parallel(tool_modes)))
+    if only_section in (None, "c"):
+        parallel_sections.append(("c", "\n  SECTION C: hard tool-round condensing", _run_section_c_parallel(hard_tool_modes)))
+    if only_section in (None, "d"):
+        parallel_sections.append(("d", "\n  SECTION D: edge tool-round condensing", _run_section_d_parallel(edge_tool_modes)))
+    if only_section in (None, "e"):
+        parallel_sections.append(("e", "\n  SECTION E: pipeline (compress history with embedded [AT])", _run_section_e_sequential(pipeline_modes, pipeline_conv, keep_recent)))
+
+    if parallel_sections:
+        if len(parallel_sections) > 1:
+            labels = ", ".join(sec.upper() for sec, _, _ in parallel_sections)
+            print(f"\n  Running sections {labels} in parallel...")
+        gathered = await asyncio.gather(*[coro for _, _, coro in parallel_sections])
+        for (sec, header, _), results in zip(parallel_sections, gathered):
+            _print_section_results(header, results)
+            if sec == "b":
+                tool_results = results
+            elif sec == "c":
+                hard_tool_results = results
+            elif sec == "d":
+                edge_tool_results = results
+            elif sec == "e":
+                pipeline_results = results
+
+    return BenchmarkSnapshot(
+        ctx_results=ctx_results,
+        tool_results=tool_results,
+        hard_tool_results=hard_tool_results,
+        edge_tool_results=edge_tool_results,
+        pipeline_results=pipeline_results,
+    )
+
+
+async def main_async(args: argparse.Namespace) -> None:
+    global _benchmark_completion_extra, _benchmark_verbose_section_a, _benchmark_semaphore
+
+    if not os.environ.get("OPENAI_API_KEY"):
+        print("ERROR: OPENAI_API_KEY not set.")
+        return
+
+    if args.no_deterministic_sampling:
+        _benchmark_completion_extra = {}
+    else:
+        _benchmark_completion_extra = {"temperature": 0, "top_p": 1}
+
+    _benchmark_verbose_section_a = bool(args.verbose_section_a)
+    _benchmark_semaphore = asyncio.Semaphore(max(1, int(args.concurrency)))
+
+    keep_recent = 2
+    trials_n = max(1, int(args.trials))
+    only_section = None
+    for sec in ("a", "b", "c", "d", "e"):
+        if getattr(args, f"only_section_{sec}", False):
+            only_section = sec
+            break
+
+    print("AAAK Live Benchmark")
+    print(f"Model: {MODEL}  |  keep_recent={keep_recent}  |  trials={trials_n}  |  concurrency={args.concurrency}")
+    if _benchmark_completion_extra:
+        print(f"  completion_extra={_benchmark_completion_extra}")
+    else:
+        print("  completion_extra={} (no deterministic sampling kwargs)")
+    pipeline_conv = _build_pipeline_conversation()
+    if only_section is None:
+        print(f"Context: {len(CTX_CONVERSATION)} turns, {len(CTX_RECALL_QUESTIONS)} recall questions")
+        print(f"Tool rounds (B): {len(TOOL_ROUNDS)} rounds, {len(TOOL_RECALL_QUESTIONS)} recall questions")
+        print(
+            f"Hard tool rounds (C): {len(HARD_TOOL_ROUNDS)} rounds, "
+            f"{len(HARD_TOOL_RECALL_QUESTIONS)} recall questions"
+        )
+        print(
+            f"Edge tool rounds (D): {len(EDGE_TOOL_ROUNDS)} rounds, "
+            f"{len(EDGE_TOOL_RECALL_QUESTIONS)} recall questions"
+        )
+        print(
+            f"Pipeline (E): {len(pipeline_conv)} turns, {len(PIPELINE_RECALL_QUESTIONS)} recall questions\n"
+        )
+    else:
+        section_labels = {
+            "a": f"Section A only: {len(CTX_CONVERSATION)} turns, {len(CTX_RECALL_QUESTIONS)} recall questions",
+            "b": f"Section B only: {len(TOOL_ROUNDS)} rounds, {len(TOOL_RECALL_QUESTIONS)} recall questions",
+            "c": f"Section C only: {len(HARD_TOOL_ROUNDS)} rounds, {len(HARD_TOOL_RECALL_QUESTIONS)} recall questions",
+            "d": f"Section D only: {len(EDGE_TOOL_ROUNDS)} rounds, {len(EDGE_TOOL_RECALL_QUESTIONS)} recall questions",
+            "e": f"Section E only: {len(pipeline_conv)} turns, {len(PIPELINE_RECALL_QUESTIONS)} recall questions",
+        }
+        print(section_labels[only_section] + "\n")
+
+    trial_snapshots: list[BenchmarkSnapshot] = []
+    for t in range(trials_n):
+        if trials_n > 1:
+            print(f"\n{'─' * 64}  TRIAL {t + 1}/{trials_n}  {'─' * 64}")
+        snap = await run_full_benchmark_once(
+            keep_recent,
+            pipeline_conv,
+            only_section=only_section,
+        )
+        trial_snapshots.append(snap)
+
+    print_full_report(
+        trial_snapshots[-1].ctx_results,
+        trial_snapshots[-1].tool_results,
+        trial_snapshots[-1].hard_tool_results,
+        trial_snapshots[-1].edge_tool_results,
+        trial_snapshots[-1].pipeline_results,
+    )
+    print_aggregate_report(trial_snapshots)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="AAAK live benchmark (real API calls).")
+    parser.add_argument(
+        "--trials",
+        type=int,
+        default=1,
+        help="Number of full benchmark runs; >1 prints aggregated mean/min/max and per-question pass rates.",
+    )
+    only_section_group = parser.add_mutually_exclusive_group()
+    only_section_group.add_argument(
+        "--only-section-a",
+        action="store_true",
+        help="Run only Section A (context compression).",
+    )
+    only_section_group.add_argument(
+        "--only-section-b",
+        action="store_true",
+        help="Run only Section B (tool-round condensing).",
+    )
+    only_section_group.add_argument(
+        "--only-section-c",
+        action="store_true",
+        help="Run only Section C (hard tool-round condensing).",
+    )
+    only_section_group.add_argument(
+        "--only-section-d",
+        action="store_true",
+        help="Run only Section D (edge tool rounds).",
+    )
+    only_section_group.add_argument(
+        "--only-section-e",
+        action="store_true",
+        help="Run only Section E (pipeline).",
+    )
+    parser.add_argument(
+        "--verbose-section-a",
+        action="store_true",
+        help="Print [AAAK CTX] body and failed recall rows for aaak_ctx (Section A).",
+    )
+    parser.add_argument(
+        "--no-deterministic-sampling",
+        action="store_true",
+        help="Omit temperature/top_p kwargs on API completions (use if the model errors on them).",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=10,
+        help="Max simultaneous in-flight API calls across all sections/modes/recall questions (default: 10).",
+    )
+    args = parser.parse_args()
+    asyncio.run(main_async(args))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

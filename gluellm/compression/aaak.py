@@ -60,6 +60,8 @@ _COMPRESS_USER_PREFIX = (
     "Output: rate=10r/m@gateway\n\n"
     "Input: cookie should be HttpOnly,Secure,SameSite=Strict\n"
     "Output: cookie=HttpOnly,Secure,SameSite=Strict\n\n"
+    "Input: logout: DELETE /auth/session, SHA-256 hash token, UPDATE revoked_at, 204, clear cookie\n"
+    "Output: logout:1→DELETE /auth/session;2→SHA256 hash;3→UPDATE revoked_at;4→204;5→clear cookie\n\n"
     "NEVER summarize or drop these. Output ONLY AAAK lines.\n"
 )
 
@@ -201,6 +203,38 @@ def _format_multiline_preserved(s: str) -> str:
     return "\n" + body
 
 
+def _csv_stats_comment(col_names: list[str], data_rows: list[str]) -> str:
+    """Return a '# peak: col=val(labels)' comment for each numeric column.
+
+    For each column that is entirely numeric, records the max value and the
+    corresponding label-column values from that row. This lets a model recall
+    cross-row aggregate facts (e.g. peak error_pct) without scanning all rows.
+    """
+    rows = [r.split(",") for r in data_rows if r.strip()]
+    if not rows:
+        return ""
+    n = len(col_names)
+    rows = [r for r in rows if len(r) == n]
+    numeric_cols: list[int] = []
+    for ci in range(n):
+        try:
+            [float(r[ci]) for r in rows]
+            numeric_cols.append(ci)
+        except ValueError:
+            pass
+    label_cols = [ci for ci in range(n) if ci not in numeric_cols]
+    if not numeric_cols:
+        return ""
+    parts: list[str] = []
+    for ci in numeric_cols:
+        vals = [float(r[ci]) for r in rows]
+        peak_val = max(vals)
+        peak_row = next(rows[i] for i, v in enumerate(vals) if v == peak_val)
+        labels = ",".join(peak_row[lc] for lc in label_cols)
+        parts.append(f"{col_names[ci]}={peak_val:g}({labels})")
+    return "# peak: " + " ".join(parts)
+
+
 def _format_tool_result(raw: str, *, max_len: int = 2000) -> str:
     """Format tool result for AAAK: flatten JSON to readable lines; preserve CSV / prose newlines."""
     s = str(raw).strip()
@@ -227,9 +261,11 @@ def _format_tool_result(raw: str, *, max_len: int = 2000) -> str:
                 if ln.strip() and ln.strip().count(",") == comma_count
             ]
             if len(data_rows) >= 2:
-                if len(s) > max_len:
-                    return s[: max_len - 3] + "..."
-                return s
+                stats = _csv_stats_comment(header.split(","), data_rows)
+                annotated = s + ("\n" + stats if stats else "")
+                if len(annotated) > max_len:
+                    return annotated[: max_len - 3] + "..."
+                return annotated
 
         preserved = _format_multiline_preserved(s)
         if len(preserved) > max_len:
@@ -329,6 +365,7 @@ class AAAKCompressor:
         *,
         model: str,
         api_key: str | None = None,
+        completion_extra: dict[str, Any] | None = None,
     ) -> str:
         """Ask an LLM to rewrite ``old_messages`` as AAAK (single extra completion).
 
@@ -368,7 +405,10 @@ class AAAKCompressor:
             {"role": "user", "content": _COMPRESS_USER_PREFIX + transcript},
         ]
         provider, model_id = _provider_cache.get_provider(model, api_key=api_key)
-        response = await provider.acompletion(model=model_id, messages=compress_messages_api)
+        extra = completion_extra or {}
+        response = await provider.acompletion(
+            model=model_id, messages=compress_messages_api, **extra
+        )
         encoded = (response.choices[0].message.content or "").strip()
         if not encoded:
             logger.warning("AAAK compression returned empty content; caller should fall back.")

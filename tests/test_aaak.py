@@ -5,6 +5,8 @@ import pytest
 from gluellm.compression.aaak import (
     AAAKCompressor,
     AAAK_PREAMBLE_MARKER,
+    _csv_stats_comment,
+    _format_tool_result,
     transcript_from_messages,
 )
 
@@ -107,6 +109,41 @@ def test_aaak_encode_tool_round_escapes_pipes_and_newlines_in_result() -> None:
     assert "\\|" in out or "a\\|b" in out
     # Multiline preserved: real newline between escaped pipe line and "c"
     assert "\n  c" in out
+
+
+def test_csv_stats_comment_finds_peak_per_numeric_column() -> None:
+    """_csv_stats_comment returns peak value and label for each numeric column."""
+    col_names = ["timestamp", "service", "rps", "error_pct", "latency_p50", "latency_p99"]
+    data_rows = [
+        "2025-04-01T10:00:00Z,auth,1200,0.2,11,85",
+        "2025-04-01T10:00:00Z,gateway,3400,0.8,4,38",
+        "2025-04-01T10:00:00Z,billing,890,1.2,22,195",
+        "2025-04-01T11:00:00Z,auth,1180,0.3,12,88",
+        "2025-04-01T11:00:00Z,gateway,3600,1.8,5,42",
+        "2025-04-01T11:00:00Z,billing,920,0.9,24,205",
+    ]
+    result = _csv_stats_comment(col_names, data_rows)
+    assert result.startswith("# peak:")
+    assert "error_pct=1.8" in result
+    assert "gateway" in result
+    assert "2025-04-01T11:00:00Z" in result
+
+
+def test_format_tool_result_appends_peak_annotation_to_csv() -> None:
+    """_format_tool_result appends a '# peak:' summary line to CSV tool results."""
+    csv = (
+        "timestamp,service,rps,error_pct,latency_p50,latency_p99\n"
+        "2025-04-01T10:00:00Z,auth,1200,0.2,11,85\n"
+        "2025-04-01T10:00:00Z,gateway,3400,0.8,4,38\n"
+        "2025-04-01T10:00:00Z,billing,890,1.2,22,195\n"
+        "2025-04-01T11:00:00Z,auth,1180,0.3,12,88\n"
+        "2025-04-01T11:00:00Z,gateway,3600,1.8,5,42\n"
+        "2025-04-01T11:00:00Z,billing,920,0.9,24,205\n"
+    )
+    result = _format_tool_result(csv)
+    assert "# peak:" in result
+    assert "error_pct=1.8" in result
+    assert "gateway" in result
 
 
 def test_ensure_preamble_in_system_appends_once() -> None:
