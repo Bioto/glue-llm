@@ -72,6 +72,7 @@ from any_llm import AnyLLM
 from any_llm.types.completion import ChatCompletion
 from pydantic import BaseModel, Field, ValidationError, field_validator, field_serializer
 from pydantic.functional_validators import SkipValidation
+from gluellm.compression.aaak import AAAKCompressor
 from gluellm.config import settings
 from gluellm.config import ToolExecutionOrder
 from gluellm.tool_router import (
@@ -960,7 +961,11 @@ def _serialize_chat_completion_to_dict(completion: Any) -> dict[str, Any]:
         if usage
         else None,
     }
-def _condense_tool_round(messages: list[dict[str, Any]]) -> None:
+def _condense_tool_round(
+    messages: list[dict[str, Any]],
+    *,
+    aaak_tool_condensing: bool = False,
+) -> None:
     """Replace the last tool-call round in messages with a single condensed summary.
 
     Finds the trailing sequence of ``role: "tool"`` messages preceded by a
@@ -1008,17 +1013,26 @@ def _condense_tool_round(messages: list[dict[str, Any]]) -> None:
         name = fn.get("name", "unknown") if isinstance(fn, dict) else getattr(fn, "name", "unknown")
         id_to_name[tc_id] = name
 
-    lines = ["[Tool Results]"]
-    for tool_msg in (messages[i] for i in tool_response_indices):
-        tc_id = tool_msg.get("tool_call_id", "")
-        name = id_to_name.get(tc_id, tc_id)
-        result = tool_msg.get("content", "")
-        lines.append(f"- {name}() -> {result}")
-
-    condensed_content = "\n".join(lines)
+    tool_msgs_ordered = [messages[i] for i in tool_response_indices]
+    if aaak_tool_condensing:
+        condensed_content = AAAKCompressor.encode_tool_round(
+            list(tool_calls),
+            tool_msgs_ordered,
+            id_to_name,
+        )
+    else:
+        lines = ["[Tool Results]"]
+        for tool_msg in tool_msgs_ordered:
+            tc_id = tool_msg.get("tool_call_id", "")
+            name = id_to_name.get(tc_id, tc_id)
+            result = tool_msg.get("content", "")
+            lines.append(f"- {name} -> {result}")
+        condensed_content = "\n".join(lines)
 
     # Replace the N+1 messages with a single condensed user message (ends on user so LLM continues)
     del messages[assistant_idx:]
+    if aaak_tool_condensing and messages and messages[0].get("role") == "system":
+        AAAKCompressor.ensure_preamble_in_system(messages[0])
     messages.append({"role": "user", "content": condensed_content})
 
 
@@ -1039,12 +1053,16 @@ async def _summarize_old_messages(
     messages: list[dict[str, Any]],
     keep_recent: int,
     model: str,
+    *,
+    use_aaak: bool = False,
+    aaak_model: str | None = None,
 ) -> list[dict[str, Any]]:
     """Compress older conversation messages into a single summary message.
 
     Preserves the system prompt (index 0) and the most recent ``keep_recent``
     messages verbatim. Everything in between is sent to the LLM for summarization
-    and replaced with one ``role: "user"`` summary message.
+    (prose) or AAAK lossless encoding when ``use_aaak`` is True, and replaced
+    with one ``role: "user"`` summary message.
 
     Returns the original list unchanged when there is nothing old enough to
     summarize (i.e. the non-system messages number ``keep_recent`` or fewer).
@@ -1052,7 +1070,9 @@ async def _summarize_old_messages(
     Args:
         messages: Full message list including the system prompt at index 0.
         keep_recent: Number of trailing messages to keep verbatim.
-        model: Model identifier used for the summarization call.
+        model: Model identifier used for the summarization / compression call.
+        use_aaak: If True, compress via AAAK instead of prose summarization.
+        aaak_model: Model for AAAK encoding (defaults to ``model`` when None).
 
     Returns:
         A shortened message list: [system] + [summary] + recent_messages,
@@ -1084,24 +1104,39 @@ async def _summarize_old_messages(
 
     transcript = "\n".join(transcript_lines)
 
-    summarize_messages = [
-        {"role": "system", "content": _SUMMARIZE_SYSTEM_PROMPT},
-        {"role": "user", "content": _SUMMARIZE_USER_PREFIX + transcript},
-    ]
+    compression_model = aaak_model or model
 
     try:
-        provider_cache = _ProviderCache()
-        provider, model_id = provider_cache.get_provider(model, api_key=None)
-        response = await provider.acompletion(model=model_id, messages=summarize_messages)
-        summary_text = response.choices[0].message.content or ""
+        if use_aaak:
+            summary_text = await AAAKCompressor.compress_messages(
+                old_messages,
+                model=compression_model,
+                api_key=None,
+            )
+            if not summary_text:
+                logger.warning("AAAK compression empty; continuing with original messages.")
+                return messages
+            summary_msg = {
+                "role": "user",
+                "content": f"[AAAK CTX]\n{summary_text}\n[/AAAK CTX]",
+            }
+            AAAKCompressor.ensure_preamble_in_system(system_msg)
+        else:
+            summarize_messages = [
+                {"role": "system", "content": _SUMMARIZE_SYSTEM_PROMPT},
+                {"role": "user", "content": _SUMMARIZE_USER_PREFIX + transcript},
+            ]
+            provider_cache = _ProviderCache()
+            provider, model_id = provider_cache.get_provider(model, api_key=None)
+            response = await provider.acompletion(model=model_id, messages=summarize_messages)
+            summary_text = response.choices[0].message.content or ""
+            summary_msg = {
+                "role": "user",
+                "content": f"[Conversation Summary]\n{summary_text}",
+            }
     except Exception:
         logger.warning("Context summarization failed; continuing with original messages.", exc_info=True)
         return messages
-
-    summary_msg: dict[str, Any] = {
-        "role": "user",
-        "content": f"[Conversation Summary]\n{summary_text}",
-    }
 
     logger.debug(
         f"Context summarized: {len(old_messages)} old messages → 1 summary message "
@@ -1923,6 +1958,9 @@ class GlueLLM:
         summarize_context_threshold: int | None = None,
         summarize_context_model: str | None = None,
         summarize_context_keep_recent: int | None = None,
+        aaak_compression_enabled: bool | None = None,
+        aaak_compression_model: str | None = None,
+        aaak_tool_condensing: bool | None = None,
     ):
         """Initialize GlueLLM client.
 
@@ -1963,6 +2001,12 @@ class GlueLLM:
                 client's primary model. A cheaper/faster model is often sufficient here.
             summarize_context_keep_recent: Number of most-recent messages to always keep verbatim.
                 Defaults to settings.default_summarize_context_keep_recent (6).
+            aaak_compression_enabled: When True and summarize_context is on, use AAAK lossless
+                shorthand instead of prose summarization for old messages.
+            aaak_compression_model: Model for AAAK compression (defaults to summarize_context_model
+                or primary model).
+            aaak_tool_condensing: When True and condense_tool_messages is on, encode condensed
+                tool rounds in AAAK instead of plain ``[Tool Results]`` text.
         """
         self.model = model or settings.default_model
         self.embedding_model = embedding_model or settings.default_embedding_model
@@ -2008,6 +2052,17 @@ class GlueLLM:
             summarize_context_keep_recent
             if summarize_context_keep_recent is not None
             else settings.default_summarize_context_keep_recent
+        )
+        self.aaak_compression_enabled = (
+            aaak_compression_enabled
+            if aaak_compression_enabled is not None
+            else settings.aaak_compression_enabled
+        )
+        self.aaak_compression_model = aaak_compression_model
+        self.aaak_tool_condensing = (
+            aaak_tool_condensing
+            if aaak_tool_condensing is not None
+            else settings.aaak_tool_condensing
         )
 
     def _get_merged_hook_registry(self) -> HookRegistry:
@@ -2373,6 +2428,9 @@ class GlueLLM:
                                 messages,
                                 keep_recent=effective_summarize_context_keep_recent,
                                 model=effective_summarize_context_model,
+                                use_aaak=self.aaak_compression_enabled,
+                                aaak_model=self.aaak_compression_model
+                                or effective_summarize_context_model,
                             )
 
                         # PRE_ITERATION hook: content is the last user message in the conversation
@@ -2523,7 +2581,10 @@ class GlueLLM:
                             messages.append(r["message"])
 
                         if effective_condense:
-                            _condense_tool_round(messages)
+                            _condense_tool_round(
+                                messages,
+                                aaak_tool_condensing=self.aaak_tool_condensing,
+                            )
 
                         # Continue loop to get next response
                         continue
@@ -2995,6 +3056,9 @@ class GlueLLM:
                                     messages,
                                     keep_recent=effective_summarize_context_keep_recent,
                                     model=effective_summarize_context_model,
+                                    use_aaak=self.aaak_compression_enabled,
+                                    aaak_model=self.aaak_compression_model
+                                    or effective_summarize_context_model,
                                 )
 
                             if _sc_pre_iter_hooks:
@@ -3139,7 +3203,10 @@ class GlueLLM:
                                 messages.append(r["message"])
 
                             if effective_condense:
-                                _condense_tool_round(messages)
+                                _condense_tool_round(
+                                    messages,
+                                    aaak_tool_condensing=self.aaak_tool_condensing,
+                                )
                         # Continue to next iteration
                         else:
                             # LLM didn't call any tools - it has enough info, break out of tool loop
@@ -3873,6 +3940,9 @@ class GlueLLM:
                         messages,
                         keep_recent=effective_summarize_context_keep_recent,
                         model=effective_summarize_context_model,
+                        use_aaak=self.aaak_compression_enabled,
+                        aaak_model=self.aaak_compression_model
+                        or effective_summarize_context_model,
                     )
 
                 if _stream_pre_iter_hooks:
@@ -4160,7 +4230,10 @@ class GlueLLM:
                     messages.append(r["message"])
 
                 if effective_condense:
-                    _condense_tool_round(messages)
+                    _condense_tool_round(
+                        messages,
+                        aaak_tool_condensing=self.aaak_tool_condensing,
+                    )
 
                 # Continue loop to get next response (stream again)
                 continue

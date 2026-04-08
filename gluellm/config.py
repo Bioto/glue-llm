@@ -63,7 +63,7 @@ class GlueLLMSettings(BaseSettings):
     )
 
     # Default model settings
-    default_model: str = "openai:gpt-4o-mini"
+    default_model: str = "openai:gpt-5.4-nano"
     default_embedding_model: str = "openai/text-embedding-3-small"
     default_embedding_dimensions: int | None = None  # e.g., 512 for text-embedding-3-small
     default_system_prompt: str = "You are a helpful assistant."
@@ -75,7 +75,7 @@ class GlueLLMSettings(BaseSettings):
     max_tool_iterations: Annotated[int, Field(gt=0)] = 10
     default_tool_mode: Literal["standard", "dynamic"] = "standard"
     default_tool_execution_order: Literal["sequential", "parallel"] = "sequential"
-    tool_route_model: str = "openai:gpt-4o-mini"
+    tool_route_model: str = "openai:gpt-5.4-nano"
     default_condense_tool_messages: bool = False
 
     # Retry settings
@@ -85,8 +85,8 @@ class GlueLLMSettings(BaseSettings):
     retry_multiplier: Annotated[int, Field(ge=0)] = 1
 
     # Request timeout settings (in seconds)
-    default_request_timeout: Annotated[float, Field(gt=0)] = 60.0  # Default 60 seconds
-    max_request_timeout: Annotated[float, Field(gt=0)] = 300.0  # Maximum 5 minutes
+    default_request_timeout: Annotated[float, Field(gt=0)] = 300.0  # Default 5 minutes
+    max_request_timeout: Annotated[float, Field(gt=0)] = 1800.0  # Maximum 30 minutes
 
     # Connection timeout settings (in seconds)
     default_connect_timeout: Annotated[float, Field(gt=0)] = 10.0  # Default 10 seconds
@@ -125,6 +125,11 @@ class GlueLLMSettings(BaseSettings):
     default_summarize_context: bool = False
     default_summarize_context_threshold: Annotated[int, Field(gt=0)] = 20
     default_summarize_context_keep_recent: Annotated[int, Field(gt=0)] = 6
+
+    # AAAK lossless shorthand (used when summarization triggers; optional tool-round encoding)
+    aaak_compression_enabled: bool = False
+    aaak_compression_model: str | None = None  # None: use summarize_context_model / primary model
+    aaak_tool_condensing: bool = False
 
     # Cost tracking settings
     track_costs: bool = True  # Enable cost tracking and include in responses
