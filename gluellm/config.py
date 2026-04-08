@@ -127,9 +127,9 @@ class GlueLLMSettings(BaseSettings):
     default_summarize_context_keep_recent: Annotated[int, Field(gt=0)] = 6
 
     # AAAK lossless shorthand (used when summarization triggers; optional tool-round encoding)
-    aaak_compression_enabled: bool = False
+    aaak_compression_enabled: bool = True
     aaak_compression_model: str | None = None  # None: use summarize_context_model / primary model
-    aaak_tool_condensing: bool = False
+    aaak_tool_condensing: bool = True
 
     # Cost tracking settings
     track_costs: bool = True  # Enable cost tracking and include in responses
