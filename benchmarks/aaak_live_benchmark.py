@@ -74,7 +74,8 @@ RecallQuestion = dict[str, str | list[str]]
 
 _ENC = tiktoken.encoding_for_model("gpt-4o")
 
-MODEL = "groq:llama-3.1-8b-instant"
+MODEL = "groq:qwen/qwen3-32b"
+JUDGE_MODEL = "openai:gpt-4o-mini"
 
 # Benchmark-only: merged into provider.acompletion for judge, recall answers, prose summarize,
 # and AAAK compress. Overridable via --no-deterministic-sampling.
@@ -1470,7 +1471,7 @@ async def _eval_one_question(
     verdict, tok_j = await _call([
         {"role": "system", "content": JUDGE_SYSTEM},
         {"role": "user", "content": judge_user},
-    ])
+    ], model=JUDGE_MODEL)
     judge_ok = verdict.strip().startswith("1")
     ok = 1 if deterministic_ok or judge_ok else 0
     tok = TokenUsage(tok_a.prompt + tok_j.prompt, tok_a.completion + tok_j.completion)
@@ -1961,7 +1962,7 @@ async def run_full_benchmark_once(
 
 
 async def main_async(args: argparse.Namespace) -> None:
-    global _benchmark_completion_extra, _benchmark_verbose_section_a, _benchmark_semaphore
+    global _benchmark_completion_extra, _benchmark_verbose_section_a, _benchmark_semaphore, JUDGE_MODEL
 
     if not os.environ.get("OPENAI_API_KEY"):
         print("ERROR: OPENAI_API_KEY not set.")
@@ -1971,6 +1972,9 @@ async def main_async(args: argparse.Namespace) -> None:
         _benchmark_completion_extra = {}
     else:
         _benchmark_completion_extra = {"temperature": 0, "top_p": 1}
+
+    if args.judge_model:
+        JUDGE_MODEL = args.judge_model
 
     _benchmark_verbose_section_a = bool(args.verbose_section_a)
     _benchmark_semaphore = asyncio.Semaphore(max(1, int(args.concurrency)))
@@ -1984,7 +1988,7 @@ async def main_async(args: argparse.Namespace) -> None:
             break
 
     print("AAAK Live Benchmark")
-    print(f"Model: {MODEL}  |  keep_recent={keep_recent}  |  trials={trials_n}  |  concurrency={args.concurrency}")
+    print(f"Model: {MODEL}  |  Judge: {JUDGE_MODEL}  |  keep_recent={keep_recent}  |  trials={trials_n}  |  concurrency={args.concurrency}")
     if _benchmark_completion_extra:
         print(f"  completion_extra={_benchmark_completion_extra}")
     else:
@@ -2084,6 +2088,12 @@ def main() -> None:
         type=int,
         default=10,
         help="Max simultaneous in-flight API calls across all sections/modes/recall questions (default: 10).",
+    )
+    parser.add_argument(
+        "--judge-model",
+        type=str,
+        default=None,
+        help="Model for LLM judge (default: openai:gpt-4o-mini). Pass same value as MODEL to use one model for everything.",
     )
     args = parser.parse_args()
     asyncio.run(main_async(args))

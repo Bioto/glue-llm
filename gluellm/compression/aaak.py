@@ -126,7 +126,11 @@ def _format_scalar_for_flatten(v: Any) -> str:
     if isinstance(v, int):
         return str(v)
     if isinstance(v, float):
-        return json.dumps(v, ensure_ascii=False)
+        # Avoid scientific notation: json.dumps(0.0000312) → "3.12e-05"
+        s = f"{v:.15g}"
+        if "e" in s or "E" in s:
+            s = f"{v:.15f}".rstrip("0").rstrip(".")
+        return s
     if isinstance(v, str):
         s = v.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("|", "\\|")
         if not s or any(ch in s for ch in ' \t="\''):

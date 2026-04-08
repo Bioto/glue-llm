@@ -6,6 +6,7 @@ from gluellm.compression.aaak import (
     AAAKCompressor,
     AAAK_PREAMBLE_MARKER,
     _csv_stats_comment,
+    _format_scalar_for_flatten,
     _format_tool_result,
     transcript_from_messages,
 )
@@ -109,6 +110,20 @@ def test_aaak_encode_tool_round_escapes_pipes_and_newlines_in_result() -> None:
     assert "\\|" in out or "a\\|b" in out
     # Multiline preserved: real newline between escaped pipe line and "c"
     assert "\n  c" in out
+
+
+def test_format_scalar_for_flatten_avoids_scientific_notation() -> None:
+    """Small floats must render as decimal, not scientific notation."""
+    assert _format_scalar_for_flatten(0.0000312) == "0.0000312"
+    assert _format_scalar_for_flatten(0.00285) == "0.00285"
+    assert _format_scalar_for_flatten(23.7) == "23.7"
+    assert _format_scalar_for_flatten(1234567.89) == "1234567.89"
+    assert _format_scalar_for_flatten(1.0) == "1"
+    assert _format_scalar_for_flatten(0.0) == "0"
+    # No "e" or "E" in any output
+    for v in [0.0000312, 0.00285, 23.7, 1234567.89, 1e-10, 9.99e-7]:
+        result = _format_scalar_for_flatten(v)
+        assert "e" not in result and "E" not in result, f"Scientific notation in {result!r} for {v}"
 
 
 def test_csv_stats_comment_finds_peak_per_numeric_column() -> None:
