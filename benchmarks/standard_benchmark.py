@@ -1,32 +1,35 @@
-"""AAAK vs Raw — standard NLP dataset benchmark.
-=================================================
-Evaluates AAAK compression against a raw (no-compression) baseline on the
-publicly-available datasets used by LLMLingua, LLMLingua-2, and Cmprsr:
+"""AAAK vs Raw — benchmark for AAAK's intended use case.
+=========================================================
+Evaluates AAAK compression against a raw (no-compression) baseline on tasks
+that match AAAK's intended domain: structured, factual context passed between
+turns in an agent conversation (not prose document QA).
 
-  gsm8k          Math reasoning; compresses 8-shot CoT context from train set.
-                 Metric: exact match on final numeric answer (#### N).
+  gsm8k     Math reasoning; compresses 8-shot CoT context from train set.
+            Context is formatted as fake user/assistant conversation turns,
+            matching how AAAK would encounter few-shot examples in a real
+            agent session.  Metric: exact match on final numeric answer (#### N).
 
-  narrativeqa    Long-document single-hop QA (deepmind/narrativeqa).
-  hotpotqa       Multi-hop multi-document QA (hotpotqa/hotpot_qa).
-  squad          Standard reading comprehension (rajpurkar/squad).
-                 Metric for all QA tasks: max F1 over gold answers.
+  databench Real-world table QA (cardiffnlp/databench).
+            Each table is serialised as a JSON array-of-objects (20-row sample),
+            mirroring the format AAAK encounters from database query tool results.
+            Every sample has a unique table — tests per-sample compression.
+            Answer types: boolean, number, category, list[category/number].
+            Metric: type-aware answer match.
 
-For every task two modes are measured:
-  raw     Full context, no compression (baseline).
-  aaak    Context replaced by an AAAK-compressed block.
-
-Documents are truncated to MAX_DOC_TOKENS (2 000 by default) before
-compression — matching the "2 000-token constraint" used in LLMLingua-2 §4.
+AAAK is designed for agent conversation history — tool call results, config
+key=value pairs, JSON API responses, schemas, and structured factual text.
+It is NOT a document compressor; prose narrative tasks (NarrativeQA, SQuAD,
+QuALITY) are excluded because they fall outside the intended domain.
 
 Requires:
-  pip install datasets          (HuggingFace datasets library)
+  pip install datasets pandas    (HuggingFace datasets + pandas for parquet loading)
   OPENAI_API_KEY (or equivalent provider key) in environment.
 
 Run:
   set -a && source ../.env && set +a
   uv run python benchmarks/standard_benchmark.py
   uv run python benchmarks/standard_benchmark.py --tasks gsm8k --samples 20
-  uv run python benchmarks/standard_benchmark.py --tasks narrativeqa hotpotqa
+  uv run python benchmarks/standard_benchmark.py --tasks databench --samples 20
   uv run python benchmarks/standard_benchmark.py --concurrency 5
 """
 
@@ -38,19 +41,17 @@ import json
 import re
 import string
 import time
-from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
 import tiktoken
 
-from gluellm.compression.aaak import AAAK_PREAMBLE_MARKER, AAAKCompressor
+from gluellm.compression.aaak import AAAKCompressor
 
 _ENC = tiktoken.encoding_for_model("gpt-4o")
 
 # ── tunables ──────────────────────────────────────────────────────────────────
 MODEL = "openai:gpt-5.4-2026-03-05"
-MAX_DOC_TOKENS = 2_000   # document budget, matches LLMLingua-2 §4 constraint
 GSM8K_FEW_SHOT_N = 8    # CoT examples from train used as compressible context
 # AAAK has a fixed overhead (preamble + markers + compression call) that only pays
 # off when the context is long enough.  Below this threshold the context is passed
@@ -60,7 +61,10 @@ AAAK_MIN_CONTEXT_TOKENS = 400
 _benchmark_completion_extra: dict[str, Any] = {"temperature": 0, "top_p": 1}
 _benchmark_semaphore: asyncio.Semaphore | None = None
 
-AVAILABLE_TASKS = ["gsm8k", "narrativeqa", "hotpotqa", "squad"]
+AVAILABLE_TASKS = [
+    "gsm8k",
+    "databench",
+]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,13 +76,6 @@ def count_tokens(text: str) -> int:
     return len(_ENC.encode(text))
 
 
-def truncate_to_tokens(text: str, max_tokens: int) -> str:
-    tokens = _ENC.encode(text)
-    if len(tokens) <= max_tokens:
-        return text
-    return _ENC.decode(tokens[:max_tokens])
-
-
 def messages_tokens(messages: list[dict[str, Any]]) -> int:
     return sum(count_tokens(str(m.get("content") or "")) for m in messages)
 
@@ -86,32 +83,6 @@ def messages_tokens(messages: list[dict[str, Any]]) -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 # Evaluation metrics
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-def _normalize_text(text: str) -> str:
-    """Lowercase, strip punctuation and articles — standard QA normalization."""
-    text = text.lower()
-    text = text.translate(str.maketrans("", "", string.punctuation))
-    text = re.sub(r"\b(a|an|the)\b", " ", text)
-    return " ".join(text.split())
-
-
-def compute_f1(prediction: str, gold: str) -> float:
-    pred_toks = _normalize_text(prediction).split()
-    gold_toks = _normalize_text(gold).split()
-    if not pred_toks or not gold_toks:
-        return float(pred_toks == gold_toks)
-    common = Counter(pred_toks) & Counter(gold_toks)
-    num_same = sum(common.values())
-    if num_same == 0:
-        return 0.0
-    precision = num_same / len(pred_toks)
-    recall = num_same / len(gold_toks)
-    return 2 * precision * recall / (precision + recall)
-
-
-def max_f1(prediction: str, answers: list[str]) -> float:
-    return max((compute_f1(prediction, a) for a in answers), default=0.0)
 
 
 def _extract_gsm8k_number(text: str) -> str | None:
@@ -132,6 +103,62 @@ def score_gsm8k(prediction: str, gold_answer: str) -> float:
         return float(abs(float(pred) - float(gold)) < 1e-6)
     except ValueError:
         return float(pred == gold)
+
+
+def _normalize_text(text: str) -> str:
+    """Lowercase, strip punctuation and articles — standard QA normalization."""
+    text = text.lower()
+    text = text.translate(str.maketrans("", "", string.punctuation))
+    text = re.sub(r"\b(a|an|the)\b", " ", text)
+    return " ".join(text.split())
+
+
+def score_databench(prediction: str, answer: str, answer_type: str) -> float:
+    """Type-aware scoring for DataBench answers.
+
+    boolean      → check if 'true'/'yes' or 'false'/'no' appears in prediction.
+    number       → extract number from prediction; compare with 1e-3 tolerance.
+    category     → denotation match (normalised gold appears in normalised pred).
+    list[*]      → each gold item must appear in normalised prediction.
+    """
+    if answer is None:
+        return 0.0
+    pred = _normalize_text(prediction)
+
+    if answer_type == "boolean":
+        gold = answer.strip().lower()
+        if gold == "true":
+            return float("true" in pred or "yes" in pred)
+        if gold == "false":
+            return float("false" in pred or "no" in pred)
+        return 0.0
+
+    if answer_type == "number":
+        nums = re.findall(r"-?[\d,]+\.?\d*", prediction.replace(",", ""))
+        try:
+            gold_f = float(answer.replace(",", ""))
+            for n in nums:
+                try:
+                    if abs(float(n) - gold_f) < max(1e-3, abs(gold_f) * 1e-3):
+                        return 1.0
+                except ValueError:
+                    pass
+        except ValueError:
+            pass
+        return 0.0
+
+    if answer_type.startswith("list"):
+        try:
+            import ast
+            gold_items: list[str] = ast.literal_eval(answer)
+        except Exception:
+            gold_items = [answer]
+        gold_norms = [_normalize_text(str(g)) for g in gold_items if g]
+        return float(all(g in pred for g in gold_norms)) if gold_norms else 0.0
+
+    # category (and fallback)
+    gold_norm = _normalize_text(answer)
+    return float(bool(gold_norm) and gold_norm in pred)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -160,6 +187,7 @@ class Sample:
     context: str       # long context to compress (document or CoT examples)
     question: str
     answers: list[str]
+    meta: dict = field(default_factory=dict)  # task-specific metadata (e.g. answer_type)
 
 
 @dataclass
@@ -252,24 +280,25 @@ async def _aaak_compress(old_messages: list[dict]) -> tuple[str, TokenUsage]:
 # System prompts
 # ─────────────────────────────────────────────────────────────────────────────
 
-_QA_SYSTEM = (
-    "You are a helpful assistant that answers questions based on the provided context. "
-    "Give a concise factual answer."
-)
 _GSM8K_SYSTEM = (
     "You are a math tutor. Solve step by step. End your answer with '#### N' where N is "
     "the final numeric answer (digits only, no commas)."
 )
-
-
-def _qa_system_with_aaak() -> dict[str, str]:
-    msg = {"role": "system", "content": _QA_SYSTEM}
-    AAAKCompressor.ensure_preamble_in_system(msg)
-    return msg
+_TABLE_SYSTEM = (
+    "You are a data analyst. Answer questions using only the values in the provided table. "
+    "Be concise and direct. For boolean questions reply with True or False. "
+    "For lists, reply with a Python-style list like ['a', 'b']. For numbers, give just the number."
+)
 
 
 def _gsm8k_system_with_aaak() -> dict[str, str]:
     msg = {"role": "system", "content": _GSM8K_SYSTEM}
+    AAAKCompressor.ensure_preamble_in_system(msg)
+    return msg
+
+
+def _table_system_with_aaak() -> dict[str, str]:
+    msg = {"role": "system", "content": _TABLE_SYSTEM}
     AAAKCompressor.ensure_preamble_in_system(msg)
     return msg
 
@@ -281,64 +310,51 @@ def _gsm8k_system_with_aaak() -> dict[str, str]:
 
 def _build_raw_messages(sample: Sample) -> list[dict[str, str]]:
     """Build full-context (uncompressed) messages for a sample."""
-    system_content = _GSM8K_SYSTEM if sample.task == "gsm8k" else _QA_SYSTEM
     if sample.task == "gsm8k":
-        user_content = (
-            f"Here are example problems with solutions:\n\n{sample.context}\n\n"
-            f"Now solve this problem:\n{sample.question}"
-        )
-    else:
-        user_content = f"Context:\n{sample.context}\n\nQuestion: {sample.question}"
-    return [
-        {"role": "system", "content": system_content},
-        {"role": "user", "content": user_content},
-    ]
-
-
-async def _build_aaak_messages(
-    sample: Sample,
-    precompressed: str | None = None,
-) -> tuple[list[dict[str, str]], TokenUsage, bool]:
-    """Build AAAK-compressed messages for a sample.
-
-    Returns (messages, compression_token_usage, was_passthrough).
-
-    If the context is shorter than AAAK_MIN_CONTEXT_TOKENS the compression is
-    skipped and the raw context is used instead (passthrough=True).  This avoids
-    the fixed AAAK overhead dominating very short documents (e.g. SQuAD paragraphs).
-
-    If ``precompressed`` is provided (GSM8K reuses a single compressed context),
-    the compression LLM call is skipped and zero compression tokens are charged.
-    """
-    system_msg = _gsm8k_system_with_aaak() if sample.task == "gsm8k" else _qa_system_with_aaak()
-    question_text = (
-        f"Now solve this problem:\n{sample.question}"
-        if sample.task == "gsm8k"
-        else f"Question: {sample.question}"
-    )
-
-    ctx_tokens = count_tokens(sample.context)
-    if precompressed is None and ctx_tokens < AAAK_MIN_CONTEXT_TOKENS:
-        # Passthrough: context is too short to benefit from compression.
-        raw_msgs = _build_raw_messages(sample)
-        return raw_msgs, TokenUsage(), True
-
-    if precompressed is not None:
-        encoded, comp_tok = precompressed, TokenUsage()
-    else:
-        old_messages = [
-            {"role": "user", "content": "Reference document:"},
-            {"role": "assistant", "content": sample.context},
+        return [
+            {"role": "system", "content": _GSM8K_SYSTEM},
+            {"role": "user", "content": (
+                f"Here are example problems with solutions:\n\n{sample.context}\n\n"
+                f"Now solve this problem:\n{sample.question}"
+            )},
         ]
-        encoded, comp_tok = await _aaak_compress(old_messages)
-
-    aaak_block = f"[AAAK CTX]\n{encoded}\n[/AAAK CTX]"
-    messages = [
-        system_msg,
-        {"role": "user", "content": aaak_block},
-        {"role": "user", "content": question_text},
+    # databench (and any future table task)
+    return [
+        {"role": "system", "content": _TABLE_SYSTEM},
+        {"role": "user", "content": f"Table data:\n{sample.context}\n\nQuestion: {sample.question}"},
     ]
-    return messages, comp_tok, False
+
+
+def _gsm8k_aaak_messages(question: str, encoded: str) -> list[dict[str, str]]:
+    """Build AAAK-compressed messages for a GSM8K sample given a pre-encoded context."""
+    return [
+        _gsm8k_system_with_aaak(),
+        {"role": "user", "content": f"[AAAK CTX]\n{encoded}\n[/AAAK CTX]"},
+        {"role": "user", "content": f"Now solve this problem:\n{question}"},
+    ]
+
+
+def _table_aaak_messages(question: str, encoded: str) -> list[dict[str, str]]:
+    """Build AAAK-compressed messages for a table QA sample given a pre-encoded table context."""
+    return [
+        _table_system_with_aaak(),
+        {"role": "user", "content": f"[AAAK CTX]\n{encoded}\n[/AAAK CTX]"},
+        {"role": "user", "content": f"Question: {question}"},
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-sample scoring
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _score_sample(sample: Sample, answer: str) -> float:
+    """Dispatch to the right metric based on task."""
+    if sample.task == "gsm8k":
+        return score_gsm8k(answer, sample.answers[0])
+    if sample.task == "databench":
+        return score_databench(answer, sample.answers[0], sample.meta.get("answer_type", "category"))
+    raise ValueError(f"Unknown task: {sample.task!r}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -350,32 +366,13 @@ async def _run_raw_sample(sample: Sample) -> SampleResult:
     msgs = _build_raw_messages(sample)
     original_tokens = messages_tokens(msgs)
     answer, answer_tok = await _call(msgs)
-    score = score_gsm8k(answer, sample.answers[0]) if sample.task == "gsm8k" else max_f1(answer, sample.answers)
+    score = _score_sample(sample, answer)
     return SampleResult(
         mode="raw",
         task=sample.task,
         original_tokens=original_tokens,
         compressed_tokens=original_tokens,
         score=score,
-        answer_tok=answer_tok,
-    )
-
-
-async def _run_aaak_sample(
-    sample: Sample,
-    raw_original_tokens: int,
-    precompressed: str | None = None,
-) -> SampleResult:
-    msgs, comp_tok, passthrough = await _build_aaak_messages(sample, precompressed=precompressed)
-    answer, answer_tok = await _call(msgs)
-    score = score_gsm8k(answer, sample.answers[0]) if sample.task == "gsm8k" else max_f1(answer, sample.answers)
-    return SampleResult(
-        mode="aaak (passthrough)" if passthrough else "aaak",
-        task=sample.task,
-        original_tokens=raw_original_tokens,
-        compressed_tokens=messages_tokens(msgs),
-        score=score,
-        compress_tok=comp_tok,
         answer_tok=answer_tok,
     )
 
@@ -425,65 +422,47 @@ def load_gsm8k(n: int) -> list[Sample]:
     ]
 
 
-def load_narrativeqa(n: int) -> list[Sample]:
-    """deepmind/narrativeqa — book/movie-length document QA."""
-    datasets = _require_datasets()
-    ds = datasets.load_dataset("deepmind/narrativeqa", split="test")
-    samples: list[Sample] = []
-    for row in list(ds)[:n]:
-        context = truncate_to_tokens(row["document"]["text"], MAX_DOC_TOKENS)
-        answers = [a["text"] for a in row["answers"]]
-        samples.append(Sample(
-            task="narrativeqa",
-            context=context,
-            question=row["question"]["text"],
-            answers=answers or [""],
-        ))
-    return samples
+def load_databench(n: int) -> list[Sample]:
+    """cardiffnlp/databench — real-world table QA (parquet-native, no loading scripts).
 
+    Each QA pair references a named dataset (e.g. '001_Forbes').  The 20-row
+    sample table is loaded from parquet via the hf:// protocol and serialised as a
+    JSON array-of-objects, mirroring a DB query tool result.  Samples whose JSON
+    table falls below AAAK_MIN_CONTEXT_TOKENS are skipped so every sample actually
+    exercises the compression path.
+    """
+    import pandas as pd
 
-def load_hotpotqa(n: int) -> list[Sample]:
-    """hotpotqa/hotpot_qa (distractor config) — multi-hop Wikipedia QA."""
-    datasets = _require_datasets()
-    ds = datasets.load_dataset("hotpotqa/hotpot_qa", "distractor", split="validation")
+    hf_ds = _require_datasets()
+    qa = hf_ds.load_dataset("cardiffnlp/databench", "qa", split="train")
     samples: list[Sample] = []
-    for row in list(ds)[:n]:
-        # Flatten the multi-document context: "Title: sent1 sent2 ..."
-        parts = [
-            f"{title}: {''.join(sents)}"
-            for title, sents in zip(row["context"]["title"], row["context"]["sentences"])
-        ]
-        context = truncate_to_tokens("\n\n".join(parts), MAX_DOC_TOKENS)
+    for row in qa:
+        if len(samples) >= n:
+            break
+        ds_id = row["dataset"]
+        answer = row["answer"]
+        if answer is None:
+            continue
+        try:
+            df = pd.read_parquet(f"hf://datasets/cardiffnlp/databench/data/{ds_id}/sample.parquet")
+        except Exception:
+            continue
+        context = df.to_json(orient="records", indent=None)
+        if count_tokens(context) < AAAK_MIN_CONTEXT_TOKENS:
+            continue
         samples.append(Sample(
-            task="hotpotqa",
+            task="databench",
             context=context,
             question=row["question"],
-            answers=[row["answer"]],
-        ))
-    return samples
-
-
-def load_squad(n: int) -> list[Sample]:
-    """rajpurkar/squad — standard single-paragraph reading comprehension."""
-    datasets = _require_datasets()
-    ds = datasets.load_dataset("rajpurkar/squad", split="validation")
-    samples: list[Sample] = []
-    for row in list(ds)[:n]:
-        answers = row["answers"]["text"]
-        samples.append(Sample(
-            task="squad",
-            context=truncate_to_tokens(row["context"], MAX_DOC_TOKENS),
-            question=row["question"],
-            answers=answers or [""],
+            answers=[str(answer)],
+            meta={"answer_type": row["type"]},
         ))
     return samples
 
 
 _TASK_LOADERS: dict[str, Any] = {
     "gsm8k": load_gsm8k,
-    "narrativeqa": load_narrativeqa,
-    "hotpotqa": load_hotpotqa,
-    "squad": load_squad,
+    "databench": load_databench,
 }
 
 
@@ -495,9 +474,14 @@ _TASK_LOADERS: dict[str, Any] = {
 async def run_task(task_name: str, n_samples: int) -> tuple[list[SampleResult], list[SampleResult]]:
     """Run raw and aaak modes on ``n_samples`` from ``task_name``.
 
-    Returns (raw_results, aaak_results). AAAK compression is run sequentially
-    to avoid patching global provider state from multiple coroutines at once;
-    answer calls run concurrently inside each mode.
+    Returns (raw_results, aaak_results).
+
+    GSM8K: the few-shot context is shared across all samples, so the context is
+    compressed once and reused — answer calls run concurrently.
+
+    WTQ: each sample has a unique table, so compression runs per-sample
+    sequentially (``_aaak_compress`` patches global provider state and cannot
+    be called concurrently); answer calls follow compression immediately.
     """
     loader = _TASK_LOADERS[task_name]
     samples = loader(n_samples)
@@ -507,34 +491,25 @@ async def run_task(task_name: str, n_samples: int) -> tuple[list[SampleResult], 
         await asyncio.gather(*[_run_raw_sample(s) for s in samples])
     )
 
-    # ── aaak mode ────────────────────────────────────────────────────────────
-    # For GSM8K the few-shot context is identical across all samples, so we
-    # compress it exactly once and reuse the encoded string.
     aaak_results: list[SampleResult] = []
 
     if task_name == "gsm8k":
-        # Compress shared few-shot context once (sequential — patches global).
+        # ── GSM8K: compress shared few-shot context once, answer in parallel ─
         few_shot_messages = [
             {"role": "user", "content": "Here are example math problems with solutions:"},
             {"role": "assistant", "content": samples[0].context},
         ]
         precompressed, shared_comp_tok = await _aaak_compress(few_shot_messages)
 
-        # Answer all test samples in parallel (no global patching).
-        def _gsm8k_aaak_msgs(question: str) -> list[dict[str, str]]:
-            return [
-                _gsm8k_system_with_aaak(),
-                {"role": "user", "content": f"[AAAK CTX]\n{precompressed}\n[/AAAK CTX]"},
-                {"role": "user", "content": f"Now solve this problem:\n{question}"},
-            ]
-
         answer_results: list[tuple[str, TokenUsage]] = list(
-            await asyncio.gather(*[_call(_gsm8k_aaak_msgs(s.question)) for s in samples])
+            await asyncio.gather(*[
+                _call(_gsm8k_aaak_messages(s.question, precompressed)) for s in samples
+            ])
         )
         for i, (sample, (answer, answer_tok), raw_r) in enumerate(
             zip(samples, answer_results, raw_results)
         ):
-            compressed_msgs = _gsm8k_aaak_msgs(sample.question)
+            compressed_msgs = _gsm8k_aaak_messages(sample.question, precompressed)
             # Only the first sample "pays" for the compression call; subsequent
             # samples reuse the cached encoding — reflecting real amortised cost.
             c_tok = shared_comp_tok if i == 0 else TokenUsage()
@@ -543,18 +518,30 @@ async def run_task(task_name: str, n_samples: int) -> tuple[list[SampleResult], 
                 task=task_name,
                 original_tokens=raw_r.original_tokens,
                 compressed_tokens=messages_tokens(compressed_msgs),
-                score=score_gsm8k(answer, sample.answers[0]),
+                score=_score_sample(sample, answer),
                 compress_tok=c_tok,
                 answer_tok=answer_tok,
             ))
+
     else:
-        # LongBench: each sample has a different document → compress per sample.
-        # Must run sequentially because _aaak_compress patches global state.
+        # ── databench: each sample has a unique table — compress then answer sequentially ──
         for sample, raw_r in zip(samples, raw_results):
-            result = await _run_aaak_sample(
-                sample, raw_original_tokens=raw_r.original_tokens
-            )
-            aaak_results.append(result)
+            table_messages = [
+                {"role": "user", "content": "Query results:"},
+                {"role": "assistant", "content": sample.context},
+            ]
+            encoded, comp_tok = await _aaak_compress(table_messages)
+            compressed_msgs = _table_aaak_messages(sample.question, encoded)
+            answer, answer_tok = await _call(compressed_msgs)
+            aaak_results.append(SampleResult(
+                mode="aaak",
+                task=task_name,
+                original_tokens=raw_r.original_tokens,
+                compressed_tokens=messages_tokens(compressed_msgs),
+                score=_score_sample(sample, answer),
+                compress_tok=comp_tok,
+                answer_tok=answer_tok,
+            ))
 
     return raw_results, aaak_results
 
@@ -575,7 +562,10 @@ def _task_report(
     elapsed_s: float,
 ) -> None:
     print(f"\n{'═' * 110}")
-    metric_label = "exact-match" if task_name == "gsm8k" else "max-F1"
+    metric_label = {
+        "gsm8k": "exact-match (#### N)",
+        "databench": "type-aware answer match",
+    }.get(task_name, "accuracy")
     print(f"  {task_name.upper()}  ({len(raw_results)} samples, {elapsed_s:.1f}s)  metric: {metric_label}")
     print(f"{'═' * 110}")
 
@@ -662,15 +652,11 @@ async def main_async(args: argparse.Namespace) -> None:
 
     task_names: list[str] = args.tasks or AVAILABLE_TASKS
     print(f"  tasks={task_names}  samples_per_task={args.samples}  model={MODEL}")
-    print(f"  max_doc_tokens={MAX_DOC_TOKENS}  gsm8k_few_shot_n={GSM8K_FEW_SHOT_N}\n")
+    print(f"  gsm8k_few_shot_n={GSM8K_FEW_SHOT_N}  aaak_min_context_tokens={AAAK_MIN_CONTEXT_TOKENS}\n")
 
     task_data: list[tuple[str, list[SampleResult], list[SampleResult], float]] = []
 
     for task_name in task_names:
-        if task_name not in _TASK_LOADERS:
-            print(f"  [WARN] Unknown task '{task_name}' — skipping. Choose from: {AVAILABLE_TASKS}")
-            continue
-
         print(f"  Loading '{task_name}'...", flush=True)
         t0 = time.perf_counter()
         raw_results, aaak_results = await run_task(task_name, args.samples)
@@ -690,7 +676,7 @@ async def main_async(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="AAAK vs Raw benchmark on standard NLP datasets (real API calls)."
+        description="AAAK vs Raw benchmark on structured-data tasks (real API calls)."
     )
     parser.add_argument(
         "--tasks",

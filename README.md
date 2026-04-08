@@ -25,7 +25,7 @@ GlueLLM is a high-level SDK that makes working with LLMs actually pleasant:
 - **Embeddings**: same ergonomics + error handling
 - **Batch processing**: concurrency control, retry strategies, key pools
 - **Observability hooks**: logging + optional tracing
-- **Context condensing** *(opt-in)*: compress completed tool rounds to reduce prompt tokens across long tool chains
+- **Context condensing** *(opt-in)*: compress completed tool rounds; optionally with **AAAK lossless encoding** that preserves technical facts exactly across long conversations
 - **Dynamic tool routing** *(opt-in)*: route to relevant tools on demand instead of sending all schemas every call
 
 ## Why you might not
@@ -161,6 +161,46 @@ result = await client.complete("Do ten things with tools...")
 ```
 
 Without condensing, context grows by 2 messages per tool round (assistant + tool). With condensing, each completed round collapses to 1 message regardless of how many tools ran in parallel.
+
+### AAAK lossless compression (opt-in)
+
+AAAK is a structured shorthand encoding that makes context compression **lossless for technical facts** — exact numbers, config values, algorithm names, security attributes, and ordered multi-step flows survive compression intact. It replaces the default lossy prose summarization when you can't afford to drop details.
+
+Two levels, composable:
+
+| Level | Trigger | LLM call? | Output |
+|---|---|---|---|
+| Tool-round encoding | `condense_tool_messages=True` + `aaak_tool_condensing=True` | ❌ none | `[AT]` block |
+| History compression | `summarize_context=True` + `aaak_compression_enabled=True` | ✅ one extra call | `[AAAK CTX]` block |
+
+```python
+client = GlueLLM(
+    model="openai:gpt-4o",
+    condense_tool_messages=True,       # collapses each tool round into an [AT] block (free)
+    summarize_context=True,            # compresses old history when it grows long
+    aaak_compression_enabled=True,     # use AAAK instead of prose (default when summarize_context=True)
+    aaak_compression_model="openai:gpt-4-turbo",  # stronger compressor → smaller context
+    summarize_context_threshold=20,    # compress after 20 non-system messages
+    summarize_context_keep_recent=6,   # always keep last 6 messages verbatim
+)
+```
+
+**What gets preserved exactly:** numbers with units (`8500ms`, `15min`), config key=value pairs (`pool_size=10`, `JWT_SECRET_KEY`), security cookie attributes (`HttpOnly,Secure,SameSite=Strict`), algorithm names (`HS256`), HTTP verbs and paths, ordered multi-step flows (`1→DELETE /auth/session;2→hash;3→revoke`).
+
+**When it pays off:** long technical conversations (API design, infra, auth, SRE incidents, DB schemas) where context will span many turns. The compression call is paid once and the smaller context is reused for every subsequent turn.
+
+**When it doesn't:** short conversations, mathematical reasoning, general prose, single one-shot queries. Below ~400 tokens of context the overhead exceeds the savings — GlueLLM won't compress if there isn't enough to compress.
+
+**Out-of-domain benchmark results** (NarrativeQA, long narrative prose — not AAAK's intended domain):
+
+| Compressor | Compression ratio | Accuracy preserved |
+|---|---|---|
+| `llama-3.1-8b-instant` | 4.3× | 78.9% |
+| `gpt-4-turbo` | 15.6× | 89.9% |
+
+On its home turf (agent conversation history) AAAK targets lossless recall — see `benchmarks/aaak_live_benchmark.py`.
+
+→ **[Full reference: docs/AAAK_COMPRESSION.md](docs/AAAK_COMPRESSION.md)**
 
 ### Dynamic tool routing (opt-in)
 
