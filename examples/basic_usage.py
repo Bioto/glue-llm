@@ -84,6 +84,8 @@ async def example_structured_output():
         system_prompt="You are a data extraction assistant. Extract structured information from the text.",
     )
 
+    if result.structured_output is None:
+        raise RuntimeError("Model did not return structured output")
     person = result.structured_output
     print(f"Name: {person.name}")
     print(f"Age: {person.age}")

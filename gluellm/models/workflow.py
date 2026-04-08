@@ -4,6 +4,7 @@ This module provides configuration models for defining workflows,
 including critic configurations and iterative refinement settings.
 """
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
@@ -65,7 +66,7 @@ class IterativeConfig(BaseModel):
     convergence_threshold: float | None = Field(
         default=None, description="Optional convergence threshold for stopping early", ge=0.0, le=1.0
     )
-    quality_evaluator: Any | None = Field(
+    quality_evaluator: Callable[[str, str], float] | None = Field(
         default=None, description="Optional callable to evaluate quality (content, feedback) -> float"
     )
 

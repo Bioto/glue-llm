@@ -137,6 +137,8 @@ async def structured_output_example():
 
     result = await client.structured_complete("Calculate 15 * 8 and explain the result", response_format=MathResult)
 
+    if result.structured_output is None:
+        raise RuntimeError("Model did not return structured output")
     math_result = result.structured_output
     print(f"\nExpression: {math_result.expression}")
     print(f"Result: {math_result.result}")

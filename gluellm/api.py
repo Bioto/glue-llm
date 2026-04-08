@@ -62,7 +62,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Annotated, Any, Literal, TypeVar, Union, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, TypeVar, Union, get_args, get_origin, get_type_hints, overload
 
 if TYPE_CHECKING:
     from gluellm.models.agent import Agent
@@ -790,7 +790,10 @@ def _extract_token_usage(response: ChatCompletion) -> dict[str, int] | None:
     }
 
 
-def _parse_structured_content(content: str, response_format: type[BaseModel]) -> BaseModel | None:
+T = TypeVar("T", bound=BaseModel)
+
+
+def _parse_structured_content(content: str, response_format: type[T]) -> T | None:
     """Parse accumulated stream/content into response_format. Returns None on failure."""
     if not content or not content.strip():
         return None
@@ -1204,10 +1207,6 @@ def _temporary_api_key(model: str, api_key: str | None):
         else:
             os.environ[env_var] = original_value
         logger.debug(f"Restored {env_var} to original value")
-
-
-T = TypeVar("T", bound=BaseModel)
-StructuredOutputT = TypeVar("StructuredOutputT", bound=BaseModel | None)
 
 
 # ============================================================================
@@ -1766,7 +1765,7 @@ async def _llm_call_with_retry(
             await asyncio.sleep(wait_time)
 
 
-class ExecutionResult(BaseModel):
+class ExecutionResult(BaseModel, Generic[T]):
     """Result of a tool execution loop.
 
     Generic type parameter allows proper typing for structured outputs.
@@ -1801,7 +1800,7 @@ class ExecutionResult(BaseModel):
         ),
     ]
     structured_output: Annotated[
-        Any | None,
+        T | None,
         Field(
             description="Parsed structured output (Pydantic model instance) for structured completions",
             default=None,
@@ -1830,14 +1829,14 @@ class ExecutionResult(BaseModel):
         return 0
 
 
-class StreamingChunk(BaseModel):
+class StreamingChunk(BaseModel, Generic[T]):
     """A chunk of streaming response."""
 
     content: Annotated[str, Field(description="The content chunk")]
     done: Annotated[bool, Field(description="Whether this is the final chunk")]
     tool_calls_made: Annotated[int, Field(description="Number of tool calls made so far", default=0)]
     structured_output: Annotated[
-        Any | None,
+        T | None,
         Field(
             description="Parsed structured output (when response_format was set); set on the final chunk only",
             default=None,
@@ -2783,7 +2782,7 @@ class GlueLLM:
         summarize_context_model: str | None = None,
         summarize_context_keep_recent: int | None = None,
         **model_kwargs: Any,
-    ) -> ExecutionResult:
+    ) -> ExecutionResult[T]:
         """Complete a request and return structured output.
 
         The LLM can optionally use tools to gather information before returning
@@ -3705,13 +3704,71 @@ class GlueLLM:
         )
         return results
 
+    @overload
+    async def stream_complete(
+        self,
+        user_message: str,
+        execute_tools: bool = ...,
+        model: str | None = ...,
+        guardrails: GuardrailsConfig | None = ...,
+        response_format: type[T] = ...,
+        on_status: OnStatusCallback = ...,
+        correlation_id: str | None = ...,
+        request_timeout: float | None = ...,
+        connect_timeout: float | None = ...,
+        max_tokens: int | None = ...,
+        condense_tool_messages: bool | None = ...,
+        tool_mode: ToolMode | None = ...,
+        tool_execution_order: ToolExecutionOrder | None = ...,
+        retry_enabled: bool | None = ...,
+        retry_config: RetryConfig | None = ...,
+        rate_limit_algorithm: RateLimitAlgorithm | str | None = ...,
+        rate_limit_config: RateLimitConfig | None = ...,
+        track_costs: bool | None = ...,
+        enable_eval_recording: bool | None = ...,
+        sinks: list[Sink] | None = ...,
+        summarize_context: bool | None = ...,
+        summarize_context_threshold: int | None = ...,
+        summarize_context_model: str | None = ...,
+        summarize_context_keep_recent: int | None = ...,
+    ) -> AsyncIterator[StreamingChunk[T]]: ...
+
+    @overload
+    async def stream_complete(
+        self,
+        user_message: str,
+        execute_tools: bool = ...,
+        model: str | None = ...,
+        guardrails: GuardrailsConfig | None = ...,
+        response_format: None = ...,
+        on_status: OnStatusCallback = ...,
+        correlation_id: str | None = ...,
+        request_timeout: float | None = ...,
+        connect_timeout: float | None = ...,
+        max_tokens: int | None = ...,
+        condense_tool_messages: bool | None = ...,
+        tool_mode: ToolMode | None = ...,
+        tool_execution_order: ToolExecutionOrder | None = ...,
+        retry_enabled: bool | None = ...,
+        retry_config: RetryConfig | None = ...,
+        rate_limit_algorithm: RateLimitAlgorithm | str | None = ...,
+        rate_limit_config: RateLimitConfig | None = ...,
+        track_costs: bool | None = ...,
+        enable_eval_recording: bool | None = ...,
+        sinks: list[Sink] | None = ...,
+        summarize_context: bool | None = ...,
+        summarize_context_threshold: int | None = ...,
+        summarize_context_model: str | None = ...,
+        summarize_context_keep_recent: int | None = ...,
+    ) -> AsyncIterator[StreamingChunk[Any]]: ...
+
     async def stream_complete(
         self,
         user_message: str,
         execute_tools: bool = True,
         model: str | None = None,
         guardrails: GuardrailsConfig | None = None,
-        response_format: type[BaseModel] | None = None,
+        response_format: type[T] | None = None,
         on_status: OnStatusCallback = None,
         correlation_id: str | None = None,
         request_timeout: float | None = None,
@@ -3731,7 +3788,7 @@ class GlueLLM:
         summarize_context_threshold: int | None = None,
         summarize_context_model: str | None = None,
         summarize_context_keep_recent: int | None = None,
-    ) -> AsyncIterator[StreamingChunk]:
+    ) -> AsyncIterator[StreamingChunk[Any]]:
         """Stream completion with automatic tool execution.
 
         Yields chunks of the response as they arrive. When tools are called,
@@ -4523,7 +4580,7 @@ async def structured_complete(
     summarize_context_model: str | None = None,
     summarize_context_keep_recent: int | None = None,
     **model_kwargs: Any,
-) -> ExecutionResult:
+) -> ExecutionResult[T]:
     """Quick structured completion with optional tool support.
 
     The LLM can optionally use tools to gather information before returning
@@ -4737,6 +4794,72 @@ async def embed(
     )
 
 
+@overload
+async def stream_complete(
+    user_message: str,
+    model: str | None = ...,
+    system_prompt: str | None = ...,
+    tools: list[Callable] | None = ...,
+    execute_tools: bool = ...,
+    max_tool_iterations: int | None = ...,
+    correlation_id: str | None = ...,
+    guardrails: GuardrailsConfig | None = ...,
+    response_format: type[T] = ...,
+    on_status: OnStatusCallback = ...,
+    request_timeout: float | None = ...,
+    connect_timeout: float | None = ...,
+    max_tokens: int | None = ...,
+    condense_tool_messages: bool | None = ...,
+    tool_mode: ToolMode | None = ...,
+    tool_execution_order: ToolExecutionOrder | None = ...,
+    tool_route_model: str | None = ...,
+    retry_enabled: bool | None = ...,
+    retry_config: RetryConfig | None = ...,
+    rate_limit_algorithm: RateLimitAlgorithm | str | None = ...,
+    rate_limit_config: RateLimitConfig | None = ...,
+    track_costs: bool | None = ...,
+    enable_eval_recording: bool | None = ...,
+    sinks: list[Sink] | None = ...,
+    summarize_context: bool = ...,
+    summarize_context_threshold: int | None = ...,
+    summarize_context_model: str | None = ...,
+    summarize_context_keep_recent: int | None = ...,
+) -> AsyncIterator[StreamingChunk[T]]: ...
+
+
+@overload
+async def stream_complete(
+    user_message: str,
+    model: str | None = ...,
+    system_prompt: str | None = ...,
+    tools: list[Callable] | None = ...,
+    execute_tools: bool = ...,
+    max_tool_iterations: int | None = ...,
+    correlation_id: str | None = ...,
+    guardrails: GuardrailsConfig | None = ...,
+    response_format: None = ...,
+    on_status: OnStatusCallback = ...,
+    request_timeout: float | None = ...,
+    connect_timeout: float | None = ...,
+    max_tokens: int | None = ...,
+    condense_tool_messages: bool | None = ...,
+    tool_mode: ToolMode | None = ...,
+    tool_execution_order: ToolExecutionOrder | None = ...,
+    tool_route_model: str | None = ...,
+    retry_enabled: bool | None = ...,
+    retry_config: RetryConfig | None = ...,
+    rate_limit_algorithm: RateLimitAlgorithm | str | None = ...,
+    rate_limit_config: RateLimitConfig | None = ...,
+    track_costs: bool | None = ...,
+    enable_eval_recording: bool | None = ...,
+    sinks: list[Sink] | None = ...,
+    summarize_context: bool = ...,
+    summarize_context_threshold: int | None = ...,
+    summarize_context_model: str | None = ...,
+    summarize_context_keep_recent: int | None = ...,
+) -> AsyncIterator[StreamingChunk[Any]]: ...
+
+
 async def stream_complete(
     user_message: str,
     model: str | None = None,
@@ -4746,7 +4869,7 @@ async def stream_complete(
     max_tool_iterations: int | None = None,
     correlation_id: str | None = None,
     guardrails: GuardrailsConfig | None = None,
-    response_format: type[BaseModel] | None = None,
+    response_format: type[T] | None = None,
     on_status: OnStatusCallback = None,
     request_timeout: float | None = None,
     connect_timeout: float | None = None,
@@ -4766,7 +4889,7 @@ async def stream_complete(
     summarize_context_threshold: int | None = None,
     summarize_context_model: str | None = None,
     summarize_context_keep_recent: int | None = None,
-) -> AsyncIterator[StreamingChunk]:
+) -> AsyncIterator[StreamingChunk[Any]]:
     """Stream completion with automatic tool execution.
 
     Yields chunks of the response as they arrive. Note: tool execution

@@ -149,6 +149,8 @@ async def chatbot_example():
 
     try:
         result = await ticket_client.structured_complete(ticket_message, response_format=SupportTicket)
+        if result.structured_output is None:
+            raise RuntimeError("Model did not return structured output")
         ticket = result.structured_output
         print("\nExtracted Ticket:")
         print(f"  Customer ID: {ticket.customer_id}")

@@ -74,6 +74,8 @@ async def data_extraction_example():
             response_format=Product,
             system_prompt="Extract product information accurately. Convert prices to float.",
         )
+        if result.structured_output is None:
+            raise RuntimeError("Model did not return structured output")
         product = result.structured_output
         print(f"Name: {product.name}")
         print(f"Price: ${product.price:.2f}")
@@ -97,6 +99,8 @@ async def data_extraction_example():
             response_format=Contact,
             system_prompt="Extract contact details accurately.",
         )
+        if result.structured_output is None:
+            raise RuntimeError("Model did not return structured output")
         contact = result.structured_output
         print(f"Name: {contact.name}")
         print(f"Email: {contact.email}")
@@ -120,6 +124,8 @@ async def data_extraction_example():
             response_format=Event,
             system_prompt="Extract event details. Parse attendee list as array.",
         )
+        if result.structured_output is None:
+            raise RuntimeError("Model did not return structured output")
         event = result.structured_output
         print(f"Title: {event.title}")
         print(f"Date: {event.date}")
@@ -147,6 +153,8 @@ async def data_extraction_example():
             response_format=Invoice,
             system_prompt="Extract invoice details. Parse items as array of strings.",
         )
+        if result.structured_output is None:
+            raise RuntimeError("Model did not return structured output")
         invoice = result.structured_output
         print(f"Invoice Number: {invoice.invoice_number}")
         print(f"Date: {invoice.date}")
@@ -176,7 +184,8 @@ async def data_extraction_example():
                 response_format=Product,
                 system_prompt="Extract product information. Parse 'In Stock' as True, 'Out of Stock' as False.",
             )
-            extracted_products.append(result.structured_output)
+            if result.structured_output is not None:
+                extracted_products.append(result.structured_output)
         except Exception as e:
             print(f"  Error extracting {text}: {e}")
 

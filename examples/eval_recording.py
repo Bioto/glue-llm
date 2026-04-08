@@ -128,6 +128,8 @@ async def example_5_structured_recording():
         "What is 2+2? Provide your reasoning.",
         response_format=Answer,
     )
+    if result.structured_output is None:
+        raise RuntimeError("Model did not return structured output")
     print(f"Answer: {result.structured_output.number}")
     print(f"Reasoning: {result.structured_output.reasoning}")
 

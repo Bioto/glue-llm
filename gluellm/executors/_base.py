@@ -6,7 +6,9 @@ which are responsible for executing queries using LLM agents.
 
 import time
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Generic, TypeVar
+
+from pydantic import BaseModel
 
 from gluellm.api import ExecutionResult
 from gluellm.hooks import manager as hooks_manager
@@ -14,15 +16,21 @@ from gluellm.hooks.manager import HookManager
 from gluellm.models.hook import HookRegistry, HookStage
 from gluellm.observability.logging_config import get_logger
 
+T_out = TypeVar("T_out", bound=BaseModel)
+
 logger = get_logger(__name__)
 
 
-class Executor(ABC):
+class Executor(ABC, Generic[T_out]):
     """Abstract base class for query executors.
 
     Executors are responsible for processing queries and returning responses.
     Subclasses must implement the _execute_internal method to define their specific
     execution strategy (e.g., simple execution, agent-based execution, etc.).
+
+    The type parameter ``T_out`` is the Pydantic model type of the structured
+    output produced by this executor. For plain (non-structured) executors,
+    leave the parameter unspecified (defaults to ``Any``).
 
     Example:
         >>> class MyExecutor(Executor):
@@ -42,7 +50,7 @@ class Executor(ABC):
         self.hook_registry = hook_registry
         self._hook_manager = HookManager()
 
-    async def execute(self, query: str) -> ExecutionResult:
+    async def execute(self, query: str) -> ExecutionResult[T_out]:
         """Execute a query with webhook support and return the response.
 
         This method wraps the internal execution with pre/post-executor webhooks.
@@ -90,7 +98,7 @@ class Executor(ABC):
         return final_result
 
     @abstractmethod
-    async def _execute_internal(self, query: str) -> ExecutionResult:
+    async def _execute_internal(self, query: str) -> ExecutionResult[T_out]:
         """Execute a query and return the full execution result.
 
         This is the internal implementation that subclasses must provide.

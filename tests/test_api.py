@@ -2962,7 +2962,7 @@ class TestSummarizeOldMessages:
 
     async def test_multi_part_content_is_joined_for_transcript(self):
         """Messages with list content (e.g. vision) have text parts joined for the transcript."""
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import MagicMock, patch
 
         from gluellm.api import _summarize_old_messages
 

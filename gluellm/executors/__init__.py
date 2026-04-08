@@ -5,7 +5,7 @@ including simple and agent-based execution strategies.
 """
 
 from collections.abc import Callable
-from typing import Optional, TypeVar
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel
 
@@ -15,7 +15,7 @@ from gluellm.models.agent import Agent
 
 from ._base import Executor
 
-T = TypeVar("T", bound=Executor)
+StructuredT = TypeVar("StructuredT", bound=BaseModel)
 
 
 class SimpleExecutor(Executor):
@@ -68,7 +68,7 @@ class SimpleExecutor(Executor):
         self.tools = tools
         self.max_tool_iterations = max_tool_iterations
 
-    async def _execute_internal(self, query: str) -> ExecutionResult:
+    async def _execute_internal(self, query: str) -> ExecutionResult[Any]:
         """Execute a query using the configured LLM.
 
         Args:
@@ -128,7 +128,7 @@ class AgentExecutor(Executor):
         super().__init__(hook_registry=hook_registry)
         self.agent = agent
 
-    async def _execute_internal(self, query: str) -> ExecutionResult:
+    async def _execute_internal(self, query: str) -> ExecutionResult[Any]:
         """Execute a query using the agent's configuration.
 
         Args:
@@ -153,15 +153,15 @@ class AgentExecutor(Executor):
             _current_agent.reset(token)
 
 
-class AgentStructuredExecutor(Executor):
+class AgentStructuredExecutor(Executor[StructuredT], Generic[StructuredT]):
     """Executor that uses a configured Agent for query processing and returns structured output."""
 
-    def __init__(self, agent: Agent, response_format: type[T], hook_registry=None):
+    def __init__(self, agent: Agent, response_format: type[StructuredT], hook_registry=None):
         super().__init__(hook_registry=hook_registry)
         self.agent = agent
         self.response_format = response_format
 
-    async def _execute_internal(self, query: str) -> ExecutionResult:
+    async def _execute_internal(self, query: str) -> ExecutionResult[StructuredT]:
         """Execute a query using the agent's configuration and return structured output as JSON."""
         from gluellm.api import _current_agent
 

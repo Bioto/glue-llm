@@ -97,10 +97,13 @@ class PersonInfo(BaseModel):
     city: Annotated[str, Field(description="City of residence")]
 
 async def main():
-    person = await structured_complete(
+    result = await structured_complete(
         user_message="Extract info: John Smith, 35, lives in Seattle",
         response_format=PersonInfo,
     )
+    if result.structured_output is None:
+        raise RuntimeError("Model did not return structured output")
+    person = result.structured_output  # typed as PersonInfo
     print(person.model_dump())
 
 asyncio.run(main())

@@ -82,9 +82,9 @@ classDiagram
         -tool_route_model: str
         -max_tokens: int
         -_conversation: Conversation
-        +complete() ToolExecutionResult
-        +structured_complete~T~() T
-        +stream_complete() AsyncIterator[StreamingChunk]
+        +complete() ExecutionResult
+        +structured_complete~T~() ExecutionResult~T~
+        +stream_complete~T~() AsyncIterator~StreamingChunk~T~~
         +reset_conversation() void
         -_format_system_prompt() str
         -_find_tool() Callable
@@ -304,7 +304,7 @@ flowchart TD
     Stage2 --> Stage3
     Stage3 --> Stage4
     Stage4 --> Stage5
-    Stage5 --> End([ToolExecutionResult])
+    Stage5 --> End([ExecutionResult])
 
     Stage4 -.->|Loop if more tool calls| Stage3
 ```

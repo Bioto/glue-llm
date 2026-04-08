@@ -87,10 +87,13 @@ async def example_weather_with_tool():
         model="openai:gpt-4o-mini",
     )
 
-    print(f"\n📍 Location: {result.structured_output.location}")
-    print(f"🌡️  Temperature: {result.structured_output.temperature_celsius}°C")
-    print(f"☁️  Conditions: {result.structured_output.conditions}")
-    print(f"💡 Recommendation: {result.structured_output.recommendation}")
+    if result.structured_output is None:
+        raise RuntimeError("Model did not return structured output")
+    weather = result.structured_output
+    print(f"\n📍 Location: {weather.location}")
+    print(f"🌡️  Temperature: {weather.temperature_celsius}°C")
+    print(f"☁️  Conditions: {weather.conditions}")
+    print(f"💡 Recommendation: {weather.recommendation}")
     print(f"\n📊 Tool calls made: {result.tool_calls_made}")
     print(f"💰 Cost: ${result.estimated_cost_usd:.6f}")
     print("🔧 Tool execution history:")
@@ -111,9 +114,12 @@ async def example_calculation_with_tool():
         model="openai:gpt-4o-mini",
     )
 
-    print(f"\n📐 Expression: {result.structured_output.expression}")
-    print(f"🔢 Result: {result.structured_output.result}")
-    print(f"📝 Explanation: {result.structured_output.explanation}")
+    if result.structured_output is None:
+        raise RuntimeError("Model did not return structured output")
+    calc = result.structured_output
+    print(f"\n📐 Expression: {calc.expression}")
+    print(f"🔢 Result: {calc.result}")
+    print(f"📝 Explanation: {calc.explanation}")
     print(f"\n📊 Tool calls made: {result.tool_calls_made}")
     print(f"💰 Cost: ${result.estimated_cost_usd:.6f}")
 
@@ -130,9 +136,12 @@ async def example_without_tools():
         model="openai:gpt-4o-mini",
     )
 
-    print(f"\n📐 Expression: {result.structured_output.expression}")
-    print(f"🔢 Result: {result.structured_output.result}")
-    print(f"📝 Explanation: {result.structured_output.explanation}")
+    if result.structured_output is None:
+        raise RuntimeError("Model did not return structured output")
+    calc = result.structured_output
+    print(f"\n📐 Expression: {calc.expression}")
+    print(f"🔢 Result: {calc.result}")
+    print(f"📝 Explanation: {calc.explanation}")
     print(f"\n📊 Tool calls made: {result.tool_calls_made}")
     print(f"💰 Cost: ${result.estimated_cost_usd:.6f}")
 
@@ -158,10 +167,13 @@ async def example_multiple_cities():
         model="openai:gpt-4o-mini",
     )
 
-    print(f"\n🌍 Cities compared: {', '.join(result.structured_output.cities_compared)}")
-    print(f"🔥 Warmest: {result.structured_output.warmest_city}")
-    print(f"❄️  Coolest: {result.structured_output.coolest_city}")
-    print(f"✈️  Recommendation: {result.structured_output.recommendation}")
+    if result.structured_output is None:
+        raise RuntimeError("Model did not return structured output")
+    comparison = result.structured_output
+    print(f"\n🌍 Cities compared: {', '.join(comparison.cities_compared)}")
+    print(f"🔥 Warmest: {comparison.warmest_city}")
+    print(f"❄️  Coolest: {comparison.coolest_city}")
+    print(f"✈️  Recommendation: {comparison.recommendation}")
     print(f"\n📊 Tool calls made: {result.tool_calls_made}")
     print(f"💰 Cost: ${result.estimated_cost_usd:.6f}")
 
