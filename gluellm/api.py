@@ -3995,6 +3995,7 @@ class GlueLLM:
             else self.max_tool_iterations
         )
         effective_stream_model_kwargs = {**self.model_kwargs, **stream_call_kwargs}
+        effective_eval_store = None if enable_eval_recording is False else self.eval_store
 
         # Set correlation ID if provided
         if correlation_id:
@@ -4026,12 +4027,15 @@ class GlueLLM:
         # Add user message to conversation (after input guardrails)
         self._conversation.add_message(Role.USER, user_message)
 
-        # Build initial messages
+        # Build initial messages (snapshot for eval recording matches complete())
+        system_prompt_content = self._format_system_prompt(tools=active_tools)
         system_message = {
             "role": "system",
-            "content": self._format_system_prompt(tools=active_tools),
+            "content": system_prompt_content,
         }
         messages = [system_message] + self._conversation.messages_dict
+        messages_snapshot = messages.copy()
+        start_time = time.time()
 
         tool_execution_history = []
         tool_calls_made = 0
@@ -4040,36 +4044,175 @@ class GlueLLM:
         _stream_pre_iter_hooks = _stream_merged_registry.get_hooks(HookStage.PRE_ITERATION)
         _stream_post_iter_hooks = _stream_merged_registry.get_hooks(HookStage.POST_ITERATION)
 
+        error: Exception | None = None
+        eval_recorded = False
+
+        async def record_stream_eval_success(final_text: str, *, structured_out: Any = None) -> None:
+            nonlocal eval_recorded
+            if not effective_eval_store:
+                return
+            _eval_result = ExecutionResult(
+                final_response=final_text,
+                tool_calls_made=tool_calls_made,
+                tool_execution_history=tool_execution_history,
+                raw_response=None,
+                tokens_used=None,
+                estimated_cost_usd=None,
+                model=model or self.model,
+                structured_output=structured_out,
+            )
+            await _record_eval_data(
+                eval_store=effective_eval_store,
+                user_message=user_message,
+                system_prompt=system_prompt_content,
+                model=model or self.model,
+                messages_snapshot=messages_snapshot,
+                start_time=start_time,
+                result=_eval_result,
+                tools_available=self.tools,
+                on_eval_record_hooks=_stream_merged_registry.get_hooks(HookStage.PRE_EVAL_RECORD),
+                hook_manager=self._hook_manager,
+            )
+            eval_recorded = True
+
         # Tool execution loop
-        for iteration in range(effective_stream_max_tool_iterations):
-            try:
-                # Context summarization: compress old messages when threshold is exceeded
-                if effective_summarize_context and len(messages) > effective_summarize_context_threshold:
-                    messages = await _summarize_old_messages(
-                        messages,
-                        keep_recent=effective_summarize_context_keep_recent,
-                        model=effective_summarize_context_model,
-                        use_aaak=self.aaak_compression_enabled,
-                        aaak_model=self.aaak_compression_model,
-                    )
+        try:
+            for iteration in range(effective_stream_max_tool_iterations):
+                assistant_message = None
+                try:
+                    # Context summarization: compress old messages when threshold is exceeded
+                    if effective_summarize_context and len(messages) > effective_summarize_context_threshold:
+                        messages = await _summarize_old_messages(
+                            messages,
+                            keep_recent=effective_summarize_context_keep_recent,
+                            model=effective_summarize_context_model,
+                            use_aaak=self.aaak_compression_enabled,
+                            aaak_model=self.aaak_compression_model,
+                        )
 
-                if _stream_pre_iter_hooks:
-                    _stream_last_user = next(
-                        (m.get("content", "") or "" for m in reversed(messages) if m.get("role") == "user"),
-                        "",
-                    )
-                    if isinstance(_stream_last_user, list):
-                        _stream_last_user = ""
-                    await self._hook_manager.execute_hooks(
-                        content=_stream_last_user,
-                        stage=HookStage.PRE_ITERATION,
-                        metadata={"iteration": iteration + 1, "tool_count": len(active_tools)},
-                        hooks=_stream_pre_iter_hooks,
-                    )
+                    if _stream_pre_iter_hooks:
+                        _stream_last_user = next(
+                            (m.get("content", "") or "" for m in reversed(messages) if m.get("role") == "user"),
+                            "",
+                        )
+                        if isinstance(_stream_last_user, list):
+                            _stream_last_user = ""
+                        await self._hook_manager.execute_hooks(
+                            content=_stream_last_user,
+                            stage=HookStage.PRE_ITERATION,
+                            metadata={"iteration": iteration + 1, "tool_count": len(active_tools)},
+                            hooks=_stream_pre_iter_hooks,
+                        )
 
-                # Try streaming first (if no tools or tools disabled, stream directly)
-                if not execute_tools or not active_tools:
-                    # Simple streaming without tool execution
+                    # Try streaming first (if no tools or tools disabled, stream directly)
+                    if not execute_tools or not active_tools:
+                        # Simple streaming without tool execution
+                        await emit_status(
+                            ProcessEvent(
+                                kind="stream_start",
+                                correlation_id=get_correlation_id(),
+                                timestamp=time.time(),
+                            ),
+                            on_status,
+                            sinks=sinks,
+                        )
+                        # Providers (e.g. OpenAI) do not support response_format with stream=True;
+                        # we stream plain text and parse into response_format when the stream ends.
+                        stream_iter = await self._llm_call(
+                            _stream_merged_registry,
+                            messages=messages,
+                            model=model or self.model,
+                            tools=None,
+                            response_format=None,
+                            stream=True,
+                            request_timeout=request_timeout,
+                            connect_timeout=connect_timeout,
+                            max_tokens=effective_max_tokens,
+                            retry_config=effective_retry_config,
+                            rate_limit_config=effective_rate_limit_config,
+                            **effective_stream_model_kwargs,
+                        )
+                        async for chunk_response in stream_iter:
+                            if hasattr(chunk_response, "choices") and chunk_response.choices:
+                                delta = chunk_response.choices[0].delta
+                                if hasattr(delta, "content") and delta.content:
+                                    accumulated_content += delta.content
+                                    chunk = StreamingChunk(
+                                        content=delta.content,
+                                        done=False,
+                                        tool_calls_made=tool_calls_made,
+                                    )
+                                    await emit_status(
+                                        ProcessEvent(
+                                            kind="stream_chunk",
+                                            correlation_id=get_correlation_id(),
+                                            timestamp=time.time(),
+                                            content=delta.content,
+                                            done=False,
+                                        ),
+                                        on_status,
+                                        sinks=sinks,
+                                    )
+                                    yield chunk
+                        # Final chunk - run output guardrails on accumulated content
+                        await emit_status(
+                            ProcessEvent(
+                                kind="stream_end",
+                                correlation_id=get_correlation_id(),
+                                timestamp=time.time(),
+                            ),
+                            on_status,
+                            sinks=sinks,
+                        )
+                        structured_output = None
+                        if response_format and accumulated_content:
+                            structured_output = _parse_structured_content(accumulated_content, response_format)
+                        if accumulated_content:
+                            if effective_guardrails:
+                                try:
+                                    accumulated_content = await self._run_guardrails(
+                                        accumulated_content, effective_guardrails, "output",
+                                        _stream_merged_registry,
+                                    )
+                                except GuardrailRejectedError as e:
+                                    # For streaming, we can't easily retry, so raise blocked error
+                                    logger.warning(f"Output guardrails rejected streamed content: {e.reason}")
+                                    raise GuardrailBlockedError(
+                                        f"Output guardrails rejected streamed content: {e.reason}",
+                                        guardrail_name=e.guardrail_name,
+                                    ) from e
+                            self._conversation.add_message(Role.ASSISTANT, accumulated_content)
+                            yield StreamingChunk(
+                                content="",
+                                done=True,
+                                tool_calls_made=tool_calls_made,
+                                structured_output=structured_output,
+                            )
+                        else:
+                            yield StreamingChunk(
+                                content="",
+                                done=True,
+                                tool_calls_made=tool_calls_made,
+                                structured_output=structured_output,
+                            )
+                        if _stream_post_iter_hooks:
+                            await self._hook_manager.execute_hooks(
+                                content=accumulated_content,
+                                stage=HookStage.POST_ITERATION,
+                                metadata={
+                                    "iteration": iteration + 1,
+                                    "has_tool_calls": False,
+                                    "tool_count": 0,
+                                },
+                                hooks=_stream_post_iter_hooks,
+                            )
+                        await record_stream_eval_success(
+                            accumulated_content,
+                            structured_out=structured_output,
+                        )
+                        return
+
+                    # With tools: stream so we get token-by-token text and can detect tool_calls from the stream
                     await emit_status(
                         ProcessEvent(
                             kind="stream_start",
@@ -4079,13 +4222,23 @@ class GlueLLM:
                         on_status,
                         sinks=sinks,
                     )
-                    # Providers (e.g. OpenAI) do not support response_format with stream=True;
-                    # we stream plain text and parse into response_format when the stream ends.
+                    await emit_status(
+                        ProcessEvent(
+                            kind="llm_call_start",
+                            correlation_id=get_correlation_id(),
+                            timestamp=time.time(),
+                            iteration=iteration + 1,
+                            model=model or self.model,
+                            message_count=len(messages),
+                        ),
+                        on_status,
+                        sinks=sinks,
+                    )
                     stream_iter = await self._llm_call(
                         _stream_merged_registry,
                         messages=messages,
                         model=model or self.model,
-                        tools=None,
+                        tools=active_tools if active_tools else None,
                         response_format=None,
                         stream=True,
                         request_timeout=request_timeout,
@@ -4095,380 +4248,291 @@ class GlueLLM:
                         rate_limit_config=effective_rate_limit_config,
                         **effective_stream_model_kwargs,
                     )
-                    async for chunk_response in stream_iter:
-                        if hasattr(chunk_response, "choices") and chunk_response.choices:
-                            delta = chunk_response.choices[0].delta
-                            if hasattr(delta, "content") and delta.content:
-                                accumulated_content += delta.content
-                                chunk = StreamingChunk(
-                                    content=delta.content,
+                    accumulated_content = ""
+                    assistant_message = None
+                    async for is_content, content_or_accumulated, msg in _consume_stream_with_tools(stream_iter):
+                        if is_content:
+                            await emit_status(
+                                ProcessEvent(
+                                    kind="stream_chunk",
+                                    correlation_id=get_correlation_id(),
+                                    timestamp=time.time(),
+                                    content=content_or_accumulated,
                                     done=False,
-                                    tool_calls_made=tool_calls_made,
-                                )
-                                await emit_status(
-                                    ProcessEvent(
-                                        kind="stream_chunk",
-                                        correlation_id=get_correlation_id(),
-                                        timestamp=time.time(),
-                                        content=delta.content,
-                                        done=False,
-                                    ),
-                                    on_status,
-                                    sinks=sinks,
-                                )
-                                yield chunk
-                    # Final chunk - run output guardrails on accumulated content
+                                ),
+                                on_status,
+                                sinks=sinks,
+                            )
+                            yield StreamingChunk(
+                                content=content_or_accumulated,
+                                done=False,
+                                tool_calls_made=tool_calls_made,
+                            )
+                        else:
+                            accumulated_content = content_or_accumulated
+                            assistant_message = msg
+                            break
+                    has_tool_calls = bool(assistant_message and getattr(assistant_message, "tool_calls", None))
                     await emit_status(
                         ProcessEvent(
-                            kind="stream_end",
+                            kind="llm_call_end",
                             correlation_id=get_correlation_id(),
                             timestamp=time.time(),
+                            iteration=iteration + 1,
+                            model=model or self.model,
+                            has_tool_calls=has_tool_calls,
+                            token_usage=None,
                         ),
                         on_status,
                         sinks=sinks,
                     )
-                    structured_output = None
-                    if response_format and accumulated_content:
-                        structured_output = _parse_structured_content(accumulated_content, response_format)
-                    if accumulated_content:
-                        if effective_guardrails:
-                            try:
-                                accumulated_content = await self._run_guardrails(
-                                    accumulated_content, effective_guardrails, "output",
-                                    _stream_merged_registry,
-                                )
-                            except GuardrailRejectedError as e:
-                                # For streaming, we can't easily retry, so raise blocked error
-                                logger.warning(f"Output guardrails rejected streamed content: {e.reason}")
-                                raise GuardrailBlockedError(
-                                    f"Output guardrails rejected streamed content: {e.reason}",
-                                    guardrail_name=e.guardrail_name,
-                                ) from e
-                        self._conversation.add_message(Role.ASSISTANT, accumulated_content)
-                        yield StreamingChunk(
-                            content="",
-                            done=True,
-                            tool_calls_made=tool_calls_made,
-                            structured_output=structured_output,
-                        )
-                    else:
-                        yield StreamingChunk(
-                            content="",
-                            done=True,
-                            tool_calls_made=tool_calls_made,
-                            structured_output=structured_output,
-                        )
-                    if _stream_post_iter_hooks:
-                        await self._hook_manager.execute_hooks(
-                            content=accumulated_content,
-                            stage=HookStage.POST_ITERATION,
-                            metadata={
-                                "iteration": iteration + 1,
-                                "has_tool_calls": False,
-                                "tool_count": 0,
-                            },
-                            hooks=_stream_post_iter_hooks,
-                        )
-                    return
+                except LLMError as e:
+                    cause_chain = _build_cause_chain(e)
+                    logger.error(
+                        f"LLM call failed on iteration {iteration + 1}: {e}, "
+                        f"error_type={type(e).__name__}, cause_chain={cause_chain}"
+                    )
+                    error_msg = f"Failed during tool execution loop (iteration {iteration + 1}/{effective_stream_max_tool_iterations})"
+                    raise type(e)(f"{error_msg}: {e}") from e
 
-                # With tools: stream so we get token-by-token text and can detect tool_calls from the stream
-                await emit_status(
-                    ProcessEvent(
-                        kind="stream_start",
-                        correlation_id=get_correlation_id(),
-                        timestamp=time.time(),
-                    ),
-                    on_status,
-                    sinks=sinks,
-                )
-                await emit_status(
-                    ProcessEvent(
-                        kind="llm_call_start",
-                        correlation_id=get_correlation_id(),
-                        timestamp=time.time(),
-                        iteration=iteration + 1,
-                        model=model or self.model,
-                        message_count=len(messages),
-                    ),
-                    on_status,
-                    sinks=sinks,
-                )
-                stream_iter = await self._llm_call(
-                    _stream_merged_registry,
-                    messages=messages,
-                    model=model or self.model,
-                    tools=active_tools if active_tools else None,
-                    response_format=None,
-                    stream=True,
-                    request_timeout=request_timeout,
-                    connect_timeout=connect_timeout,
-                    max_tokens=effective_max_tokens,
-                    retry_config=effective_retry_config,
-                    rate_limit_config=effective_rate_limit_config,
-                    **effective_stream_model_kwargs,
-                )
-                accumulated_content = ""
-                assistant_message = None
-                async for is_content, content_or_accumulated, msg in _consume_stream_with_tools(stream_iter):
-                    if is_content:
+                if _stream_post_iter_hooks:
+                    _stream_has_tools = bool(
+                        execute_tools and active_tools
+                        and assistant_message and getattr(assistant_message, "tool_calls", None)
+                    )
+                    await self._hook_manager.execute_hooks(
+                        content=accumulated_content,
+                        stage=HookStage.POST_ITERATION,
+                        metadata={
+                            "iteration": iteration + 1,
+                            "has_tool_calls": _stream_has_tools,
+                            "tool_count": len(active_tools),
+                        },
+                        hooks=_stream_post_iter_hooks,
+                    )
+
+                # Check if model wants to call tools (from streamed response)
+                if execute_tools and active_tools and assistant_message and getattr(assistant_message, "tool_calls", None):
+                    tool_calls = assistant_message.tool_calls
+                    logger.info(f"Stream iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
+
+                    # Handle router call: resolve tools, do NOT append messages, continue
+                    if router_tool is not None and is_router_call(tool_calls):
+                        query = json.loads(tool_calls[0].function.arguments)["query"]
+                        user_context = next(
+                            (m.get("content", "") or "" for m in messages if m.get("role") == "user"),
+                            query,
+                        )
+                        if isinstance(user_context, list):
+                            user_context = query
+                        matched = await self._route_tools(
+                            user_context,
+                            dynamic_tools,
+                            _stream_merged_registry,
+                            model=self.tool_route_model,
+                            api_key=None,
+                            timeout=request_timeout,
+                        )
+                        active_tools = matched + static_tools
+                        logger.debug(
+                            f"[{get_correlation_id()}] Dynamic tool routing complete: "
+                            f"matched={len(matched)}, static={len(static_tools)}, total_active={len(active_tools)}"
+                        )
                         await emit_status(
                             ProcessEvent(
-                                kind="stream_chunk",
+                                kind="tool_route",
                                 correlation_id=get_correlation_id(),
                                 timestamp=time.time(),
-                                content=content_or_accumulated,
-                                done=False,
+                                route_query=query,
+                                matched_tools=[t.__name__ for t in matched],
                             ),
                             on_status,
                             sinks=sinks,
                         )
-                        yield StreamingChunk(
-                            content=content_or_accumulated,
-                            done=False,
-                            tool_calls_made=tool_calls_made,
-                        )
-                    else:
-                        accumulated_content = content_or_accumulated
-                        assistant_message = msg
-                        break
-                has_tool_calls = bool(assistant_message and getattr(assistant_message, "tool_calls", None))
+                        # Update system prompt to reflect matched tools (no longer router)
+                        messages[0]["content"] = self._format_system_prompt(tools=active_tools)
+                        continue
+
+                    # Yield a chunk indicating tool execution is happening
+                    yield StreamingChunk(
+                        content="[Executing tools...]",
+                        done=False,
+                        tool_calls_made=tool_calls_made,
+                    )
+
+                    # Add assistant message with tool calls to history (dict for any_llm validation)
+                    msg_dict = _streamed_assistant_message_to_dict(assistant_message)
+                    if msg_dict is not None:
+                        messages.append(msg_dict)
+
+                    # Execute tool calls (sequential or parallel per effective_tool_execution_order)
+                    round_results = await self._execute_tool_calls_round(
+                        tool_calls=tool_calls,
+                        active_tools=active_tools,
+                        parallel=(effective_tool_execution_order == "parallel"),
+                        iteration=iteration + 1,
+                        correlation_id=get_correlation_id(),
+                        on_status=on_status,
+                        sinks=sinks,
+                    )
+                    tool_calls_made += len(round_results)
+                    for r in round_results:
+                        tool_execution_history.append(r["history"])
+                        messages.append(r["message"])
+
+                    if effective_condense:
+                        _condense_tool_round(messages, aaak_tool_condensing=self.aaak_tool_condensing)
+
+                    # Continue loop to get next response (stream again)
+                    continue
+
+                # No more tool calls: we streamed the final text; run guardrails and finish
+                final_content = accumulated_content or ""
+
+                # Output guardrails with retry loop (similar to complete())
+                if effective_guardrails and final_content:
+                    max_retries = effective_guardrails.max_output_guardrail_retries
+                    output_retry_count = 0
+                    while output_retry_count <= max_retries:
+                        try:
+                            # Run output guardrails
+                            final_content = await self._run_guardrails(
+                                final_content, effective_guardrails, "output",
+                                _stream_merged_registry, attempt=output_retry_count,
+                            )
+                            # Guardrails passed, break out of retry loop
+                            break
+                        except GuardrailRejectedError as e:
+                            output_retry_count += 1
+                            if output_retry_count > max_retries:
+                                # Max retries exceeded, raise blocked error
+                                logger.warning(f"Output guardrails failed after {max_retries} retries: {e.reason}")
+                                raise GuardrailBlockedError(
+                                    f"Output guardrails failed after {max_retries} retries: {e.reason}",
+                                    guardrail_name=e.guardrail_name,
+                                ) from e
+
+                            # Add rejected response to conversation (for context)
+                            messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": final_content,
+                                }
+                            )
+
+                            # Append feedback message requesting revised response
+                            feedback_message = (
+                                f"Your previous response was rejected: {e.reason}. "
+                                "Please provide a revised response that addresses this issue."
+                            )
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": feedback_message,
+                                }
+                            )
+                            logger.info(
+                                f"Output guardrail rejected response (attempt {output_retry_count}/{max_retries}): "
+                                f"{e.reason}. Requesting revised response."
+                            )
+
+                            # Call LLM again for revised response (no tools, just text response)
+                            try:
+                                response = await self._llm_call(
+                                    _stream_merged_registry,
+                                    messages=messages,
+                                    model=model or self.model,
+                                    tools=None,  # No tools on retry
+                                    request_timeout=request_timeout,
+                                    connect_timeout=connect_timeout,
+                                    max_tokens=effective_max_tokens,
+                                    retry_config=effective_retry_config,
+                                    rate_limit_config=effective_rate_limit_config,
+                                    **effective_stream_model_kwargs,
+                                )
+                            except LLMError as llm_error:
+                                # LLM call failed during retry, raise blocked error
+                                raise GuardrailBlockedError(
+                                    f"Failed to get revised response after guardrail rejection: {llm_error}",
+                                    guardrail_name=e.guardrail_name,
+                                ) from llm_error
+
+                            if not response.choices:
+                                raise InvalidRequestError(
+                                    "Empty response from LLM provider during guardrail retry"
+                                ) from None
+
+                            # Get the revised response
+                            final_content = response.choices[0].message.content or ""
+                            logger.debug(
+                                f"Received revised response (length={len(final_content)}), re-running output guardrails"
+                            )
+                            # Continue loop to re-check guardrails
+
+                # Stream the final response character by character (simulated streaming)
+                # In a real implementation, you'd stream from the API
                 await emit_status(
                     ProcessEvent(
-                        kind="llm_call_end",
+                        kind="stream_end",
                         correlation_id=get_correlation_id(),
                         timestamp=time.time(),
-                        iteration=iteration + 1,
-                        model=model or self.model,
-                        has_tool_calls=has_tool_calls,
-                        token_usage=None,
                     ),
                     on_status,
                     sinks=sinks,
                 )
-            except LLMError as e:
-                cause_chain = _build_cause_chain(e)
-                logger.error(
-                    f"LLM call failed on iteration {iteration + 1}: {e}, "
-                    f"error_type={type(e).__name__}, cause_chain={cause_chain}"
-                )
-                error_msg = f"Failed during tool execution loop (iteration {iteration + 1}/{effective_stream_max_tool_iterations})"
-                raise type(e)(f"{error_msg}: {e}") from e
-
-            if _stream_post_iter_hooks:
-                _stream_has_tools = bool(
-                    execute_tools and active_tools
-                    and assistant_message and getattr(assistant_message, "tool_calls", None)
-                )
-                await self._hook_manager.execute_hooks(
-                    content=accumulated_content,
-                    stage=HookStage.POST_ITERATION,
-                    metadata={
-                        "iteration": iteration + 1,
-                        "has_tool_calls": _stream_has_tools,
-                        "tool_count": len(active_tools),
-                    },
-                    hooks=_stream_post_iter_hooks,
-                )
-
-            # Check if model wants to call tools (from streamed response)
-            if execute_tools and active_tools and assistant_message and getattr(assistant_message, "tool_calls", None):
-                tool_calls = assistant_message.tool_calls
-                logger.info(f"Stream iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
-
-                # Handle router call: resolve tools, do NOT append messages, continue
-                if router_tool is not None and is_router_call(tool_calls):
-                    query = json.loads(tool_calls[0].function.arguments)["query"]
-                    user_context = next(
-                        (m.get("content", "") or "" for m in messages if m.get("role") == "user"),
-                        query,
+                structured_output = None
+                if response_format and final_content:
+                    structured_output = _parse_structured_content(final_content, response_format)
+                if final_content:
+                    # For now, yield the full content as a single chunk
+                    # In production, this would be actual streaming chunks from the API
+                    self._conversation.add_message(Role.ASSISTANT, final_content)
+                    yield StreamingChunk(
+                        content=final_content,
+                        done=True,
+                        tool_calls_made=tool_calls_made,
+                        structured_output=structured_output,
                     )
-                    if isinstance(user_context, list):
-                        user_context = query
-                    matched = await self._route_tools(
-                        user_context,
-                        dynamic_tools,
-                        _stream_merged_registry,
-                        model=self.tool_route_model,
-                        api_key=None,
-                        timeout=request_timeout,
+                else:
+                    yield StreamingChunk(
+                        content="",
+                        done=True,
+                        tool_calls_made=tool_calls_made,
+                        structured_output=structured_output,
                     )
-                    active_tools = matched + static_tools
-                    logger.debug(
-                        f"[{get_correlation_id()}] Dynamic tool routing complete: "
-                        f"matched={len(matched)}, static={len(static_tools)}, total_active={len(active_tools)}"
-                    )
-                    await emit_status(
-                        ProcessEvent(
-                            kind="tool_route",
-                            correlation_id=get_correlation_id(),
-                            timestamp=time.time(),
-                            route_query=query,
-                            matched_tools=[t.__name__ for t in matched],
-                        ),
-                        on_status,
-                        sinks=sinks,
-                    )
-                    # Update system prompt to reflect matched tools (no longer router)
-                    messages[0]["content"] = self._format_system_prompt(tools=active_tools)
-                    continue
 
-                # Yield a chunk indicating tool execution is happening
-                yield StreamingChunk(
-                    content="[Executing tools...]",
-                    done=False,
-                    tool_calls_made=tool_calls_made,
+                await record_stream_eval_success(
+                    final_content,
+                    structured_out=structured_output,
                 )
+                return
 
-                # Add assistant message with tool calls to history (dict for any_llm validation)
-                msg_dict = _streamed_assistant_message_to_dict(assistant_message)
-                if msg_dict is not None:
-                    messages.append(msg_dict)
-
-                # Execute tool calls (sequential or parallel per effective_tool_execution_order)
-                round_results = await self._execute_tool_calls_round(
-                    tool_calls=tool_calls,
-                    active_tools=active_tools,
-                    parallel=(effective_tool_execution_order == "parallel"),
-                    iteration=iteration + 1,
-                    correlation_id=get_correlation_id(),
-                    on_status=on_status,
-                    sinks=sinks,
-                )
-                tool_calls_made += len(round_results)
-                for r in round_results:
-                    tool_execution_history.append(r["history"])
-                    messages.append(r["message"])
-
-                if effective_condense:
-                    _condense_tool_round(messages, aaak_tool_condensing=self.aaak_tool_condensing)
-
-                # Continue loop to get next response (stream again)
-                continue
-
-            # No more tool calls: we streamed the final text; run guardrails and finish
-            final_content = accumulated_content or ""
-
-            # Output guardrails with retry loop (similar to complete())
-            if effective_guardrails and final_content:
-                max_retries = effective_guardrails.max_output_guardrail_retries
-                output_retry_count = 0
-                while output_retry_count <= max_retries:
-                    try:
-                        # Run output guardrails
-                        final_content = await self._run_guardrails(
-                            final_content, effective_guardrails, "output",
-                            _stream_merged_registry, attempt=output_retry_count,
-                        )
-                        # Guardrails passed, break out of retry loop
-                        break
-                    except GuardrailRejectedError as e:
-                        output_retry_count += 1
-                        if output_retry_count > max_retries:
-                            # Max retries exceeded, raise blocked error
-                            logger.warning(f"Output guardrails failed after {max_retries} retries: {e.reason}")
-                            raise GuardrailBlockedError(
-                                f"Output guardrails failed after {max_retries} retries: {e.reason}",
-                                guardrail_name=e.guardrail_name,
-                            ) from e
-
-                        # Add rejected response to conversation (for context)
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": final_content,
-                            }
-                        )
-
-                        # Append feedback message requesting revised response
-                        feedback_message = (
-                            f"Your previous response was rejected: {e.reason}. "
-                            "Please provide a revised response that addresses this issue."
-                        )
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": feedback_message,
-                            }
-                        )
-                        logger.info(
-                            f"Output guardrail rejected response (attempt {output_retry_count}/{max_retries}): "
-                            f"{e.reason}. Requesting revised response."
-                        )
-
-                        # Call LLM again for revised response (no tools, just text response)
-                        try:
-                            response = await self._llm_call(
-                                _stream_merged_registry,
-                                messages=messages,
-                                model=model or self.model,
-                                tools=None,  # No tools on retry
-                                request_timeout=request_timeout,
-                                connect_timeout=connect_timeout,
-                                max_tokens=effective_max_tokens,
-                                retry_config=effective_retry_config,
-                                rate_limit_config=effective_rate_limit_config,
-                                **effective_stream_model_kwargs,
-                            )
-                        except LLMError as llm_error:
-                            # LLM call failed during retry, raise blocked error
-                            raise GuardrailBlockedError(
-                                f"Failed to get revised response after guardrail rejection: {llm_error}",
-                                guardrail_name=e.guardrail_name,
-                            ) from llm_error
-
-                        if not response.choices:
-                            raise InvalidRequestError(
-                                "Empty response from LLM provider during guardrail retry"
-                            ) from None
-
-                        # Get the revised response
-                        final_content = response.choices[0].message.content or ""
-                        logger.debug(
-                            f"Received revised response (length={len(final_content)}), re-running output guardrails"
-                        )
-                        # Continue loop to re-check guardrails
-
-            # Stream the final response character by character (simulated streaming)
-            # In a real implementation, you'd stream from the API
-            await emit_status(
-                ProcessEvent(
-                    kind="stream_end",
-                    correlation_id=get_correlation_id(),
-                    timestamp=time.time(),
-                ),
-                on_status,
-                sinks=sinks,
+            # Max iterations reached
+            logger.warning(f"Max tool execution iterations ({effective_stream_max_tool_iterations}) reached")
+            yield StreamingChunk(
+                content="Maximum tool execution iterations reached.",
+                done=True,
+                tool_calls_made=tool_calls_made,
             )
-            structured_output = None
-            if response_format and final_content:
-                structured_output = _parse_structured_content(final_content, response_format)
-            if final_content:
-                # For now, yield the full content as a single chunk
-                # In production, this would be actual streaming chunks from the API
-                self._conversation.add_message(Role.ASSISTANT, final_content)
-                yield StreamingChunk(
-                    content=final_content,
-                    done=True,
-                    tool_calls_made=tool_calls_made,
-                    structured_output=structured_output,
-                )
-            else:
-                yield StreamingChunk(
-                    content="",
-                    done=True,
-                    tool_calls_made=tool_calls_made,
-                    structured_output=structured_output,
-                )
+            await record_stream_eval_success("Maximum tool execution iterations reached.")
 
-            return
-
-        # Max iterations reached
-        logger.warning(f"Max tool execution iterations ({effective_stream_max_tool_iterations}) reached")
-        yield StreamingChunk(
-            content="Maximum tool execution iterations reached.",
-            done=True,
-            tool_calls_made=tool_calls_made,
-        )
+        except Exception as e:
+            error = e
+            raise
+        finally:
+            if error is not None and not eval_recorded:
+                await _record_eval_data(
+                    eval_store=effective_eval_store,
+                    user_message=user_message,
+                    system_prompt=system_prompt_content,
+                    model=model or self.model,
+                    messages_snapshot=messages_snapshot,
+                    start_time=start_time,
+                    error=error,
+                    tools_available=self.tools,
+                    on_eval_record_hooks=_stream_merged_registry.get_hooks(HookStage.PRE_EVAL_RECORD),
+                    hook_manager=self._hook_manager,
+                )
 
     def reset_conversation(self) -> None:
         """Reset the conversation history."""

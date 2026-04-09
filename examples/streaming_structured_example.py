@@ -4,13 +4,20 @@ Example: Streaming with Structured Output
 Demonstrates how to combine streaming with a Pydantic response_format.
 Most chunks carry only text; the final chunk (chunk.done == True) also
 carries chunk.structured_output typed as the requested model.
+
+Example 4 shows eval recording with stream_complete; see examples/eval_recording.py
+for complete(), structured_complete(), and other store patterns.
 """
 
 import asyncio
+import json
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from gluellm import GlueLLM
 from gluellm.api import stream_complete
+from gluellm.eval import JSONLFileStore
 
 
 class ArticleSummary(BaseModel):
@@ -137,10 +144,61 @@ async def example_stream_without_format():
             print()
 
 
+async def example_stream_with_eval_recording():
+    """Stream a short reply while appending an EvalRecord to JSONL (stream_complete + eval_store)."""
+    print("\n" + "=" * 70)
+    print("Example 4: Streaming with eval recording (JSONL)")
+    print("=" * 70)
+
+    Path("./eval_data").mkdir(exist_ok=True)
+    out_path = Path("./eval_data/streaming_records.jsonl")
+    store = JSONLFileStore(str(out_path))
+    client = GlueLLM(
+        model="openai:gpt-4o-mini",
+        system_prompt="You are a helpful assistant. Keep answers brief.",
+        tools=[],
+        eval_store=store,
+    )
+
+    print("\nStreaming response:")
+    print("-" * 40)
+    try:
+        async for chunk in client.stream_complete(
+            user_message="In one sentence, what is Python?",
+            execute_tools=False,
+        ):
+            print(chunk.content, end="", flush=True)
+            if chunk.done:
+                print()
+    finally:
+        await store.close()
+
+    print(f"\nEval record appended to: {out_path.resolve()}")
+    print(
+        "Note: streaming eval rows typically omit raw_response, tokens_used, "
+        "and estimated_cost_usd (no single ChatCompletion / usage on this path)."
+    )
+
+    if out_path.is_file() and out_path.stat().st_size > 0:
+        last_line = ""
+        with out_path.open() as f:
+            for line in f:
+                if line.strip():
+                    last_line = line
+        if last_line:
+            rec = json.loads(last_line)
+            preview = (rec.get("final_response") or "")[:120]
+            if len(rec.get("final_response") or "") > 120:
+                preview += "..."
+            print(f"\nLast record id={rec.get('id')} success={rec.get('success')}")
+            print(f"final_response (truncated): {preview!r}")
+
+
 async def main():
     await example_stream_with_summary()
     await example_stream_with_code_review()
     await example_stream_without_format()
+    await example_stream_with_eval_recording()
 
     print("\n" + "=" * 70)
     print("All streaming examples completed!")

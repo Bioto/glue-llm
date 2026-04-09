@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from gluellm.api import (
     ExecutionResult,
     GlueLLM,
+    LLMError,
     _condense_tool_round,
     complete,
     get_session_summary,
@@ -2873,6 +2874,106 @@ class TestPerCallConfigGaps:
             # All _record_eval_data calls should have eval_store=None when enable_eval_recording=False
             for call in mock_record.call_args_list:
                 assert call.kwargs.get("eval_store") is None
+
+    async def test_stream_complete_records_eval_on_success(self):
+        """stream_complete calls _record_eval_data with ExecutionResult on success."""
+
+        async def fake_llm(*args, **kwargs):
+            if kwargs.get("stream"):
+                async def stream():
+                    yield SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(content="Hello", tool_calls=None),
+                            )
+                        ]
+                    )
+
+                return stream()
+            raise AssertionError("non-stream path not expected")
+
+        eval_store = AsyncMock()
+        client = GlueLLM(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a test assistant.",
+            tools=[],
+            eval_store=eval_store,
+        )
+        with patch("gluellm.api._record_eval_data", new_callable=AsyncMock) as mock_record:
+            with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+                chunks = []
+                async for ch in client.stream_complete("Hi", execute_tools=False):
+                    chunks.append(ch)
+
+        mock_record.assert_awaited_once()
+        rec = mock_record.await_args.kwargs
+        assert rec.get("eval_store") is eval_store
+        assert rec.get("error") is None
+        result = rec.get("result")
+        assert result is not None
+        assert result.final_response == "Hello"
+        assert result.tool_calls_made == 0
+        assert result.raw_response is None
+        assert result.tokens_used is None
+        assert any(ch.done for ch in chunks)
+
+    async def test_stream_complete_records_eval_on_error(self):
+        """stream_complete calls _record_eval_data with error when streaming LLM call fails."""
+
+        async def fake_llm(*args, **kwargs):
+            if kwargs.get("stream"):
+                raise LLMError("stream failed")
+            raise AssertionError("non-stream path not expected")
+
+        eval_store = AsyncMock()
+        client = GlueLLM(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a test assistant.",
+            tools=[],
+            eval_store=eval_store,
+        )
+        with patch("gluellm.api._record_eval_data", new_callable=AsyncMock) as mock_record:
+            with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+                with pytest.raises(LLMError):
+                    async for _ch in client.stream_complete("Hi", execute_tools=False):
+                        pass
+
+        mock_record.assert_awaited_once()
+        rec = mock_record.await_args.kwargs
+        assert rec.get("result") is None
+        assert rec.get("error") is not None
+        assert isinstance(rec.get("error"), LLMError)
+        assert rec.get("eval_store") is eval_store
+
+    async def test_stream_complete_enable_eval_recording_false_skips_store(self):
+        """When enable_eval_recording=False, _record_eval_data gets eval_store=None."""
+
+        async def fake_llm(*args, **kwargs):
+            if kwargs.get("stream"):
+                async def stream():
+                    yield SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(content="Hi", tool_calls=None),
+                            )
+                        ]
+                    )
+
+                return stream()
+            raise AssertionError("non-stream path not expected")
+
+        with patch("gluellm.api._record_eval_data", new_callable=AsyncMock) as mock_record:
+            with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+                async for _ch in stream_complete(
+                    user_message="Hi",
+                    tools=[],
+                    execute_tools=False,
+                    enable_eval_recording=False,
+                ):
+                    pass
+
+        for call in mock_record.call_args_list:
+            assert call.kwargs.get("eval_store") is None
 
 
 class TestNewParameters:
