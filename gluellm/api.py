@@ -72,7 +72,6 @@ from any_llm import AnyLLM
 from any_llm.types.completion import ChatCompletion
 from pydantic import BaseModel, Field, ValidationError, field_validator, field_serializer
 from pydantic.functional_validators import SkipValidation
-from gluellm.compression.aaak import AAAKCompressor
 from gluellm.config import settings
 from gluellm.config import ToolExecutionOrder
 from gluellm.tool_router import (
@@ -113,6 +112,9 @@ type OnStatusCallback = Callable[[ProcessEvent], None] | Callable[[ProcessEvent]
 
 # Reasoning effort for o3, o4-mini, Claude thinking models (any_llm 1.11.0)
 type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "auto"]
+
+# GlueLLM call-level options that must never be forwarded to provider.acompletion (OpenAI, etc.).
+_PROVIDER_ACOMPLETION_SKIP_KEYS = frozenset({"max_tool_iterations", "execute_tools"})
 
 
 # ============================================================================
@@ -980,6 +982,11 @@ def _condense_tool_round(
 
     Rounds where the assistant produced visible text content alongside tool calls
     are left untouched, because that text carries meaning the model needs to see.
+
+    Args:
+        messages: Conversation messages (mutated in place).
+        aaak_tool_condensing: If True, encode the round as an ``[AT]`` AAAK block
+            and ensure the system message has the AAAK decoding preamble.
     """
     # Collect trailing tool-response messages
     tool_response_indices: list[int] = []
@@ -1016,26 +1023,32 @@ def _condense_tool_round(
         name = fn.get("name", "unknown") if isinstance(fn, dict) else getattr(fn, "name", "unknown")
         id_to_name[tc_id] = name
 
-    tool_msgs_ordered = [messages[i] for i in tool_response_indices]
     if aaak_tool_condensing:
+        from gluellm.compression.aaak import AAAKCompressor
+
+        if messages and messages[0].get("role") == "system":
+            AAAKCompressor.ensure_preamble_in_system(messages[0])
+        tool_messages = [messages[i] for i in tool_response_indices]
         condensed_content = AAAKCompressor.encode_tool_round(
             list(tool_calls),
-            tool_msgs_ordered,
+            tool_messages,
             id_to_name,
         )
-    else:
-        lines = ["[Tool Results]"]
-        for tool_msg in tool_msgs_ordered:
-            tc_id = tool_msg.get("tool_call_id", "")
-            name = id_to_name.get(tc_id, tc_id)
-            result = tool_msg.get("content", "")
-            lines.append(f"- {name} -> {result}")
-        condensed_content = "\n".join(lines)
+        del messages[assistant_idx:]
+        messages.append({"role": "user", "content": condensed_content})
+        return
+
+    lines = ["[Tool Results]"]
+    for tool_msg in (messages[i] for i in tool_response_indices):
+        tc_id = tool_msg.get("tool_call_id", "")
+        name = id_to_name.get(tc_id, tc_id)
+        result = tool_msg.get("content", "")
+        lines.append(f"- {name} -> {result}")
+
+    condensed_content = "\n".join(lines)
 
     # Replace the N+1 messages with a single condensed user message (ends on user so LLM continues)
     del messages[assistant_idx:]
-    if aaak_tool_condensing and messages and messages[0].get("role") == "system":
-        AAAKCompressor.ensure_preamble_in_system(messages[0])
     messages.append({"role": "user", "content": condensed_content})
 
 
@@ -1064,9 +1077,9 @@ async def _summarize_old_messages(
     """Compress older conversation messages into a single summary message.
 
     Preserves the system prompt (index 0) and the most recent ``keep_recent``
-    messages verbatim. Everything in between is sent to the LLM for summarization
-    (prose) or AAAK lossless encoding when ``use_aaak`` is True, and replaced
-    with one ``role: "user"`` summary message.
+    messages verbatim. Everything in between is replaced with one ``role: "user"``
+    summary message: prose ``[Conversation Summary]`` by default, or AAAK
+    ``[AAAK CTX]`` blocks when ``use_aaak`` is True.
 
     Returns the original list unchanged when there is nothing old enough to
     summarize (i.e. the non-system messages number ``keep_recent`` or fewer).
@@ -1074,13 +1087,14 @@ async def _summarize_old_messages(
     Args:
         messages: Full message list including the system prompt at index 0.
         keep_recent: Number of trailing messages to keep verbatim.
-        model: Model identifier used for the summarization / compression call.
-        use_aaak: If True, compress via AAAK instead of prose summarization.
-        aaak_model: Model for AAAK encoding (defaults to ``model`` when None).
+        model: Model identifier used for prose summarization and default AAAK model.
+        use_aaak: If True, run AAAK compression on old messages instead of prose summary.
+        aaak_model: Model for AAAK compression when ``use_aaak`` (defaults to ``model``).
+        completion_extra: Optional kwargs merged into provider ``acompletion`` calls.
 
     Returns:
         A shortened message list: [system] + [summary] + recent_messages,
-        or the original list if no summarization was needed.
+        or the original list if no summarization was needed (or AAAK returned empty).
     """
     if len(messages) < 2:
         return messages
@@ -1094,58 +1108,66 @@ async def _summarize_old_messages(
     old_messages = non_system[: len(non_system) - keep_recent]
     recent_messages = non_system[len(non_system) - keep_recent :]
 
-    # Build a readable transcript of the old messages for the summarizer.
-    # Skip messages with non-string content (e.g. tool-call dicts) gracefully.
+    if use_aaak:
+        from gluellm.compression.aaak import AAAKCompressor
+
+        sys_out: dict[str, Any] = {**system_msg}
+        AAAKCompressor.ensure_preamble_in_system(sys_out)
+        compress_model = aaak_model or model
+        try:
+            encoded = await AAAKCompressor.compress_messages(
+                old_messages,
+                model=compress_model,
+                completion_extra=completion_extra,
+            )
+        except Exception:
+            logger.warning("AAAK context compression failed; continuing with original messages.", exc_info=True)
+            return messages
+
+        if not (encoded or "").strip():
+            return messages
+
+        summary_msg: dict[str, Any] = {
+            "role": "user",
+            "content": f"[AAAK CTX]\n{encoded}\n[/AAAK CTX]",
+        }
+        logger.debug(
+            f"Context AAAK-compressed: {len(old_messages)} old messages → 1 summary message "
+            f"({len(recent_messages)} recent messages kept verbatim)"
+        )
+        return [sys_out, summary_msg, *recent_messages]
+
+    # Prose summarization (default)
     transcript_lines: list[str] = []
     for msg in old_messages:
         role = msg.get("role", "unknown")
         content = msg.get("content") or ""
         if isinstance(content, list):
-            # Multi-part content (vision, tool results) — join text parts only
             text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
             content = " ".join(text_parts)
         transcript_lines.append(f"{role.upper()}: {content}")
 
     transcript = "\n".join(transcript_lines)
 
-    compression_model = aaak_model or model
+    summarize_messages = [
+        {"role": "system", "content": _SUMMARIZE_SYSTEM_PROMPT},
+        {"role": "user", "content": _SUMMARIZE_USER_PREFIX + transcript},
+    ]
 
     try:
-        if use_aaak:
-            summary_text = await AAAKCompressor.compress_messages(
-                old_messages,
-                model=compression_model,
-                api_key=None,
-                completion_extra=completion_extra,
-            )
-            if not summary_text:
-                logger.warning("AAAK compression empty; continuing with original messages.")
-                return messages
-            summary_msg = {
-                "role": "user",
-                "content": f"[AAAK CTX]\n{summary_text}\n[/AAAK CTX]",
-            }
-            AAAKCompressor.ensure_preamble_in_system(system_msg)
-        else:
-            summarize_messages = [
-                {"role": "system", "content": _SUMMARIZE_SYSTEM_PROMPT},
-                {"role": "user", "content": _SUMMARIZE_USER_PREFIX + transcript},
-            ]
-            provider_cache = _ProviderCache()
-            provider, model_id = provider_cache.get_provider(model, api_key=None)
-            response = await provider.acompletion(
-                model=model_id,
-                messages=summarize_messages,
-                **(completion_extra or {}),
-            )
-            summary_text = response.choices[0].message.content or ""
-            summary_msg = {
-                "role": "user",
-                "content": f"[Conversation Summary]\n{summary_text}",
-            }
+        provider_cache = _ProviderCache()
+        provider, model_id = provider_cache.get_provider(model, api_key=None)
+        extra = dict(completion_extra or {})
+        response = await provider.acompletion(model=model_id, messages=summarize_messages, **extra)
+        summary_text = response.choices[0].message.content or ""
     except Exception:
         logger.warning("Context summarization failed; continuing with original messages.", exc_info=True)
         return messages
+
+    summary_msg = {
+        "role": "user",
+        "content": f"[Conversation Summary]\n{summary_text}",
+    }
 
     logger.debug(
         f"Context summarized: {len(old_messages)} old messages → 1 summary message "
@@ -1516,6 +1538,10 @@ async def _safe_llm_call(
     connect_timeout = connect_timeout or settings.default_connect_timeout
     connect_timeout = min(connect_timeout, settings.max_connect_timeout)  # Enforce max connect timeout
     _patch_any_llm_openai_converter()
+
+    model_kwargs = dict(model_kwargs)
+    for _k in _PROVIDER_ACOMPLETION_SKIP_KEYS:
+        model_kwargs.pop(_k, None)
 
     # Inject httpx.Timeout into model_kwargs if caller hasn't set it (provider SDKs accept this)
     if "timeout" not in model_kwargs:
@@ -2006,12 +2032,9 @@ class GlueLLM:
                 client's primary model. A cheaper/faster model is often sufficient here.
             summarize_context_keep_recent: Number of most-recent messages to always keep verbatim.
                 Defaults to settings.default_summarize_context_keep_recent (6).
-            aaak_compression_enabled: When True and summarize_context is on, use AAAK lossless
-                shorthand instead of prose summarization for old messages.
-            aaak_compression_model: Model for AAAK compression (defaults to summarize_context_model
-                or primary model).
-            aaak_tool_condensing: When True and condense_tool_messages is on, encode condensed
-                tool rounds in AAAK instead of plain ``[Tool Results]`` text.
+            aaak_compression_enabled: Use AAAK LLM compression when summarizing context (defaults to settings).
+            aaak_compression_model: Model for AAAK compression when enabled (defaults to settings).
+            aaak_tool_condensing: Encode condensed tool rounds as AAAK ``[AT]`` blocks (defaults to settings).
         """
         self.model = model or settings.default_model
         self.embedding_model = embedding_model or settings.default_embedding_model
@@ -2063,11 +2086,11 @@ class GlueLLM:
             if aaak_compression_enabled is not None
             else settings.aaak_compression_enabled
         )
-        self.aaak_compression_model = aaak_compression_model
+        self.aaak_compression_model = (
+            aaak_compression_model if aaak_compression_model is not None else settings.aaak_compression_model
+        )
         self.aaak_tool_condensing = (
-            aaak_tool_condensing
-            if aaak_tool_condensing is not None
-            else settings.aaak_tool_condensing
+            aaak_tool_condensing if aaak_tool_condensing is not None else settings.aaak_tool_condensing
         )
 
     def _get_merged_hook_registry(self) -> HookRegistry:
@@ -2336,7 +2359,14 @@ class GlueLLM:
         if rate_limit_algorithm is not None:
             effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
         effective_eval_store = None if enable_eval_recording is False else self.eval_store
-        effective_model_kwargs = {**self.model_kwargs, **model_kwargs}
+        call_model_kwargs = dict(model_kwargs)
+        override_max_tool_iterations = call_model_kwargs.pop("max_tool_iterations", None)
+        effective_max_tool_iterations = (
+            override_max_tool_iterations
+            if override_max_tool_iterations is not None
+            else self.max_tool_iterations
+        )
+        effective_model_kwargs = {**self.model_kwargs, **call_model_kwargs}
         if reasoning_effort is not None:
             effective_model_kwargs["reasoning_effort"] = reasoning_effort
         if logprobs is not None:
@@ -2421,11 +2451,11 @@ class GlueLLM:
 
                 # Tool execution loop
                 logger.debug(
-                    f"Starting tool execution loop: max_iterations={self.max_tool_iterations}, "
+                    f"Starting tool execution loop: max_iterations={effective_max_tool_iterations}, "
                     f"tools_available={len(active_tools) if active_tools else 0}, tool_mode={effective_tool_mode}"
                 )
-                for iteration in range(self.max_tool_iterations):
-                    logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
+                for iteration in range(effective_max_tool_iterations):
+                    logger.debug(f"Tool execution iteration {iteration + 1}/{effective_max_tool_iterations}")
                     try:
                         # Context summarization: compress old messages when threshold is exceeded
                         if effective_summarize_context and len(messages) > effective_summarize_context_threshold:
@@ -2434,8 +2464,7 @@ class GlueLLM:
                                 keep_recent=effective_summarize_context_keep_recent,
                                 model=effective_summarize_context_model,
                                 use_aaak=self.aaak_compression_enabled,
-                                aaak_model=self.aaak_compression_model
-                                or effective_summarize_context_model,
+                                aaak_model=self.aaak_compression_model,
                             )
 
                         # PRE_ITERATION hook: content is the last user message in the conversation
@@ -2482,12 +2511,12 @@ class GlueLLM:
                         # Log the error and re-raise with context
                         cause_chain = _build_cause_chain(e)
                         logger.error(
-                            f"LLM call failed on iteration {iteration + 1}/{self.max_tool_iterations}: {e}, "
+                            f"LLM call failed on iteration {iteration + 1}/{effective_max_tool_iterations}: {e}, "
                             f"error_type={type(e).__name__}, cause_chain={cause_chain}"
                         )
                         # Add error context to the exception
                         error_msg = (
-                            f"Failed during tool execution loop (iteration {iteration + 1}/{self.max_tool_iterations})"
+                            f"Failed during tool execution loop (iteration {iteration + 1}/{effective_max_tool_iterations})"
                         )
                         raise type(e)(f"{error_msg}: {e}") from e
 
@@ -2586,10 +2615,7 @@ class GlueLLM:
                             messages.append(r["message"])
 
                         if effective_condense:
-                            _condense_tool_round(
-                                messages,
-                                aaak_tool_condensing=self.aaak_tool_condensing,
-                            )
+                            _condense_tool_round(messages, aaak_tool_condensing=self.aaak_tool_condensing)
 
                         # Continue loop to get next response
                         continue
@@ -2742,7 +2768,7 @@ class GlueLLM:
                     return result
 
                 # Max iterations reached
-                logger.warning(f"Max tool execution iterations ({self.max_tool_iterations}) reached")
+                logger.warning(f"Max tool execution iterations ({effective_max_tool_iterations}) reached")
                 final_content = "Maximum tool execution iterations reached."
 
                 # Extract token usage if available
@@ -2932,7 +2958,14 @@ class GlueLLM:
         if rate_limit_algorithm is not None:
             effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
         effective_eval_store = None if enable_eval_recording is False else self.eval_store
-        effective_model_kwargs = {**self.model_kwargs, **model_kwargs}
+        call_model_kwargs = dict(model_kwargs)
+        override_max_tool_iterations = call_model_kwargs.pop("max_tool_iterations", None)
+        effective_max_tool_iterations = (
+            override_max_tool_iterations
+            if override_max_tool_iterations is not None
+            else self.max_tool_iterations
+        )
+        effective_model_kwargs = {**self.model_kwargs, **call_model_kwargs}
         if reasoning_effort is not None:
             effective_model_kwargs["reasoning_effort"] = reasoning_effort
         if logprobs is not None:
@@ -3046,13 +3079,13 @@ class GlueLLM:
                 # PHASE 1: Tool execution loop (if tools are provided and execute_tools is True)
                 if active_tools and execute_tools:
                     logger.debug(
-                        f"Starting tool execution phase: max_iterations={self.max_tool_iterations}, "
+                        f"Starting tool execution phase: max_iterations={effective_max_tool_iterations}, "
                         f"tools_available={len(active_tools)}, tool_mode={effective_tool_mode}"
                     )
                     _sc_pre_iter_hooks = _sc_merged_registry.get_hooks(HookStage.PRE_ITERATION)
                     _sc_post_iter_hooks = _sc_merged_registry.get_hooks(HookStage.POST_ITERATION)
-                    for iteration in range(self.max_tool_iterations):
-                        logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
+                    for iteration in range(effective_max_tool_iterations):
+                        logger.debug(f"Tool execution iteration {iteration + 1}/{effective_max_tool_iterations}")
 
                         try:
                             # Context summarization: compress old messages when threshold is exceeded
@@ -3062,8 +3095,7 @@ class GlueLLM:
                                     keep_recent=effective_summarize_context_keep_recent,
                                     model=effective_summarize_context_model,
                                     use_aaak=self.aaak_compression_enabled,
-                                    aaak_model=self.aaak_compression_model
-                                    or effective_summarize_context_model,
+                                    aaak_model=self.aaak_compression_model,
                                 )
 
                             if _sc_pre_iter_hooks:
@@ -3208,10 +3240,7 @@ class GlueLLM:
                                 messages.append(r["message"])
 
                             if effective_condense:
-                                _condense_tool_round(
-                                    messages,
-                                    aaak_tool_condensing=self.aaak_tool_condensing,
-                                )
+                                _condense_tool_round(messages, aaak_tool_condensing=self.aaak_tool_condensing)
                         # Continue to next iteration
                         else:
                             # LLM didn't call any tools - it has enough info, break out of tool loop
@@ -3227,7 +3256,7 @@ class GlueLLM:
                             break
                     else:
                         # Exhausted all iterations with tool calls - still need structured output
-                        logger.debug(f"Reached max tool iterations ({self.max_tool_iterations})")
+                        logger.debug(f"Reached max tool iterations ({effective_max_tool_iterations})")
 
                 # PHASE 2: Final structured output call
                 logger.debug(f"Requesting structured output: response_format={response_format.__name__}")
@@ -3565,8 +3594,11 @@ class GlueLLM:
                 continue
             try:
                 coerced[param_name] = _coerce_pydantic_value(value, annotation)
-            except Exception:
-                pass  # leave as-is; the tool or error handler will surface the problem
+            except Exception as coerce_err:
+                logger.debug(
+                    f"Pydantic coercion failed for param '{param_name}' "
+                    f"({type(coerce_err).__name__}: {coerce_err}); passing raw value"
+                )
         return coerced
 
     async def _execute_tool_calls_round(
@@ -3804,6 +3836,7 @@ class GlueLLM:
         summarize_context_threshold: int | None = ...,
         summarize_context_model: str | None = ...,
         summarize_context_keep_recent: int | None = ...,
+        **model_kwargs: Any,
     ) -> AsyncIterator[StreamingChunk[T]]: ...
 
     @overload
@@ -3833,6 +3866,7 @@ class GlueLLM:
         summarize_context_threshold: int | None = ...,
         summarize_context_model: str | None = ...,
         summarize_context_keep_recent: int | None = ...,
+        **model_kwargs: Any,
     ) -> AsyncIterator[StreamingChunk[Any]]: ...
 
     async def stream_complete(
@@ -3861,6 +3895,7 @@ class GlueLLM:
         summarize_context_threshold: int | None = None,
         summarize_context_model: str | None = None,
         summarize_context_keep_recent: int | None = None,
+        **model_kwargs: Any,
     ) -> AsyncIterator[StreamingChunk[Any]]:
         """Stream completion with automatic tool execution.
 
@@ -3900,6 +3935,7 @@ class GlueLLM:
             summarize_context_threshold: Override the message-count threshold that triggers summarization.
             summarize_context_model: Override the model used for the summarization call.
             summarize_context_keep_recent: Override how many recent messages are kept verbatim.
+            **model_kwargs: Extra params for acompletion (e.g. temperature, top_p), merged over instance defaults.
 
         Yields:
             StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)
@@ -3950,6 +3986,16 @@ class GlueLLM:
             else self.summarize_context_keep_recent
         )
 
+        # Instance sampling / provider extras (parity with complete() → _llm_call)
+        stream_call_kwargs = dict(model_kwargs)
+        override_stream_max_tool_iterations = stream_call_kwargs.pop("max_tool_iterations", None)
+        effective_stream_max_tool_iterations = (
+            override_stream_max_tool_iterations
+            if override_stream_max_tool_iterations is not None
+            else self.max_tool_iterations
+        )
+        effective_stream_model_kwargs = {**self.model_kwargs, **stream_call_kwargs}
+
         # Set correlation ID if provided
         if correlation_id:
             set_correlation_id(correlation_id)
@@ -3995,7 +4041,7 @@ class GlueLLM:
         _stream_post_iter_hooks = _stream_merged_registry.get_hooks(HookStage.POST_ITERATION)
 
         # Tool execution loop
-        for iteration in range(self.max_tool_iterations):
+        for iteration in range(effective_stream_max_tool_iterations):
             try:
                 # Context summarization: compress old messages when threshold is exceeded
                 if effective_summarize_context and len(messages) > effective_summarize_context_threshold:
@@ -4004,8 +4050,7 @@ class GlueLLM:
                         keep_recent=effective_summarize_context_keep_recent,
                         model=effective_summarize_context_model,
                         use_aaak=self.aaak_compression_enabled,
-                        aaak_model=self.aaak_compression_model
-                        or effective_summarize_context_model,
+                        aaak_model=self.aaak_compression_model,
                     )
 
                 if _stream_pre_iter_hooks:
@@ -4048,6 +4093,7 @@ class GlueLLM:
                         max_tokens=effective_max_tokens,
                         retry_config=effective_retry_config,
                         rate_limit_config=effective_rate_limit_config,
+                        **effective_stream_model_kwargs,
                     )
                     async for chunk_response in stream_iter:
                         if hasattr(chunk_response, "choices") and chunk_response.choices:
@@ -4159,6 +4205,7 @@ class GlueLLM:
                     max_tokens=effective_max_tokens,
                     retry_config=effective_retry_config,
                     rate_limit_config=effective_rate_limit_config,
+                    **effective_stream_model_kwargs,
                 )
                 accumulated_content = ""
                 assistant_message = None
@@ -4204,7 +4251,7 @@ class GlueLLM:
                     f"LLM call failed on iteration {iteration + 1}: {e}, "
                     f"error_type={type(e).__name__}, cause_chain={cause_chain}"
                 )
-                error_msg = f"Failed during tool execution loop (iteration {iteration + 1}/{self.max_tool_iterations})"
+                error_msg = f"Failed during tool execution loop (iteration {iteration + 1}/{effective_stream_max_tool_iterations})"
                 raise type(e)(f"{error_msg}: {e}") from e
 
             if _stream_post_iter_hooks:
@@ -4293,10 +4340,7 @@ class GlueLLM:
                     messages.append(r["message"])
 
                 if effective_condense:
-                    _condense_tool_round(
-                        messages,
-                        aaak_tool_condensing=self.aaak_tool_condensing,
-                    )
+                    _condense_tool_round(messages, aaak_tool_condensing=self.aaak_tool_condensing)
 
                 # Continue loop to get next response (stream again)
                 continue
@@ -4363,6 +4407,7 @@ class GlueLLM:
                                 max_tokens=effective_max_tokens,
                                 retry_config=effective_retry_config,
                                 rate_limit_config=effective_rate_limit_config,
+                                **effective_stream_model_kwargs,
                             )
                         except LLMError as llm_error:
                             # LLM call failed during retry, raise blocked error
@@ -4418,7 +4463,7 @@ class GlueLLM:
             return
 
         # Max iterations reached
-        logger.warning(f"Max tool execution iterations ({self.max_tool_iterations}) reached")
+        logger.warning(f"Max tool execution iterations ({effective_stream_max_tool_iterations}) reached")
         yield StreamingChunk(
             content="Maximum tool execution iterations reached.",
             done=True,
@@ -4903,6 +4948,7 @@ async def stream_complete(
     summarize_context_threshold: int | None = ...,
     summarize_context_model: str | None = ...,
     summarize_context_keep_recent: int | None = ...,
+    **model_kwargs: Any,
 ) -> AsyncIterator[StreamingChunk[T]]: ...
 
 
@@ -4936,6 +4982,7 @@ async def stream_complete(
     summarize_context_threshold: int | None = ...,
     summarize_context_model: str | None = ...,
     summarize_context_keep_recent: int | None = ...,
+    **model_kwargs: Any,
 ) -> AsyncIterator[StreamingChunk[Any]]: ...
 
 
@@ -4968,6 +5015,7 @@ async def stream_complete(
     summarize_context_threshold: int | None = None,
     summarize_context_model: str | None = None,
     summarize_context_keep_recent: int | None = None,
+    **model_kwargs: Any,
 ) -> AsyncIterator[StreamingChunk[Any]]:
     """Stream completion with automatic tool execution.
 
@@ -5006,6 +5054,7 @@ async def stream_complete(
         rate_limit_config: Per-call rate limit configuration override.
         track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this).
+        **model_kwargs: Extra params for acompletion (e.g. temperature, top_p), same as ``complete``.
 
     Yields:
         StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)
@@ -5035,6 +5084,7 @@ async def stream_complete(
         summarize_context_threshold=summarize_context_threshold,
         summarize_context_model=summarize_context_model,
         summarize_context_keep_recent=summarize_context_keep_recent,
+        model_kwargs=model_kwargs if model_kwargs else None,
     )
     async for chunk in client.stream_complete(
         user_message,
@@ -5054,5 +5104,6 @@ async def stream_complete(
         rate_limit_config=rate_limit_config,
         track_costs=track_costs,
         enable_eval_recording=enable_eval_recording,
+        **model_kwargs,
     ):
         yield chunk

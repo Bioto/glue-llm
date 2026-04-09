@@ -73,7 +73,7 @@ class TestTestCompletionCommand:
         call_kwargs = mock_completion.call_args.kwargs
         assert "messages" in call_kwargs
         assert "model" in call_kwargs
-        assert call_kwargs["model"] == "openai:gpt-4o-mini"
+        assert call_kwargs["model"] == "openai:gpt-5.4-nano"
 
     @patch.dict("os.environ", {"OPENAI_API_KEY": "test-key-123"})
     @patch("any_llm.completion")

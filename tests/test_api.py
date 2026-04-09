@@ -3264,9 +3264,11 @@ class TestAAAKClientSettings:
 
         from gluellm.config import settings as real_settings
 
-        with patch.object(real_settings, "aaak_compression_enabled", True):
-            with patch.object(real_settings, "aaak_tool_condensing", True):
-                client = GlueLLM()
+        modified = real_settings.model_copy(
+            update={"aaak_compression_enabled": True, "aaak_tool_condensing": True}
+        )
+        with patch("gluellm.api.settings", modified):
+            client = GlueLLM()
         assert client.aaak_compression_enabled is True
         assert client.aaak_tool_condensing is True
 
@@ -3321,7 +3323,7 @@ class TestSummarizeContextIntegration:
 
         summarize_called: list = []
 
-        async def fake_summarize(messages, keep_recent, model):
+        async def fake_summarize(messages, keep_recent, model, **kwargs):
             summarize_called.append(True)
             return messages  # return unchanged so complete() can proceed
 

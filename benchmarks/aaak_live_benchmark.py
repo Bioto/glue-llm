@@ -1289,8 +1289,7 @@ async def prepare_ctx_prose(conversation: list[dict], keep_recent: int) -> tuple
             list(conversation),
             keep_recent=keep_recent,
             model=MODEL,
-            use_aaak=False,
-            completion_extra=_benchmark_completion_extra,
+            completion_extra=_benchmark_completion_extra if _benchmark_completion_extra else None,
         )
     finally:
         _api._ProviderCache = _orig

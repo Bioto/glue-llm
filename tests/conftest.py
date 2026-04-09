@@ -13,7 +13,11 @@ def reset_settings():
     # After each test, reload settings to reset to defaults
     from gluellm.config import reload_settings
 
-    reload_settings()
+    import gluellm.api as api
+
+    # reload_settings() replaces config.settings with a new instance; re-bind
+    # gluellm.api.settings so modules that imported settings at load time stay in sync.
+    api.settings = reload_settings()
 
 
 @pytest.fixture(autouse=True)
