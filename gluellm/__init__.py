@@ -104,6 +104,7 @@ from gluellm.batch import (
     batch_complete_simple,
     batch_structured_complete,
 )
+from gluellm.compression.aaak import AAAKCompressor, AAAK_SPEC
 from gluellm.config import GlueLLMSettings, ToolExecutionOrder, configure, get_settings, reload_settings, settings
 from gluellm.tool_router import ToolMode, static_tool
 from gluellm.eval import (
@@ -268,6 +269,8 @@ __all__ = [
     "ToolExecutionOrder",
     # Configuration
     "GlueLLMSettings",
+    "AAAKCompressor",
+    "AAAK_SPEC",
     "configure",
     "settings",
     "get_settings",

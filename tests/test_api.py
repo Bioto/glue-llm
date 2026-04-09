@@ -1686,7 +1686,7 @@ class TestCondenseToolRound:
         condensed = messages[-1]
         assert condensed["role"] == "user"
         assert "[Tool Results]" in condensed["content"]
-        assert "get_weather()" in condensed["content"]
+        assert "- get_weather ->" in condensed["content"]
         assert "Sunny, 72°F" in condensed["content"]
 
     async def test_multiple_tool_calls_condensed(self):
@@ -1708,9 +1708,9 @@ class TestCondenseToolRound:
         assert len(messages) == 2
         condensed = messages[-1]
         assert condensed["role"] == "user"
-        assert "tool_a()" in condensed["content"]
+        assert "- tool_a ->" in condensed["content"]
         assert "Result A" in condensed["content"]
-        assert "tool_b()" in condensed["content"]
+        assert "- tool_b ->" in condensed["content"]
         assert "Result B" in condensed["content"]
 
     async def test_no_condensation_when_assistant_has_content(self):
@@ -1765,7 +1765,7 @@ class TestCondenseToolRound:
 
         assert len(messages) == 2
         condensed = messages[-1]
-        assert "flaky_tool()" in condensed["content"]
+        assert "- flaky_tool ->" in condensed["content"]
         assert "TimeoutError" in condensed["content"]
 
     async def test_preserves_earlier_messages(self):
@@ -1789,7 +1789,7 @@ class TestCondenseToolRound:
         assert messages[2]["content"] == "Turn 1 reply"
         assert messages[3]["content"] == "Turn 2"
         assert messages[4]["role"] == "user"
-        assert "lookup()" in messages[4]["content"]
+        assert "- lookup ->" in messages[4]["content"]
 
     async def test_condense_tool_messages_disabled_by_default(self):
         """condense_tool_messages defaults to False on GlueLLM and module-level helpers."""
@@ -1800,6 +1800,103 @@ class TestCondenseToolRound:
         """condense_tool_messages=True can be set on the GlueLLM instance."""
         client = GlueLLM(condense_tool_messages=True)
         assert client.condense_tool_messages is True
+
+    async def test_aaak_tool_condensing_produces_aaak_tool_marker(self):
+        """With aaak_tool_condensing=True the condensed message starts with [AT]."""
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Find auth files"},
+            self._make_assistant_with_tool_calls(
+                [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "search_files", "arguments": '{"q":"auth"}'},
+                    }
+                ]
+            ),
+            self._make_tool_response("c1", '["auth.py","config.py"]'),
+        ]
+
+        _condense_tool_round(messages, aaak_tool_condensing=True)
+
+        assert len(messages) == 3
+        condensed = messages[-1]
+        assert condensed["role"] == "user"
+        assert "[AT]" in condensed["content"]
+        assert "search_files" in condensed["content"]
+        assert "T:search_files" in condensed["content"]
+        # Unique function name → args dropped
+        assert "q=auth" not in condensed["content"]
+        assert "T:search_files()" in condensed["content"]
+        assert "→" in condensed["content"]
+        # JSON array tool results are flattened to indexed lines
+        assert "[0]=auth.py" in condensed["content"]
+        assert "[1]=config.py" in condensed["content"]
+
+    async def test_aaak_tool_condensing_injects_preamble_into_system_message(self):
+        """With aaak_tool_condensing=True the system message receives the AAAK decoding hint."""
+        from gluellm.compression.aaak import AAAK_PREAMBLE_MARKER
+
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hi"},
+            self._make_assistant_with_tool_calls(
+                [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]
+            ),
+            self._make_tool_response("c1", "ok"),
+        ]
+
+        _condense_tool_round(messages, aaak_tool_condensing=True)
+
+        assert AAAK_PREAMBLE_MARKER in messages[0]["content"]
+
+    async def test_aaak_tool_condensing_false_keeps_plain_tool_results_format(self):
+        """With aaak_tool_condensing=False (default) the classic [Tool Results] format is used."""
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hi"},
+            self._make_assistant_with_tool_calls(
+                [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]
+            ),
+            self._make_tool_response("c1", "result"),
+        ]
+
+        _condense_tool_round(messages, aaak_tool_condensing=False)
+
+        condensed = messages[-1]
+        assert "[Tool Results]" in condensed["content"]
+        assert "[AT]" not in condensed["content"]
+
+    async def test_aaak_tool_condensing_multiple_tools_all_appear(self):
+        """Multiple tool calls in one round all appear in the AAAK-encoded message."""
+        messages = [
+            {"role": "user", "content": "Do things"},
+            self._make_assistant_with_tool_calls(
+                [
+                    {"id": "c1", "type": "function", "function": {"name": "tool_a", "arguments": '{"x":1}'}},
+                    {"id": "c2", "type": "function", "function": {"name": "tool_b", "arguments": '{"y":2}'}},
+                ]
+            ),
+            self._make_tool_response("c1", "Result A"),
+            self._make_tool_response("c2", "Result B"),
+        ]
+
+        _condense_tool_round(messages, aaak_tool_condensing=True)
+
+        condensed = messages[-1]["content"]
+        assert "tool_a" in condensed
+        assert "tool_b" in condensed
+        assert "Result A" in condensed
+        assert "Result B" in condensed
+        assert " | " in condensed
+
+    async def test_aaak_tool_condensing_defaults_to_client_setting(self):
+        """GlueLLM.aaak_tool_condensing defaults to False; can be set to True."""
+        default_client = GlueLLM()
+        assert default_client.aaak_tool_condensing is False
+        aaak_client = GlueLLM(aaak_tool_condensing=True)
+        assert aaak_client.aaak_tool_condensing is True
 
 
 def _make_tool_response(content: str, finish_reason: str = "stop") -> SimpleNamespace:
@@ -1916,7 +2013,7 @@ class TestCondenseToolMessagesIntegration:
             None,
         )
         assert condensed is not None, "Condensed summary message not found"
-        assert "dummy_tool()" in condensed["content"]
+        assert "- dummy_tool ->" in condensed["content"]
         assert "Tool received: hello" in condensed["content"]
 
     async def test_no_condensation_when_disabled(self):
@@ -1986,9 +2083,9 @@ class TestCondenseToolMessagesIntegration:
             f"Expected two condensed summaries (one per round), got {len(condensed_summaries)}"
         )
         # First summary references round 1 tool
-        assert "dummy_tool()" in condensed_summaries[0]["content"]
+        assert "- dummy_tool ->" in condensed_summaries[0]["content"]
         # Second summary references round 2 tool
-        assert "math_tool()" in condensed_summaries[1]["content"]
+        assert "- math_tool ->" in condensed_summaries[1]["content"]
 
     async def test_multi_turn_conversation_final_response_carries_forward(self):
         """Across two separate client.complete() calls, the final assistant text from turn 1
@@ -2065,7 +2162,7 @@ class TestCondenseToolMessagesIntegration:
         )
         assert condensed is not None
         # The error text from malformed JSON should be in the summary
-        assert "dummy_tool()" in condensed["content"]
+        assert "- dummy_tool ->" in condensed["content"]
 
     async def test_stream_complete_condensed_message_on_second_iteration(self):
         """stream_complete with condense=True passes a condensed message to the second
@@ -2127,7 +2224,7 @@ class TestCondenseToolMessagesIntegration:
             None,
         )
         assert condensed is not None, "Condensed summary missing from second streaming call"
-        assert "dummy_tool()" in condensed["content"]
+        assert "- dummy_tool ->" in condensed["content"]
 
     async def test_ten_turns_with_tool_use(self):
         """10 consecutive turns on the same client, each with one tool call.
@@ -2995,6 +3092,183 @@ class TestSummarizeOldMessages:
         assert "Look at this image:" in transcript_content
         # The image_url part should not appear (no 'text' key)
         assert "http://example.com" not in transcript_content
+
+    async def test_aaak_compression_wraps_output_in_aaak_ctx_tags(self):
+        """With use_aaak=True the summary message is wrapped in [AAAK CTX]...[/AAAK CTX]."""
+        from unittest.mock import AsyncMock, patch
+
+        from gluellm.api import _summarize_old_messages
+
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Tell me about JWT"},
+            {"role": "assistant", "content": "JWT consists of header.payload.signature"},
+            {"role": "user", "content": "Recent question"},
+        ]
+        mock_encoded = "USR:jwt.about? | AST:jwt=header.payload.sig"
+        with patch(
+            "gluellm.compression.aaak.AAAKCompressor.compress_messages",
+            AsyncMock(return_value=mock_encoded),
+        ):
+            result = await _summarize_old_messages(
+                messages,
+                keep_recent=1,
+                model="openai:gpt-4o-mini",
+                use_aaak=True,
+            )
+
+        assert len(result) == 3
+        summary = result[1]
+        assert summary["role"] == "user"
+        assert "[AAAK CTX]" in summary["content"]
+        assert "[/AAAK CTX]" in summary["content"]
+        assert mock_encoded in summary["content"]
+
+    async def test_aaak_compression_injects_preamble_into_system_message(self):
+        """With use_aaak=True the AAAK decoding hint is added to the system message."""
+        from unittest.mock import AsyncMock, patch
+
+        from gluellm.api import _summarize_old_messages
+        from gluellm.compression.aaak import AAAK_PREAMBLE_MARKER
+
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "Recent"},
+        ]
+        with patch(
+            "gluellm.compression.aaak.AAAKCompressor.compress_messages",
+            AsyncMock(return_value="USR:A | AST:B"),
+        ):
+            result = await _summarize_old_messages(
+                messages,
+                keep_recent=1,
+                model="openai:gpt-4o-mini",
+                use_aaak=True,
+            )
+
+        assert AAAK_PREAMBLE_MARKER in result[0]["content"]
+
+    async def test_aaak_compression_fallback_when_empty_response(self):
+        """When compress_messages returns an empty string, original messages are returned unchanged."""
+        from unittest.mock import AsyncMock, patch
+
+        from gluellm.api import _summarize_old_messages
+
+        messages = [
+            {"role": "system", "content": "Sys."},
+            {"role": "user", "content": "A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "Recent"},
+        ]
+        with patch(
+            "gluellm.compression.aaak.AAAKCompressor.compress_messages",
+            AsyncMock(return_value=""),
+        ):
+            result = await _summarize_old_messages(
+                messages,
+                keep_recent=1,
+                model="openai:gpt-4o-mini",
+                use_aaak=True,
+            )
+
+        assert result is messages
+
+    async def test_aaak_compression_uses_aaak_model_when_provided(self):
+        """aaak_model parameter is forwarded to AAAKCompressor.compress_messages."""
+        from unittest.mock import AsyncMock, call, patch
+
+        from gluellm.api import _summarize_old_messages
+
+        messages = [
+            {"role": "system", "content": "Sys."},
+            {"role": "user", "content": "A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "Recent"},
+        ]
+        mock_compress = AsyncMock(return_value="USR:A|AST:B")
+        with patch("gluellm.compression.aaak.AAAKCompressor.compress_messages", mock_compress):
+            await _summarize_old_messages(
+                messages,
+                keep_recent=1,
+                model="openai:gpt-4o-mini",
+                use_aaak=True,
+                aaak_model="openai:gpt-4o-nano",
+            )
+
+        mock_compress.assert_called_once()
+        _, kwargs = mock_compress.call_args
+        assert kwargs.get("model") == "openai:gpt-4o-nano"
+
+    async def test_prose_summarization_used_when_aaak_disabled(self):
+        """When use_aaak=False (default), prose [Conversation Summary] is used, not AAAK."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from gluellm.api import _summarize_old_messages
+
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "Recent"},
+        ]
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(return_value=_make_summarize_response("Prose summary."))
+
+        with patch("gluellm.api._ProviderCache") as MockCache:
+            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-4o-mini")
+            result = await _summarize_old_messages(
+                messages,
+                keep_recent=1,
+                model="openai:gpt-4o-mini",
+                use_aaak=False,
+            )
+
+        summary = result[1]
+        assert "[Conversation Summary]" in summary["content"]
+        assert "[AAAK CTX]" not in summary["content"]
+
+
+class TestAAAKClientSettings:
+    """Tests for the AAAK constructor settings on GlueLLM."""
+
+    async def test_aaak_compression_disabled_by_default(self):
+        """GlueLLM.aaak_compression_enabled defaults to False."""
+        assert GlueLLM().aaak_compression_enabled is False
+
+    async def test_aaak_compression_can_be_enabled(self):
+        """aaak_compression_enabled=True is stored on the instance."""
+        assert GlueLLM(aaak_compression_enabled=True).aaak_compression_enabled is True
+
+    async def test_aaak_compression_model_defaults_to_none(self):
+        """aaak_compression_model defaults to None (falls back to summarize model)."""
+        assert GlueLLM().aaak_compression_model is None
+
+    async def test_aaak_compression_model_can_be_set(self):
+        """A custom aaak_compression_model is stored on the instance."""
+        client = GlueLLM(aaak_compression_model="openai:gpt-4o-nano")
+        assert client.aaak_compression_model == "openai:gpt-4o-nano"
+
+    async def test_aaak_tool_condensing_disabled_by_default(self):
+        """GlueLLM.aaak_tool_condensing defaults to False."""
+        assert GlueLLM().aaak_tool_condensing is False
+
+    async def test_aaak_tool_condensing_can_be_enabled(self):
+        """aaak_tool_condensing=True is stored on the instance."""
+        assert GlueLLM(aaak_tool_condensing=True).aaak_tool_condensing is True
+
+    async def test_aaak_settings_from_global_settings(self):
+        """AAAK settings are picked up from the global GlueLLMSettings when not passed."""
+        from unittest.mock import patch
+
+        from gluellm.config import settings as real_settings
+
+        with patch.object(real_settings, "aaak_compression_enabled", True):
+            with patch.object(real_settings, "aaak_tool_condensing", True):
+                client = GlueLLM()
+        assert client.aaak_compression_enabled is True
+        assert client.aaak_tool_condensing is True
 
 
 class TestSummarizeContextIntegration:
