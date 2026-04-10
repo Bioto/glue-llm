@@ -130,13 +130,15 @@ def score_databench(prediction: str, answer: str, answer_type: str) -> float:
 
     if answer_type == "boolean":
         gold = answer.strip().lower()
+        has_word_no = bool(re.search(r"\bno\b", pred))
+        has_word_yes = bool(re.search(r"\byes\b", pred))
         if gold == "true":
-            has_true = "true" in pred or "yes" in pred
-            has_false = "false" in pred or "no " in pred
+            has_true = "true" in pred or has_word_yes
+            has_false = "false" in pred or has_word_no
             return float(has_true and not has_false)
         if gold == "false":
-            has_false = "false" in pred or "no " in pred
-            has_true = "true" in pred or "yes" in pred
+            has_false = "false" in pred or has_word_no
+            has_true = "true" in pred or has_word_yes
             return float(has_false and not has_true)
         return 0.0
 
@@ -247,8 +249,11 @@ async def _call(messages: list[dict], *, model: str = MODEL) -> tuple[str, Token
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def _aaak_compress(old_messages: list[dict]) -> tuple[str, TokenUsage]:
-    """Compress ``old_messages`` with AAAK; return (encoded_text, token_usage)."""
+async def _aaak_compress(old_messages: list[dict], *, model: str = MODEL) -> tuple[str, TokenUsage]:
+    """Compress ``old_messages`` with AAAK; return (encoded_text, token_usage).
+
+    Patches ``_provider_cache.get_provider`` like ``aaak_live_benchmark.prepare_ctx_aaak``; may break if GlueLLM internals change.
+    """
     from gluellm.api import _provider_cache
 
     captured: list[TokenUsage] = []
@@ -273,7 +278,7 @@ async def _aaak_compress(old_messages: list[dict]) -> tuple[str, TokenUsage]:
     try:
         encoded = await AAAKCompressor.compress_messages(
             old_messages,
-            model=MODEL,
+            model=model,
             completion_extra=_benchmark_completion_extra,
         )
     finally:
@@ -369,10 +374,10 @@ def _score_sample(sample: Sample, answer: str) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def _run_raw_sample(sample: Sample) -> SampleResult:
+async def _run_raw_sample(sample: Sample, *, model: str = MODEL) -> SampleResult:
     msgs = _build_raw_messages(sample)
     original_tokens = messages_tokens(msgs)
-    answer, answer_tok = await _call(msgs)
+    answer, answer_tok = await _call(msgs, model=model)
     score = _score_sample(sample, answer)
     return SampleResult(
         mode="raw",
@@ -479,7 +484,7 @@ _TASK_LOADERS: dict[str, Any] = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def run_task(task_name: str, n_samples: int) -> tuple[list[SampleResult], list[SampleResult]]:
+async def run_task(task_name: str, n_samples: int, *, model: str = MODEL) -> tuple[list[SampleResult], list[SampleResult]]:
     """Run raw and aaak modes on ``n_samples`` from ``task_name``.
 
     Returns (raw_results, aaak_results).
@@ -496,7 +501,7 @@ async def run_task(task_name: str, n_samples: int) -> tuple[list[SampleResult], 
 
     # ── raw mode (all samples in parallel) ───────────────────────────────────
     raw_results: list[SampleResult] = list(
-        await asyncio.gather(*[_run_raw_sample(s) for s in samples])
+        await asyncio.gather(*[_run_raw_sample(s, model=model) for s in samples])
     )
 
     aaak_results: list[SampleResult] = []
@@ -507,11 +512,11 @@ async def run_task(task_name: str, n_samples: int) -> tuple[list[SampleResult], 
             {"role": "user", "content": "Here are example math problems with solutions:"},
             {"role": "assistant", "content": samples[0].context},
         ]
-        precompressed, shared_comp_tok = await _aaak_compress(few_shot_messages)
+        precompressed, shared_comp_tok = await _aaak_compress(few_shot_messages, model=model)
 
         answer_results: list[tuple[str, TokenUsage]] = list(
             await asyncio.gather(*[
-                _call(_gsm8k_aaak_messages(s.question, precompressed)) for s in samples
+                _call(_gsm8k_aaak_messages(s.question, precompressed), model=model) for s in samples
             ])
         )
         for i, (sample, (answer, answer_tok), raw_r) in enumerate(
@@ -538,9 +543,9 @@ async def run_task(task_name: str, n_samples: int) -> tuple[list[SampleResult], 
                 {"role": "user", "content": "Query results:"},
                 {"role": "assistant", "content": sample.context},
             ]
-            encoded, comp_tok = await _aaak_compress(table_messages)
+            encoded, comp_tok = await _aaak_compress(table_messages, model=model)
             compressed_msgs = _table_aaak_messages(sample.question, encoded)
-            answer, answer_tok = await _call(compressed_msgs)
+            answer, answer_tok = await _call(compressed_msgs, model=model)
             aaak_results.append(SampleResult(
                 mode="aaak",
                 task=task_name,
@@ -650,6 +655,8 @@ def print_full_report(
 async def main_async(args: argparse.Namespace) -> None:
     global _benchmark_completion_extra, _benchmark_semaphore
 
+    bench_model = args.model if getattr(args, "model", None) else MODEL
+
     if args.no_deterministic_sampling:
         _benchmark_completion_extra = {}
         print("  completion_extra={} (no deterministic sampling kwargs)")
@@ -663,7 +670,7 @@ async def main_async(args: argparse.Namespace) -> None:
         if t not in AVAILABLE_TASKS:
             print(f"ERROR: Unknown task {t!r}. Available: {AVAILABLE_TASKS}")
             return
-    print(f"  tasks={task_names}  samples_per_task={args.samples}  model={MODEL}")
+    print(f"  tasks={task_names}  samples_per_task={args.samples}  model={bench_model}")
     print(f"  gsm8k_few_shot_n={GSM8K_FEW_SHOT_N}  aaak_min_context_tokens={AAAK_MIN_CONTEXT_TOKENS}\n")
 
     task_data: list[tuple[str, list[SampleResult], list[SampleResult], float]] = []
@@ -671,7 +678,7 @@ async def main_async(args: argparse.Namespace) -> None:
     for task_name in task_names:
         print(f"  Loading '{task_name}'...", flush=True)
         t0 = time.perf_counter()
-        raw_results, aaak_results = await run_task(task_name, args.samples)
+        raw_results, aaak_results = await run_task(task_name, args.samples, model=bench_model)
         elapsed = time.perf_counter() - t0
 
         raw_acc = _mean([r.score for r in raw_results]) * 100
@@ -712,6 +719,13 @@ def main() -> None:
         "--no-deterministic-sampling",
         action="store_true",
         help="Omit temperature/top_p kwargs (use if the model rejects them).",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        metavar="MODEL_ID",
+        help=f"LLM model id for compression and answering (default: {MODEL}).",
     )
     args = parser.parse_args()
     asyncio.run(main_async(args))

@@ -242,6 +242,9 @@ __all__ = [
     "RateLimitAlgorithm",
     "RateLimitConfig",
     "SummarizeContextConfig",
+    # AAAK compression
+    "AAAKCompressor",
+    "AAAK_SPEC",
     # Guardrails
     "GuardrailsConfig",
     "PromptGuidedConfig",
@@ -271,8 +274,6 @@ __all__ = [
     "ToolExecutionOrder",
     # Configuration
     "GlueLLMSettings",
-    "AAAKCompressor",
-    "AAAK_SPEC",
     "configure",
     "settings",
     "get_settings",

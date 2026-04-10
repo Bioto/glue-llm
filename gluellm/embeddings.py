@@ -10,6 +10,7 @@ import httpx
 import logging
 import os
 import time
+import warnings
 from contextlib import contextmanager
 from typing import Any
 
@@ -390,6 +391,7 @@ async def embed(
     texts: str | list[str],
     model: str | None = None,
     correlation_id: str | None = None,
+    *,
     connect_timeout: float | None = None,
     request_timeout: float | None = None,
     api_key: str | None = None,
@@ -407,8 +409,8 @@ async def embed(
         texts: Single text string or list of text strings to embed
         model: Model identifier (defaults to settings.default_embedding_model)
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
-        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
-        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
+        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout); keyword-only.
+        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout); keyword-only.
         api_key: Optional API key override (for key pool usage)
         encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
             Provider-specific. Note: If using "base64", the embedding format may differ from
@@ -469,8 +471,17 @@ async def embed(
         f"Starting embedding request: correlation_id={correlation_id}, model={model}, input_count={input_count}"
     )
 
-    # Per-call rate_limit_config override
+    kwargs_dict = dict(kwargs)
+    rate_limit_algorithm = kwargs_dict.pop("rate_limit_algorithm", None)
     effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else None
+    if rate_limit_algorithm is not None:
+        warnings.warn(
+            "rate_limit_algorithm is deprecated; use rate_limit_config=RateLimitConfig(algorithm=...).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        base = effective_rate_limit_config or RateLimitConfig()
+        effective_rate_limit_config = base.model_copy(update={"algorithm": rate_limit_algorithm})
 
     # Build embedding kwargs from explicit parameters and any additional kwargs
     embedding_kwargs: dict[str, Any] = {}
@@ -480,7 +491,7 @@ async def embed(
     if effective_dimensions is not None:
         embedding_kwargs["dimensions"] = effective_dimensions
     # Merge any additional kwargs (e.g., user, etc.)
-    embedding_kwargs.update(kwargs)
+    embedding_kwargs.update(kwargs_dict)
 
     # Use shutdown context to track in-flight requests
     try:

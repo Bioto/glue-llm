@@ -27,7 +27,8 @@ Five benchmark sections, same judge infrastructure.
     pipe_raw     No context compression (baseline)
     pipe_aaak    Old turns (including embedded [AT]) compressed into [AAAK CTX]
 
-Requires OPENAI_API_KEY in environment.
+Requires API key environment variable(s) for the compression model (``MODEL``) and judge
+(``JUDGE_MODEL``), e.g. ``OPENAI_API_KEY`` when both use OpenAI. See ``api_key_env_for_model``.
 
 Run:
     set -a && source ../.env && set +a
@@ -60,6 +61,7 @@ import asyncio
 import json
 import os
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -78,7 +80,7 @@ RecallQuestion = dict[str, str | list[str]]
 
 _ENC = tiktoken.encoding_for_model("gpt-4o")
 
-MODEL = "groq:qwen/qwen3-32b"
+MODEL = "openai:gpt-5.4-nano"
 JUDGE_MODEL = "openai:gpt-4o-mini"
 
 # Benchmark-only: merged into provider.acompletion for judge, recall answers, prose summarize,
@@ -90,8 +92,36 @@ _benchmark_verbose_section_a: bool = False
 # Initialized in main_async() from --concurrency N (default 10).
 _benchmark_semaphore: asyncio.Semaphore | None = None
 
+# This module is intended to be run as a CLI script (``python benchmarks/aaak_live_benchmark.py``).
+# Do not import it from multiple asyncio tasks or processes: module-level globals are not
+# safe for concurrent reuse.
+
 # Serializes Section A `prepare_ctx_prose` monkeypatch of `_ProviderCache` (global class).
 _provider_cache_patch_lock = asyncio.Lock()
+
+# Map provider prefix (from ``provider:model`` id) to API key environment variable.
+_PROVIDER_API_KEY_ENV: dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+}
+
+
+def api_key_env_for_model(model_id: str) -> str:
+    prov = model_id.split(":", 1)[0].lower() if ":" in model_id else "openai"
+    return _PROVIDER_API_KEY_ENV.get(prov, "OPENAI_API_KEY")
+
+
+def missing_benchmark_key_errors(compression_model: str, judge_model: str) -> list[str]:
+    """Return error lines for missing API keys needed for ``compression_model`` and ``judge_model``."""
+    by_env: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for role, mid in (("compression", compression_model), ("judge", judge_model)):
+        by_env[api_key_env_for_model(mid)].append((role, mid))
+    errs: list[str] = []
+    for env, items in by_env.items():
+        if not os.environ.get(env):
+            detail = "; ".join(f"{role}={mid!r}" for role, mid in items)
+            errs.append(f"{env} not set ({detail})")
+    return errs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1881,7 +1911,8 @@ async def _run_section_e_sequential(
 
 def _print_section_results(header: str, results: list[ModeResult]) -> None:
     """Print section progress lines in the canonical mode order after parallel gather."""
-    print(header)
+    if header:
+        print(header)
     for r in results:
         print(
             f"    [{r.mode}]... recall={r.recall_pct:.0f}%  "
@@ -1935,24 +1966,22 @@ async def run_full_benchmark_once(
             ctx_results.append(r)
             print(f"recall={r.recall_pct:.0f}%  tok={r.roundtrip_llm_tokens}  ({r.elapsed_s:.1f}s)")
 
-    # Sections B-E are independent of A (A is already done) and of each other.
-    # B/C/D run all their modes in parallel; E runs modes sequentially (pipe_aaak monkeypatches).
-    parallel_sections: list[tuple[str, str, Any]] = []
+    # Sections B/C/D share no _provider_cache monkeypatch with each other; Section E uses
+    # prepare_ctx_aaak which patches _provider_cache.get_provider — run E only after B/C/D finish.
+    bcd_sections: list[tuple[str, str, Any]] = []
     if only_section in (None, "b"):
-        parallel_sections.append(("b", "\n  SECTION B: tool-round condensing", _run_section_b_parallel(tool_modes)))
+        bcd_sections.append(("b", "\n  SECTION B: tool-round condensing", _run_section_b_parallel(tool_modes)))
     if only_section in (None, "c"):
-        parallel_sections.append(("c", "\n  SECTION C: hard tool-round condensing", _run_section_c_parallel(hard_tool_modes)))
+        bcd_sections.append(("c", "\n  SECTION C: hard tool-round condensing", _run_section_c_parallel(hard_tool_modes)))
     if only_section in (None, "d"):
-        parallel_sections.append(("d", "\n  SECTION D: edge tool-round condensing", _run_section_d_parallel(edge_tool_modes)))
-    if only_section in (None, "e"):
-        parallel_sections.append(("e", "\n  SECTION E: pipeline (compress history with embedded [AT])", _run_section_e_sequential(pipeline_modes, pipeline_conv, keep_recent)))
+        bcd_sections.append(("d", "\n  SECTION D: edge tool-round condensing", _run_section_d_parallel(edge_tool_modes)))
 
-    if parallel_sections:
-        if len(parallel_sections) > 1:
-            labels = ", ".join(sec.upper() for sec, _, _ in parallel_sections)
+    if bcd_sections:
+        if len(bcd_sections) > 1:
+            labels = ", ".join(sec.upper() for sec, _, _ in bcd_sections)
             print(f"\n  Running sections {labels} in parallel...")
-        gathered = await asyncio.gather(*[coro for _, _, coro in parallel_sections])
-        for (sec, header, _), results in zip(parallel_sections, gathered):
+        gathered = await asyncio.gather(*[coro for _, _, coro in bcd_sections])
+        for (sec, header, _), results in zip(bcd_sections, gathered):
             _print_section_results(header, results)
             if sec == "b":
                 tool_results = results
@@ -1960,8 +1989,11 @@ async def run_full_benchmark_once(
                 hard_tool_results = results
             elif sec == "d":
                 edge_tool_results = results
-            elif sec == "e":
-                pipeline_results = results
+
+    if only_section in (None, "e"):
+        print("\n  SECTION E: pipeline (compress history with embedded [AT])")
+        pipeline_results = await _run_section_e_sequential(pipeline_modes, pipeline_conv, keep_recent)
+        _print_section_results("", pipeline_results)
 
     return BenchmarkSnapshot(
         ctx_results=ctx_results,
@@ -1975,17 +2007,20 @@ async def run_full_benchmark_once(
 async def main_async(args: argparse.Namespace) -> None:
     global _benchmark_completion_extra, _benchmark_verbose_section_a, _benchmark_semaphore, JUDGE_MODEL
 
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("ERROR: OPENAI_API_KEY not set.")
+    if args.judge_model:
+        JUDGE_MODEL = args.judge_model
+
+    key_errs = missing_benchmark_key_errors(MODEL, JUDGE_MODEL)
+    if key_errs:
+        print("ERROR: Missing API key environment variable(s):")
+        for line in key_errs:
+            print(f"  - {line}")
         return
 
     if args.no_deterministic_sampling:
         _benchmark_completion_extra = {}
     else:
         _benchmark_completion_extra = {"temperature": 0, "top_p": 1}
-
-    if args.judge_model:
-        JUDGE_MODEL = args.judge_model
 
     _benchmark_verbose_section_a = bool(args.verbose_section_a)
     _benchmark_semaphore = asyncio.Semaphore(max(1, int(args.concurrency)))

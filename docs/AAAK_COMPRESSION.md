@@ -275,7 +275,8 @@ client = GlueLLM(
 
 ```python
 client = GlueLLM(
-    condense_tool_messages=True,      # [AT] blocks, free (no LLM call)
+    condense_tool_messages=True,
+    aaak_tool_condensing=True,        # encode tool rounds as AAAK [AT] blocks
     summarize_context=False,          # don't compress conversation history
 )
 ```

@@ -21,14 +21,18 @@ pytestmark = pytest.mark.benchmark
 
 
 def _skip_if_no_key() -> None:
-    model = os.environ.get("GLUELLM_BENCH_MODEL") or os.environ.get("GLUELLM_DEFAULT_MODEL") or "openai:gpt-5.4-nano"
-    provider = model.split(":", 1)[0].lower() if ":" in model else "openai"
-    required_key = {
-        "openai": "OPENAI_API_KEY",
-        "groq": "GROQ_API_KEY",
-    }.get(provider, "OPENAI_API_KEY")
-    if not os.environ.get(required_key):
-        pytest.skip(f"Missing {required_key} for provider {provider!r} (model={model!r})")
+    if not os.environ.get("OPENAI_API_KEY"):
+        pytest.skip("Missing OPENAI_API_KEY")
+
+
+def _skip_if_aaak_live_keys_missing() -> None:
+    """Match ``aaak_live_benchmark`` compression + judge model API key requirements."""
+    errs = aaak_live_benchmark.missing_benchmark_key_errors(
+        aaak_live_benchmark.MODEL,
+        aaak_live_benchmark.JUDGE_MODEL,
+    )
+    if errs:
+        pytest.skip("; ".join(errs))
 
 
 def _standard_samples() -> int:
@@ -42,7 +46,7 @@ def _standard_samples() -> int:
 
 @pytest.mark.asyncio
 async def test_aaak_live_benchmark() -> None:
-    _skip_if_no_key()
+    _skip_if_aaak_live_keys_missing()
     args = argparse.Namespace(
         trials=1,
         only_section_a=False,
@@ -66,6 +70,7 @@ async def test_standard_benchmark() -> None:
         samples=_standard_samples(),
         concurrency=10,
         no_deterministic_sampling=False,
+        model=None,
     )
     await standard_benchmark.main_async(args)
 

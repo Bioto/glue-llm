@@ -4604,8 +4604,9 @@ class GlueLLM:
         texts: str | list[str],
         model: str | None = None,
         correlation_id: str | None = None,
-        request_timeout: float | None = None,
+        *,
         connect_timeout: float | None = None,
+        request_timeout: float | None = None,
         api_key: str | None = None,
         encoding_format: str | None = None,
         dimensions: int | None = None,
@@ -4617,8 +4618,8 @@ class GlueLLM:
             texts: Single text string or list of text strings to embed
             model: Model identifier (defaults to self.embedding_model)
             correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
-            request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
-            connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
+            connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout); keyword-only.
+            request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout); keyword-only.
             api_key: Optional API key override (for key pool usage)
             encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
                 Provider-specific. Note: If using "base64", the embedding format may differ from
@@ -4661,8 +4662,8 @@ class GlueLLM:
             texts=texts,
             model=model,
             correlation_id=correlation_id,
-            request_timeout=request_timeout,
             connect_timeout=connect_timeout,
+            request_timeout=request_timeout,
             api_key=api_key,
             encoding_format=encoding_format,
             dimensions=dimensions,
@@ -5000,6 +5001,7 @@ async def embed(
     texts: str | list[str],
     model: str | None = None,
     correlation_id: str | None = None,
+    *,
     connect_timeout: float | None = None,
     request_timeout: float | None = None,
     encoding_format: str | None = None,
@@ -5013,8 +5015,8 @@ async def embed(
         texts: Single text string or list of text strings to embed
         model: Model identifier (defaults to settings.default_embedding_model)
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
-        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
-        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
+        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout); keyword-only.
+        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout); keyword-only.
         encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
             Provider-specific. Note: If using "base64", the embedding format may differ from
             the standard list[float] format.
@@ -5043,8 +5045,8 @@ async def embed(
         texts=texts,
         model=model,
         correlation_id=correlation_id,
-        request_timeout=request_timeout,
         connect_timeout=connect_timeout,
+        request_timeout=request_timeout,
         encoding_format=encoding_format,
         dimensions=dimensions,
         rate_limit_config=rate_limit_config,

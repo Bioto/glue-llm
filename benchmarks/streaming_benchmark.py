@@ -19,8 +19,9 @@ import time
 from typing import Any
 
 from gluellm.api import complete, stream_complete
+from gluellm.config import settings
 
-DEFAULT_MODEL = "openai:gpt-4o-mini"
+DEFAULT_MODEL = settings.default_model
 
 
 def _normalize(s: str) -> str:
