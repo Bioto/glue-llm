@@ -71,7 +71,7 @@ class TestAPIKeyConfig:
         assert config.provider == "openai"
         assert config.requests_per_minute is None
         assert config.burst is None
-        assert len(config.key_hash) == 8
+        assert len(config.key_hash) == 64  # SHA-256 hex digest
 
     def test_api_key_config_with_rate_limits(self):
         """Test APIKeyConfig with custom rate limits."""

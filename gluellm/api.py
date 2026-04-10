@@ -1621,7 +1621,7 @@ async def _safe_llm_call(
     # Apply rate limiting before making the call
     provider = extract_provider_from_model(model)
     rate_limit_key = (
-        f"global:{provider}" if not api_key else f"api_key:{hashlib.sha256(api_key.encode()).hexdigest()[:8]}"
+        f"global:{provider}" if not api_key else f"api_key:{hashlib.sha256(api_key.encode()).hexdigest()}"
     )
     rate_limit_algorithm = rate_limit_config.algorithm if rate_limit_config else None
     await acquire_rate_limit(rate_limit_key, algorithm=rate_limit_algorithm)

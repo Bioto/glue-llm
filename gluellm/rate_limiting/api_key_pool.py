@@ -80,8 +80,8 @@ class APIKeyConfig:
         self.provider = provider.lower()
         self.requests_per_minute = requests_per_minute
         self.burst = burst
-        # Create a hash for the key (for logging/identification without exposing the key)
-        self.key_hash = hashlib.sha256(key.encode()).hexdigest()[:8]
+        # SHA-256 fingerprint for logging/rate-limit keys (full digest — do not truncate secret material)
+        self.key_hash = hashlib.sha256(key.encode()).hexdigest()
 
     @classmethod
     def from_batch_config(cls, batch_config: BatchAPIKeyConfig) -> "APIKeyConfig":
