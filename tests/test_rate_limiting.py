@@ -71,7 +71,7 @@ class TestAPIKeyConfig:
         assert config.provider == "openai"
         assert config.requests_per_minute is None
         assert config.burst is None
-        assert len(config.key_hash) == 64  # SHA-256 hex digest
+        assert len(config.key_hash) == 64  # HMAC-BLAKE2s hex digest (256-bit)
 
     def test_api_key_config_with_rate_limits(self):
         """Test APIKeyConfig with custom rate limits."""
@@ -489,9 +489,9 @@ class TestRateLimitingIntegration:
             assert call_kwargs["algorithm"] == "leaking_bucket"
 
     @pytest.mark.asyncio
-    async def test_rate_limit_algorithm_shorthand_on_complete(self):
-        """Test that rate_limit_algorithm shorthand passes through to acquire_rate_limit."""
-        from gluellm.api import GlueLLM
+    async def test_rate_limit_algorithm_via_config_on_complete(self):
+        """Test that per-call RateLimitConfig(algorithm=...) passes through to acquire_rate_limit."""
+        from gluellm.api import GlueLLM, RateLimitConfig
 
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -506,7 +506,7 @@ class TestRateLimitingIntegration:
             patch("gluellm.api.acquire_rate_limit") as mock_rate_limit,
         ):
             client = GlueLLM()
-            await client.complete("Hello", rate_limit_algorithm="token_bucket")
+            await client.complete("Hello", rate_limit_config=RateLimitConfig(algorithm="token_bucket"))
             assert mock_rate_limit.called
             call_kwargs = mock_rate_limit.call_args.kwargs
             assert call_kwargs["algorithm"] == "token_bucket"
@@ -534,7 +534,7 @@ class TestRateLimitingIntegration:
             assert mock_rate_limit.call_args.kwargs["algorithm"] == "gcra"
 
             # Per-call override takes precedence
-            await client.complete("Hello", rate_limit_algorithm="fixed_window")
+            await client.complete("Hello", rate_limit_config=RateLimitConfig(algorithm="fixed_window"))
             assert mock_rate_limit.call_args.kwargs["algorithm"] == "fixed_window"
 
     @pytest.mark.asyncio

@@ -6,8 +6,6 @@ as the completion API.
 """
 
 import asyncio
-import hashlib
-
 import httpx
 import logging
 import os
@@ -37,6 +35,7 @@ from gluellm.config import settings
 from gluellm.costing.pricing_data import calculate_embedding_cost
 from gluellm.models.embedding import EmbeddingResult
 from gluellm.observability.logging_config import get_logger
+from gluellm.rate_limiting.key_fingerprint import api_key_hmac_fingerprint
 from gluellm.rate_limiting.rate_limiter import acquire_rate_limit
 from gluellm.runtime.context import clear_correlation_id, get_correlation_id, set_correlation_id
 from gluellm.runtime.shutdown import ShutdownContext, is_shutting_down
@@ -206,7 +205,7 @@ async def _safe_embedding_call(
     # Apply rate limiting before making the call
     provider = _extract_provider_from_embedding_model(model)
     rate_limit_key = (
-        f"global:{provider}" if not api_key else f"api_key:{hashlib.sha256(api_key.encode()).hexdigest()}"
+        f"global:{provider}" if not api_key else f"api_key:{api_key_hmac_fingerprint(api_key)}"
     )
     rate_limit_algorithm = rate_limit_config.algorithm if rate_limit_config else None
     await acquire_rate_limit(rate_limit_key, algorithm=rate_limit_algorithm)

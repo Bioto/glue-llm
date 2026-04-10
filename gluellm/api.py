@@ -49,7 +49,6 @@ Example:
 """
 
 import asyncio
-import hashlib
 
 import httpx
 import importlib
@@ -94,6 +93,7 @@ from gluellm.models.eval import EvalRecord
 from gluellm.observability.logging_config import get_logger
 from gluellm.provider_params import normalize_model_params
 from gluellm.rate_limiting.api_key_pool import extract_provider_from_model
+from gluellm.rate_limiting.key_fingerprint import api_key_hmac_fingerprint
 from gluellm.rate_limiting.rate_limiter import acquire_rate_limit
 from gluellm.rate_limit_types import RateLimitAlgorithm
 from gluellm.runtime.context import clear_correlation_id, get_correlation_id, set_correlation_id
@@ -114,7 +114,7 @@ type OnStatusCallback = Callable[[ProcessEvent], None] | Callable[[ProcessEvent]
 type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "auto"]
 
 # GlueLLM call-level options that must never be forwarded to provider.acompletion (OpenAI, etc.).
-_PROVIDER_ACOMPLETION_SKIP_KEYS = frozenset({"max_tool_iterations", "execute_tools"})
+_PROVIDER_ACOMPLETION_SKIP_KEYS = frozenset({"max_tool_iterations", "execute_tools", "rate_limit_algorithm"})
 
 
 # ============================================================================
@@ -1621,7 +1621,7 @@ async def _safe_llm_call(
     # Apply rate limiting before making the call
     provider = extract_provider_from_model(model)
     rate_limit_key = (
-        f"global:{provider}" if not api_key else f"api_key:{hashlib.sha256(api_key.encode()).hexdigest()}"
+        f"global:{provider}" if not api_key else f"api_key:{api_key_hmac_fingerprint(api_key)}"
     )
     rate_limit_algorithm = rate_limit_config.algorithm if rate_limit_config else None
     await acquire_rate_limit(rate_limit_key, algorithm=rate_limit_algorithm)
