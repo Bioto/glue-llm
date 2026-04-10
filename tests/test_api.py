@@ -1214,6 +1214,72 @@ class TestStreamCompleteWithTools:
         )
         assert any(ch.done for ch in chunks), "Should receive a final done chunk"
 
+    async def test_stream_complete_tool_path_terminal_chunk_empty_no_duplicate_text(self):
+        """Tool-enabled stream: final chunk must not repeat full text (already sent as deltas)."""
+        call_count = 0
+
+        async def fake_safe_llm_call(*, messages, stream, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if not stream:
+                raise NotImplementedError("This test only covers stream=True path")
+            if call_count == 1:
+                async def first_stream():
+                    yield SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(content=" ", tool_calls=None),
+                            )
+                        ]
+                    )
+                    yield SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(
+                                    content=None,
+                                    tool_calls=[
+                                        SimpleNamespace(
+                                            index=0,
+                                            id="call_1",
+                                            function=SimpleNamespace(
+                                                name="dummy_tool",
+                                                arguments='{"value":"x"}',
+                                            ),
+                                        )
+                                    ],
+                                ),
+                            )
+                        ]
+                    )
+
+                return first_stream()
+
+            async def second_stream():
+                yield SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="Done", tool_calls=None),
+                        )
+                    ]
+                )
+
+            return second_stream()
+
+        with patch("gluellm.api._safe_llm_call", side_effect=fake_safe_llm_call):
+            chunks = []
+            async for ch in stream_complete(
+                user_message="Use dummy_tool with value x",
+                system_prompt="Use the tool when asked.",
+                tools=[dummy_tool],
+                execute_tools=True,
+            ):
+                chunks.append(ch)
+
+        assert chunks[-1].done is True
+        assert chunks[-1].content == ""
+        combined = "".join(c.content for c in chunks)
+        assert combined.count("Done") == 1
+
 
 class TestStreamingStructuredOutput:
     """Test stream_complete with response_format (structured output on final chunk)."""
@@ -2826,6 +2892,31 @@ class TestPerCallConfigGaps:
         # At least one chunk should have been yielded
         assert len(chunks) >= 1
 
+    async def test_stream_complete_clears_correlation_id_in_finally(self):
+        """After stream_complete finishes, correlation ContextVar is cleared (parity with complete())."""
+        from gluellm.runtime.context import get_correlation_id
+
+        async def fake_llm(*args, **kwargs):
+            async def stream():
+                yield SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="Hi", tool_calls=None),
+                        )
+                    ]
+                )
+
+            return stream()
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            async for _ch in stream_complete(
+                user_message="Hi",
+                tools=[],
+                correlation_id="run-stream-clear-test",
+            ):
+                assert get_correlation_id() == "run-stream-clear-test"
+        assert get_correlation_id() is None
+
     async def test_complete_track_costs_false_skips_session_tracker(self):
         """When track_costs=False, cost is not recorded to session tracker."""
         reset_session_tracker()
@@ -3465,6 +3556,40 @@ class TestSummarizeContextIntegration:
             await client.complete("Msg 3")
 
         assert mock_sum.called, "_summarize_old_messages was not called despite threshold being exceeded"
+
+    async def test_summarize_old_messages_receives_completion_extra(self):
+        """Provider extras (model_kwargs) are forwarded to _summarize_old_messages as completion_extra."""
+        from unittest.mock import AsyncMock, patch
+
+        from gluellm.models.conversation import Role as ConvRole
+
+        extras_seen: list[dict[str, object] | None] = []
+
+        async def fake_summarize(messages, keep_recent, model, **kwargs):
+            extras_seen.append(kwargs.get("completion_extra"))
+            return messages
+
+        mock_response = _make_tool_response("Done")
+
+        with (
+            patch("gluellm.api._summarize_old_messages", side_effect=fake_summarize),
+            patch("gluellm.api._llm_call_with_retry", AsyncMock(return_value=mock_response)),
+        ):
+            from gluellm import SummarizeContextConfig
+
+            client = GlueLLM(
+                model="openai:gpt-4o-mini",
+                model_kwargs={"temperature": 0.2},
+                summarize_context=SummarizeContextConfig(enabled=True, threshold=4),
+            )
+            client._conversation.add_message(ConvRole.USER, "Msg 1")
+            client._conversation.add_message(ConvRole.ASSISTANT, "Reply 1")
+            client._conversation.add_message(ConvRole.USER, "Msg 2")
+            client._conversation.add_message(ConvRole.ASSISTANT, "Reply 2")
+            await client.complete("Msg 3")
+
+        assert extras_seen and extras_seen[0] is not None
+        assert extras_seen[0].get("temperature") == 0.2
 
     async def test_summarize_context_not_triggered_below_threshold(self):
         """_summarize_old_messages is not called when messages are below threshold."""

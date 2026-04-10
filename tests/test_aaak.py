@@ -184,6 +184,8 @@ def test_transcript_from_messages_includes_tool_results() -> None:
 @pytest.mark.asyncio
 async def test_compress_messages_passthrough_preserves_at_blocks_without_llm() -> None:
     """Pipeline path: pre-existing [AT] blocks must not be re-encoded (no LLM call)."""
+    from unittest.mock import AsyncMock, patch
+
     at_block = (
         "[AT]\n"
         "T:get_live_metrics(svc=gateway)→"
@@ -193,11 +195,13 @@ async def test_compress_messages_passthrough_preserves_at_blocks_without_llm() -
         {"role": "user", "content": "Pull metrics."},
         {"role": "assistant", "content": at_block},
     ]
-    out = await AAAKCompressor.compress_messages(
-        old_messages,
-        model="openai:gpt-4o-mini",
-        api_key=None,
-    )
+    with patch("gluellm.api._provider_cache") as mock_cache:
+        mock_cache.get_provider = AsyncMock(side_effect=AssertionError("LLM provider must not be used in passthrough"))
+        out = await AAAKCompressor.compress_messages(
+            old_messages,
+            model="openai:gpt-4o-mini",
+            api_key=None,
+        )
     assert out == f"USR: Pull metrics.\n{at_block}"
     assert "us-east-1a" in out
     assert "3400" in out

@@ -38,11 +38,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import re
 import string
 import time
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 import tiktoken
 
@@ -128,9 +131,13 @@ def score_databench(prediction: str, answer: str, answer_type: str) -> float:
     if answer_type == "boolean":
         gold = answer.strip().lower()
         if gold == "true":
-            return float("true" in pred or "yes" in pred)
+            has_true = "true" in pred or "yes" in pred
+            has_false = "false" in pred or "no " in pred
+            return float(has_true and not has_false)
         if gold == "false":
-            return float("false" in pred or "no" in pred)
+            has_false = "false" in pred or "no " in pred
+            has_true = "true" in pred or "yes" in pred
+            return float(has_false and not has_true)
         return 0.0
 
     if answer_type == "number":
@@ -445,7 +452,8 @@ def load_databench(n: int) -> list[Sample]:
             continue
         try:
             df = pd.read_parquet(f"hf://datasets/cardiffnlp/databench/data/{ds_id}/sample.parquet")
-        except Exception:
+        except Exception as e:
+            logger.warning("Skipping databench dataset %s: %s", ds_id, e)
             continue
         context = df.to_json(orient="records", indent=None)
         if count_tokens(context) < AAAK_MIN_CONTEXT_TOKENS:
@@ -479,7 +487,7 @@ async def run_task(task_name: str, n_samples: int) -> tuple[list[SampleResult], 
     GSM8K: the few-shot context is shared across all samples, so the context is
     compressed once and reused — answer calls run concurrently.
 
-    WTQ: each sample has a unique table, so compression runs per-sample
+    databench: each sample has a unique table, so compression runs per-sample
     sequentially (``_aaak_compress`` patches global provider state and cannot
     be called concurrently); answer calls follow compression immediately.
     """
@@ -651,6 +659,10 @@ async def main_async(args: argparse.Namespace) -> None:
     _benchmark_semaphore = asyncio.Semaphore(args.concurrency)
 
     task_names: list[str] = args.tasks or AVAILABLE_TASKS
+    for t in task_names:
+        if t not in AVAILABLE_TASKS:
+            print(f"ERROR: Unknown task {t!r}. Available: {AVAILABLE_TASKS}")
+            return
     print(f"  tasks={task_names}  samples_per_task={args.samples}  model={MODEL}")
     print(f"  gsm8k_few_shot_n={GSM8K_FEW_SHOT_N}  aaak_min_context_tokens={AAAK_MIN_CONTEXT_TOKENS}\n")
 

@@ -23,7 +23,7 @@ Example:
     >>>
     >>> # Access settings
     >>> print(settings.default_model)
-    'openai:gpt-4o-mini'
+    'openai:gpt-5.4-nano'
     >>>
     >>> # Reload after changing .env
     >>> settings = reload_settings()

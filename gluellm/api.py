@@ -2521,6 +2521,7 @@ class GlueLLM:
                                 model=effective_summarize_context_model,
                                 use_aaak=self.aaak_compression_enabled,
                                 aaak_model=self.aaak_compression_model,
+                                completion_extra=effective_model_kwargs,
                             )
 
                         # PRE_ITERATION hook: content is the last user message in the conversation
@@ -2649,7 +2650,7 @@ class GlueLLM:
                                 sinks=sinks,
                             )
                             # Update system prompt to reflect matched tools (no longer router)
-                            messages[0]["content"] = self._format_system_prompt(tools=active_tools)
+                            self._apply_system_prompt_after_tool_route(messages, active_tools)
                             continue
 
                         # Add assistant message with tool calls to history (dict for any_llm validation)
@@ -3143,6 +3144,7 @@ class GlueLLM:
                                     model=effective_summarize_context_model,
                                     use_aaak=self.aaak_compression_enabled,
                                     aaak_model=self.aaak_compression_model,
+                                    completion_extra=effective_model_kwargs,
                                 )
 
                             if _sc_pre_iter_hooks:
@@ -3265,7 +3267,7 @@ class GlueLLM:
                                     sinks=sinks,
                                 )
                                 # Update system prompt to reflect matched tools (no longer router)
-                                messages[0]["content"] = self._format_system_prompt(tools=active_tools)
+                                self._apply_system_prompt_after_tool_route(messages, active_tools)
                                 continue
 
                             # Add assistant message with tool calls to history (dict for any_llm validation)
@@ -3592,6 +3594,18 @@ class GlueLLM:
         return BASE_SYSTEM_PROMPT.render(
             instructions=self.system_prompt,
         ).strip()
+
+    def _apply_system_prompt_after_tool_route(
+        self,
+        messages: list[dict[str, Any]],
+        active_tools: list[Callable],
+    ) -> None:
+        """Set system message content after dynamic routing; keep AAAK decode preamble if enabled."""
+        messages[0]["content"] = self._format_system_prompt(tools=active_tools)
+        if self.aaak_compression_enabled or self.aaak_tool_condensing:
+            from gluellm.compression.aaak import AAAKCompressor
+
+            AAAKCompressor.ensure_preamble_in_system(messages[0])
 
     def _find_tool(self, tool_name: str, tools: list[Callable] | None = None) -> Callable | None:
         """Find a tool by name.
@@ -4134,6 +4148,7 @@ class GlueLLM:
                             model=effective_summarize_context_model,
                             use_aaak=self.aaak_compression_enabled,
                             aaak_model=self.aaak_compression_model,
+                            completion_extra=effective_stream_model_kwargs,
                         )
 
                     if _stream_pre_iter_hooks:
@@ -4396,7 +4411,7 @@ class GlueLLM:
                             sinks=sinks,
                         )
                         # Update system prompt to reflect matched tools (no longer router)
-                        messages[0]["content"] = self._format_system_prompt(tools=active_tools)
+                        self._apply_system_prompt_after_tool_route(messages, active_tools)
                         continue
 
                     # Yield a chunk indicating tool execution is happening
@@ -4530,11 +4545,10 @@ class GlueLLM:
                 if response_format and final_content:
                     structured_output = _parse_structured_content(final_content, response_format)
                 if final_content:
-                    # For now, yield the full content as a single chunk
-                    # In production, this would be actual streaming chunks from the API
+                    # Text was already streamed incrementally above; terminal chunk carries metadata only
                     self._conversation.add_message(Role.ASSISTANT, final_content)
                     yield StreamingChunk(
-                        content=final_content,
+                        content="",
                         done=True,
                         tool_calls_made=tool_calls_made,
                         structured_output=structured_output,
@@ -4579,6 +4593,7 @@ class GlueLLM:
                     on_eval_record_hooks=_stream_merged_registry.get_hooks(HookStage.PRE_EVAL_RECORD),
                     hook_manager=self._hook_manager,
                 )
+            clear_correlation_id()
 
     def reset_conversation(self) -> None:
         """Reset the conversation history."""

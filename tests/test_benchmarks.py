@@ -21,8 +21,14 @@ pytestmark = pytest.mark.benchmark
 
 
 def _skip_if_no_key() -> None:
-    if not os.environ.get("OPENAI_API_KEY") and not os.environ.get("GROQ_API_KEY"):
-        pytest.skip("No API keys set")
+    model = os.environ.get("GLUELLM_BENCH_MODEL") or os.environ.get("GLUELLM_DEFAULT_MODEL") or "openai:gpt-5.4-nano"
+    provider = model.split(":", 1)[0].lower() if ":" in model else "openai"
+    required_key = {
+        "openai": "OPENAI_API_KEY",
+        "groq": "GROQ_API_KEY",
+    }.get(provider, "OPENAI_API_KEY")
+    if not os.environ.get(required_key):
+        pytest.skip(f"Missing {required_key} for provider {provider!r} (model={model!r})")
 
 
 def _standard_samples() -> int:

@@ -221,12 +221,18 @@ def _csv_stats_comment(col_names: list[str], data_rows: list[str]) -> str:
     n = len(col_names)
     rows = [r for r in rows if len(r) == n]
     numeric_cols: list[int] = []
+
+    def _col_all_float(ci: int) -> bool:
+        for r in rows:
+            try:
+                float(r[ci])
+            except ValueError:
+                return False
+        return True
+
     for ci in range(n):
-        try:
-            [float(r[ci]) for r in rows]
+        if _col_all_float(ci):
             numeric_cols.append(ci)
-        except ValueError:
-            pass
     label_cols = [ci for ci in range(n) if ci not in numeric_cols]
     if not numeric_cols:
         return ""

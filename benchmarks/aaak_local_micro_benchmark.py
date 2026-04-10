@@ -7,7 +7,6 @@ Run:
 from __future__ import annotations
 
 import argparse
-import asyncio
 import time
 
 from gluellm.compression.aaak import AAAKCompressor, transcript_from_messages
@@ -70,7 +69,8 @@ def _bench_preamble(iterations: int) -> float:
     return time.perf_counter() - t0
 
 
-async def main_async(args: argparse.Namespace) -> None:
+def main_sync(args: argparse.Namespace) -> None:
+    """Synchronous entry: micro-benchmarks do not perform I/O."""
     it = args.iterations
     turns = args.turns
     messages = _large_message_list(turns)
@@ -98,7 +98,7 @@ def main() -> None:
     p.add_argument("--iterations", type=int, default=200)
     p.add_argument("--turns", type=int, default=40, help="Synthetic user/assistant pairs before tool round.")
     args = p.parse_args()
-    asyncio.run(main_async(args))
+    main_sync(args)
 
 
 if __name__ == "__main__":

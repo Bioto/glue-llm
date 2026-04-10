@@ -21,7 +21,7 @@ Triggered by `condense_tool_messages=True` with `aaak_tool_condensing=True`.
 Each completed tool round (the `assistant(tool_calls)` + N `tool` result messages)
 is replaced **deterministically** — no extra API call — with a single compact block:
 
-```
+```text
 [AT]
 T:get_config()→
   db_pool_size=10
@@ -44,7 +44,7 @@ When the conversation grows beyond `summarize_context_threshold` messages, the o
 turns (everything except the most recent `summarize_context_keep_recent` messages and
 the system prompt) are sent to an LLM which rewrites them as AAAK shorthand:
 
-```
+```text
 [AAAK CTX]
 USR: JWT auth for FastAPI | HS256 | access=15min | refresh=7d
 AST: JWT_SECRET_KEY env | python-jose | make_token(sub,min=15)→jwt.encode
@@ -66,7 +66,7 @@ AST: logout:1→DELETE /auth/session;2→SHA256 hash;3→UPDATE revoked_at=now()
 A short decoding hint is appended to the system message once so the downstream model
 knows how to read the block:
 
-```
+```text
 [AAAK decoding hint]
 Decode [AAAK CTX] and [AT]: USR:/AST: turns; T:name()→result for tools
 (args only when same name used twice). Lists [a,b,c]; ordered steps 1→2→3;
@@ -203,9 +203,9 @@ All settings are in `GlueLLMSettings` (env prefix `GLUELLM_`).
 
 | Setting | Default | Description |
 |---|---|---|
-| `aaak_compression_enabled` | `True` | Use AAAK instead of prose when `summarize_context=True` |
+| `aaak_compression_enabled` | `False` | When `True`, use AAAK instead of prose once summarization runs (requires `summarize_context` enabled with threshold exceeded) |
 | `aaak_compression_model` | `None` | Model for the compression call. `None` → same as `summarize_context_model` → primary model |
-| `aaak_tool_condensing` | `True` | Emit `[AT]` blocks instead of plain `[Tool Results]` when `condense_tool_messages=True` |
+| `aaak_tool_condensing` | `False` | When `True`, emit `[AT]` blocks instead of plain `[Tool Results]` when `condense_tool_messages=True` |
 | `default_summarize_context` | `False` | Auto-compress when message count exceeds threshold (off by default) |
 | `default_summarize_context_threshold` | `20` | Message count that triggers compression |
 | `default_summarize_context_keep_recent` | `6` | Verbatim messages kept at the tail |
@@ -227,7 +227,7 @@ client = GlueLLM(
         threshold=20,             # compress after 20 non-system messages
         keep_recent=6,            # always keep last 6 messages verbatim
     ),
-    aaak_compression_enabled=True,    # use AAAK (default when summarize_context is enabled)
+    aaak_compression_enabled=True,    # opt-in; must be True for AAAK (not implied by summarize_context alone)
     aaak_compression_model="openai:gpt-4-turbo",  # stronger compressor, cheaper answerer
     condense_tool_messages=True,      # collapse tool rounds into [AT] blocks
 )

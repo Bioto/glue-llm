@@ -187,7 +187,7 @@ client = GlueLLM(
         threshold=20,                # compress after 20 non-system messages
         keep_recent=6,               # always keep last 6 messages verbatim
     ),
-    aaak_compression_enabled=True,     # use AAAK instead of prose (default when summarize_context is enabled)
+    aaak_compression_enabled=True,     # opt-in; enable AAAK explicitly (not implied by summarize_context alone)
     aaak_compression_model="openai:gpt-4-turbo",  # stronger compressor → smaller context
 )
 ```
@@ -227,7 +227,7 @@ result = await complete(
 client = GlueLLM(
     tools=[...],
     tool_mode="dynamic",
-    tool_route_model="openai:gpt-4o-mini",  # fast cheap model for routing
+    tool_route_model="openai:gpt-5.4-nano",  # fast cheap model for routing
 )
 result = await client.complete("Check the weather and search flights...")
 ```
@@ -490,11 +490,11 @@ Key GlueLLM-specific env vars:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GLUELLM_DEFAULT_MODEL` | `openai:gpt-4o-mini` | Default model |
+| `GLUELLM_DEFAULT_MODEL` | `openai:gpt-5.4-nano` | Default model |
 | `GLUELLM_DEFAULT_EMBEDDING_MODEL` | `openai/text-embedding-3-small` | Default embedding model |
 | `GLUELLM_DEFAULT_EMBEDDING_DIMENSIONS` | _(unset)_ | Default output dimensions for embeddings (e.g. `512`) |
-| `GLUELLM_DEFAULT_REQUEST_TIMEOUT` | `60.0` | Request timeout (seconds) |
-| `GLUELLM_MAX_REQUEST_TIMEOUT` | `300.0` | Maximum allowed request timeout |
+| `GLUELLM_DEFAULT_REQUEST_TIMEOUT` | `300.0` | Request timeout (seconds) |
+| `GLUELLM_MAX_REQUEST_TIMEOUT` | `1800.0` | Maximum allowed request timeout |
 | `GLUELLM_DEFAULT_CONNECT_TIMEOUT` | `10.0` | Connection timeout (seconds) |
 | `GLUELLM_MAX_CONNECT_TIMEOUT` | `60.0` | Maximum allowed connection timeout |
 | `GLUELLM_DEFAULT_REASONING_EFFORT` | _(unset)_ | Default reasoning effort for thinking models |

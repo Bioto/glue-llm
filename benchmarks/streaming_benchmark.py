@@ -69,10 +69,14 @@ async def main_async(args: argparse.Namespace) -> None:
     n_complete = _normalize(complete_text)
     n_stream = _normalize(stream_text)
     parity = n_complete == n_stream
-    prefix_match = bool(n_complete and n_stream and (
-        n_complete.startswith(n_stream[: min(20, len(n_stream))])
-        or n_stream.startswith(n_complete[: min(20, len(n_complete))])
-    ))
+    min_prefix = min(10, len(n_stream), len(n_complete))
+    prefix_match = bool(
+        min_prefix > 0
+        and (
+            n_complete.startswith(n_stream[:min_prefix])
+            or n_stream.startswith(n_complete[:min_prefix])
+        )
+    )
 
     print(f"  complete total:     {complete_s*1000:.0f} ms  len={len(complete_text)}")
     print(f"  stream total:       {stream_s*1000:.0f} ms  len={len(stream_text)}")

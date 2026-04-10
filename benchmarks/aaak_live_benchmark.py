@@ -49,6 +49,10 @@ Options:
                             Do not pass temperature=0, top_p=1 to the API (some models reject it).
 """
 
+# This benchmark intentionally imports private GlueLLM APIs (`_condense_tool_round`,
+# `_summarize_old_messages`, `_COMPRESS_*`) for end-to-end fidelity tests; it may
+# break when those internals change.
+
 from __future__ import annotations
 
 import argparse
@@ -85,6 +89,9 @@ _benchmark_verbose_section_a: bool = False
 # Semaphore caps in-flight provider calls across all concurrent recall/judge/compress tasks.
 # Initialized in main_async() from --concurrency N (default 10).
 _benchmark_semaphore: asyncio.Semaphore | None = None
+
+# Serializes Section A `prepare_ctx_prose` monkeypatch of `_ProviderCache` (global class).
+_provider_cache_patch_lock = asyncio.Lock()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1263,36 +1270,37 @@ async def prepare_ctx_prose(conversation: list[dict], keep_recent: int) -> tuple
     from gluellm.api import _ProviderCache
 
     captured: list[TokenUsage] = []
-    original_get_provider = _ProviderCache.get_provider
+    async with _provider_cache_patch_lock:
+        original_get_provider = _ProviderCache.get_provider
 
-    class _TrackingCache(_ProviderCache):
-        def get_provider(self, model, api_key):
-            provider, model_id = original_get_provider(self, model, api_key)
+        class _TrackingCache(_ProviderCache):
+            def get_provider(self, model, api_key):
+                provider, model_id = original_get_provider(self, model, api_key)
 
-            class _Tracked:
-                async def acompletion(_, **kwargs):
-                    resp = await provider.acompletion(**kwargs)
-                    u = getattr(resp, "usage", None)
-                    captured.append(TokenUsage(
-                        getattr(u, "prompt_tokens", 0) or 0,
-                        getattr(u, "completion_tokens", 0) or 0,
-                    ))
-                    return resp
+                class _Tracked:
+                    async def acompletion(self, **kwargs):
+                        resp = await provider.acompletion(**kwargs)
+                        u = getattr(resp, "usage", None)
+                        captured.append(TokenUsage(
+                            getattr(u, "prompt_tokens", 0) or 0,
+                            getattr(u, "completion_tokens", 0) or 0,
+                        ))
+                        return resp
 
-            return _Tracked(), model_id
+                return _Tracked(), model_id
 
-    import gluellm.api as _api
-    _orig = _api._ProviderCache
-    _api._ProviderCache = _TrackingCache
-    try:
-        result = await _summarize_old_messages(
-            list(conversation),
-            keep_recent=keep_recent,
-            model=MODEL,
-            completion_extra=_benchmark_completion_extra if _benchmark_completion_extra else None,
-        )
-    finally:
-        _api._ProviderCache = _orig
+        import gluellm.api as _api
+        _orig = _api._ProviderCache
+        _api._ProviderCache = _TrackingCache
+        try:
+            result = await _summarize_old_messages(
+                list(conversation),
+                keep_recent=keep_recent,
+                model=MODEL,
+                completion_extra=_benchmark_completion_extra if _benchmark_completion_extra else None,
+            )
+        finally:
+            _api._ProviderCache = _orig
 
     total = TokenUsage(sum(u.prompt for u in captured), sum(u.completion for u in captured))
     return result, total
@@ -1313,7 +1321,7 @@ async def prepare_ctx_aaak(conversation: list[dict], keep_recent: int) -> tuple[
         provider, model_id = orig_get(model, api_key)
 
         class _Tracked:
-            async def acompletion(_, **kwargs):
+            async def acompletion(self, **kwargs):
                 resp = await provider.acompletion(**kwargs)
                 u = getattr(resp, "usage", None)
                 captured.append(TokenUsage(

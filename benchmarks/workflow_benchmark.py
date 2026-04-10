@@ -29,6 +29,9 @@ class _MockExec(Executor):
 
 
 async def main_async(args: argparse.Namespace) -> None:
+    if args.iterations <= 0:
+        raise SystemExit("ERROR: --iterations must be a positive integer")
+
     e1 = _MockExec(["alpha"])
     e2 = _MockExec(["beta"])
     combiner = _MockExec(["combined"])

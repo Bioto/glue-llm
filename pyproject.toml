@@ -85,12 +85,6 @@ dev = [
     "tiktoken>=0.12.0",
 ]
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-markers = [
-    "benchmark: live API benchmark tests (real LLM calls, requires API keys)",
-]
-
 [tool.ruff]
 # Set the target Python version
 target-version = "py312"
