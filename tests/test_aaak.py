@@ -3,8 +3,8 @@
 import pytest
 
 from gluellm.compression.aaak import (
-    AAAKCompressor,
     AAAK_PREAMBLE_MARKER,
+    AAAKCompressor,
     _csv_stats_comment,
     _format_scalar_for_flatten,
     _format_tool_result,

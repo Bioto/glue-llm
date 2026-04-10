@@ -2899,11 +2899,13 @@ class TestPerCallConfigGaps:
             tools=[],
             eval_store=eval_store,
         )
-        with patch("gluellm.api._record_eval_data", new_callable=AsyncMock) as mock_record:
-            with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
-                chunks = []
-                async for ch in client.stream_complete("Hi", execute_tools=False):
-                    chunks.append(ch)
+        with (
+            patch("gluellm.api._record_eval_data", new_callable=AsyncMock) as mock_record,
+            patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm),
+        ):
+            chunks = []
+            async for ch in client.stream_complete("Hi", execute_tools=False):
+                chunks.append(ch)
 
         mock_record.assert_awaited_once()
         rec = mock_record.await_args.kwargs
@@ -2932,11 +2934,13 @@ class TestPerCallConfigGaps:
             tools=[],
             eval_store=eval_store,
         )
-        with patch("gluellm.api._record_eval_data", new_callable=AsyncMock) as mock_record:
-            with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
-                with pytest.raises(LLMError):
-                    async for _ch in client.stream_complete("Hi", execute_tools=False):
-                        pass
+        with (
+            patch("gluellm.api._record_eval_data", new_callable=AsyncMock) as mock_record,
+            patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm),
+            pytest.raises(LLMError),
+        ):
+            async for _ch in client.stream_complete("Hi", execute_tools=False):
+                pass
 
         mock_record.assert_awaited_once()
         rec = mock_record.await_args.kwargs
@@ -2962,15 +2966,17 @@ class TestPerCallConfigGaps:
                 return stream()
             raise AssertionError("non-stream path not expected")
 
-        with patch("gluellm.api._record_eval_data", new_callable=AsyncMock) as mock_record:
-            with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
-                async for _ch in stream_complete(
-                    user_message="Hi",
-                    tools=[],
-                    execute_tools=False,
-                    enable_eval_recording=False,
-                ):
-                    pass
+        with (
+            patch("gluellm.api._record_eval_data", new_callable=AsyncMock) as mock_record,
+            patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm),
+        ):
+            async for _ch in stream_complete(
+                user_message="Hi",
+                tools=[],
+                execute_tools=False,
+                enable_eval_recording=False,
+            ):
+                pass
 
         for call in mock_record.call_args_list:
             assert call.kwargs.get("eval_store") is None
@@ -3278,7 +3284,7 @@ class TestSummarizeOldMessages:
 
     async def test_aaak_compression_uses_aaak_model_when_provided(self):
         """aaak_model parameter is forwarded to AAAKCompressor.compress_messages."""
-        from unittest.mock import AsyncMock, call, patch
+        from unittest.mock import AsyncMock, patch
 
         from gluellm.api import _summarize_old_messages
 
