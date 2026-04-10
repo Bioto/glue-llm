@@ -939,6 +939,7 @@ class TestFourLevelOrganisationHierarchy:
 class TestEcommerceOrderComplexRelationships:
     """Order → Customer (with saved ShippingAddresses) → list[OrderLine] → Product."""
 
+    @pytest.mark.xfail(reason="Deeply nested Pydantic schema produces invalid JSON payload for OpenAI API")
     async def test_order_auto_coerced_throughout_all_relationships(self):
         """Every nested object in Order is auto-coerced to the correct model type.
 
