@@ -186,6 +186,69 @@ class RateLimitConfig(BaseModel):
             )
         return v
 
+
+class SummarizeContextConfig(BaseModel):
+    """Configuration for automatic context summarization."""
+
+    enabled: bool = False
+    threshold: int | None = None
+    model: str | None = None
+    keep_recent: int | None = None
+
+    @field_validator("threshold", "keep_recent")
+    @classmethod
+    def _positive_optional(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError("must be > 0")
+        return v
+
+
+def _default_summarize_context_config() -> SummarizeContextConfig:
+    return SummarizeContextConfig(
+        enabled=settings.default_summarize_context,
+        threshold=settings.default_summarize_context_threshold,
+        model=None,
+        keep_recent=settings.default_summarize_context_keep_recent,
+    )
+
+
+def _normalize_summarize_context_init(value: SummarizeContextConfig | bool | None) -> SummarizeContextConfig:
+    """Build instance-level summarization config from ctor argument."""
+    base = _default_summarize_context_config()
+    if value is None:
+        return base
+    if isinstance(value, bool):
+        return base.model_copy(update={"enabled": value})
+    merged = base.model_copy(update=value.model_dump(exclude_unset=True))
+    if merged.threshold is None:
+        merged = merged.model_copy(update={"threshold": settings.default_summarize_context_threshold})
+    if merged.keep_recent is None:
+        merged = merged.model_copy(update={"keep_recent": settings.default_summarize_context_keep_recent})
+    return merged
+
+
+def _merge_summarize_context_for_call(
+    base: SummarizeContextConfig,
+    override: SummarizeContextConfig | bool | None,
+) -> SummarizeContextConfig:
+    """Merge per-call override with instance-level config."""
+    if override is None:
+        return base
+    if isinstance(override, bool):
+        return base.model_copy(update={"enabled": override})
+    merged = base.model_copy(update=override.model_dump(exclude_unset=True))
+    if merged.threshold is None:
+        merged = merged.model_copy(update={"threshold": base.threshold})
+    if merged.keep_recent is None:
+        merged = merged.model_copy(update={"keep_recent": base.keep_recent})
+    return merged
+
+
+def _summarize_model_for_call(cfg: SummarizeContextConfig, primary_model: str) -> str:
+    """Resolve model for summarization (explicit config, then primary)."""
+    return cfg.model or primary_model
+
+
 # Configure logging
 logger = get_logger(__name__)
 
@@ -1964,34 +2027,37 @@ class GlueLLM:
 
     def __init__(
         self,
-        model: str | None = None,
+        # -- Core --
         embedding_model: str | None = None,
+        model: str | None = None,
         system_prompt: str | None = None,
-        tools: list[Callable] | None = None,
-        max_tool_iterations: int | None = None,
-        eval_store: EvalStore | None = None,
-        guardrails: GuardrailsConfig | None = None,
-        condense_tool_messages: bool | None = None,
-        tool_mode: ToolMode = "standard",
-        tool_execution_order: ToolExecutionOrder | None = None,
-        tool_route_model: str | None = None,
+        # -- Model generation --
+        logprobs: bool | None = None,
         max_tokens: int | None = None,
-        retry_config: RetryConfig | None = None,
-        rate_limit_config: RateLimitConfig | None = None,
         model_kwargs: dict[str, Any] | None = None,
         reasoning_effort: ReasoningEffort | None = None,
-        logprobs: bool | None = None,
         top_logprobs: int | None = None,
-        session_label: str | None = None,
+        # -- Tools --
+        condense_tool_messages: bool | None = None,
+        max_tool_iterations: int | None = None,
         parallel_tool_calls: bool | None = None,
-        hook_registry: HookRegistry | None = None,
-        summarize_context: bool = False,
-        summarize_context_threshold: int | None = None,
-        summarize_context_model: str | None = None,
-        summarize_context_keep_recent: int | None = None,
+        tool_execution_order: ToolExecutionOrder | None = None,
+        tool_mode: ToolMode = "standard",
+        tool_route_model: str | None = None,
+        tools: list[Callable] | None = None,
+        # -- Resilience --
+        rate_limit_config: RateLimitConfig | None = None,
+        retry_config: RetryConfig | None = None,
+        # -- Context management --
         aaak_compression_enabled: bool | None = None,
         aaak_compression_model: str | None = None,
         aaak_tool_condensing: bool | None = None,
+        summarize_context: SummarizeContextConfig | bool | None = None,
+        # -- Observability / behavior --
+        eval_store: EvalStore | None = None,
+        guardrails: GuardrailsConfig | None = None,
+        hook_registry: HookRegistry | None = None,
+        session_label: str | None = None,
     ):
         """Initialize GlueLLM client.
 
@@ -2023,15 +2089,8 @@ class GlueLLM:
             parallel_tool_calls: Allow parallel tool calls when multiple tools are requested.
             hook_registry: Optional hook registry for pre/post tool and iteration hooks. Merged
                 with the global registry at call time so global hooks always apply.
-            summarize_context: If True, older conversation messages are automatically summarized
-                into a single message when the context exceeds summarize_context_threshold messages.
-                Defaults to False.
-            summarize_context_threshold: Number of messages (excluding the system prompt) that
-                triggers summarization. Defaults to settings.default_summarize_context_threshold (20).
-            summarize_context_model: Model used for the summarization call. Defaults to the
-                client's primary model. A cheaper/faster model is often sufficient here.
-            summarize_context_keep_recent: Number of most-recent messages to always keep verbatim.
-                Defaults to settings.default_summarize_context_keep_recent (6).
+            summarize_context: ``True``/``False``, or ``SummarizeContextConfig`` for automatic summarization
+                of older messages when the context exceeds the threshold. Defaults from settings.
             aaak_compression_enabled: Use AAAK LLM compression when summarizing context (defaults to settings).
             aaak_compression_model: Model for AAAK compression when enabled (defaults to settings).
             aaak_tool_condensing: Encode condensed tool rounds as AAAK ``[AT]`` blocks (defaults to settings).
@@ -2069,18 +2128,7 @@ class GlueLLM:
             self.model_kwargs["parallel_tool_calls"] = effective_parallel_tool_calls
         self._hook_registry = hook_registry or HookRegistry()
         self._hook_manager = HookManager()
-        self.summarize_context = summarize_context
-        self.summarize_context_threshold = (
-            summarize_context_threshold
-            if summarize_context_threshold is not None
-            else settings.default_summarize_context_threshold
-        )
-        self.summarize_context_model = summarize_context_model
-        self.summarize_context_keep_recent = (
-            summarize_context_keep_recent
-            if summarize_context_keep_recent is not None
-            else settings.default_summarize_context_keep_recent
-        )
+        self._summarize_context_cfg = _normalize_summarize_context_init(summarize_context)
         self.aaak_compression_enabled = (
             aaak_compression_enabled
             if aaak_compression_enabled is not None
@@ -2092,6 +2140,26 @@ class GlueLLM:
         self.aaak_tool_condensing = (
             aaak_tool_condensing if aaak_tool_condensing is not None else settings.aaak_tool_condensing
         )
+
+    @property
+    def summarize_context(self) -> bool:
+        return self._summarize_context_cfg.enabled
+
+    @property
+    def summarize_context_threshold(self) -> int:
+        t = self._summarize_context_cfg.threshold
+        assert t is not None  # normalized at init
+        return t
+
+    @property
+    def summarize_context_model(self) -> str | None:
+        return self._summarize_context_cfg.model
+
+    @property
+    def summarize_context_keep_recent(self) -> int:
+        k = self._summarize_context_cfg.keep_recent
+        assert k is not None  # normalized at init
+        return k
 
     def _get_merged_hook_registry(self) -> HookRegistry:
         """Return the global hook registry merged with this instance's registry."""
@@ -2254,45 +2322,48 @@ class GlueLLM:
     async def complete(
         self,
         user_message: str,
-        model: str | None = None,
-        execute_tools: bool = True,
-        correlation_id: str | None = None,
-        request_timeout: float | None = None,
-        connect_timeout: float | None = None,
+        # -- Core --
         api_key: str | None = None,
+        model: str | None = None,
+        # -- Model generation --
+        logprobs: bool | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        top_logprobs: int | None = None,
+        # -- Tools --
+        condense_tool_messages: bool | None = None,
+        execute_tools: bool = True,
+        parallel_tool_calls: bool | None = None,
+        tool_execution_order: ToolExecutionOrder | None = None,
+        tool_mode: ToolMode | None = None,
+        # -- Timeouts --
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
+        # -- Resilience --
+        rate_limit_config: RateLimitConfig | None = None,
+        retry_config: RetryConfig | None = None,
+        retry_enabled: bool | None = None,
+        # -- Context management --
+        summarize_context: SummarizeContextConfig | bool | None = None,
+        # -- Observability / behavior --
+        correlation_id: str | None = None,
+        enable_eval_recording: bool | None = None,
         guardrails: GuardrailsConfig | None = None,
         on_status: OnStatusCallback = None,
-        max_tokens: int | None = None,
-        condense_tool_messages: bool | None = None,
-        tool_mode: ToolMode | None = None,
-        tool_execution_order: ToolExecutionOrder | None = None,
-        retry_enabled: bool | None = None,
-        retry_config: RetryConfig | None = None,
-        rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
-        rate_limit_config: RateLimitConfig | None = None,
-        track_costs: bool | None = None,
-        enable_eval_recording: bool | None = None,
-        reasoning_effort: ReasoningEffort | None = None,
-        logprobs: bool | None = None,
-        top_logprobs: int | None = None,
         session_label: str | None = None,
-        parallel_tool_calls: bool | None = None,
         sinks: list[Sink] | None = None,
-        summarize_context: bool | None = None,
-        summarize_context_threshold: int | None = None,
-        summarize_context_model: str | None = None,
-        summarize_context_keep_recent: int | None = None,
+        track_costs: bool | None = None,
         **model_kwargs: Any,
     ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
 
         Args:
             user_message: The user's message/request
+            api_key: Optional API key override (for key pool usage)
             execute_tools: Whether to automatically execute tools and loop
             correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
             request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
             connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
-            api_key: Optional API key override (for key pool usage)
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             on_status: Optional callback for process status events (LLM call start/end, tool start/end, complete)
             max_tokens: Maximum number of tokens to generate. Overrides instance-level max_tokens if provided.
@@ -2300,9 +2371,7 @@ class GlueLLM:
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
             retry_enabled: If False, disables retries for this call (shorthand for retry_config.retry_enabled=False).
             retry_config: Per-call retry configuration override (includes optional callback).
-            rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
-                Shorthand for rate_limit_config=RateLimitConfig(algorithm=...).
-            rate_limit_config: Per-call rate limit configuration override.
+            rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
             reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto".
@@ -2310,10 +2379,7 @@ class GlueLLM:
             top_logprobs: Number of top log probs when logprobs=True.
             session_label: Observability metadata for gateway traces.
             parallel_tool_calls: Allow parallel tool calls.
-            summarize_context: Override the instance-level summarize_context setting for this call.
-            summarize_context_threshold: Override the message-count threshold that triggers summarization.
-            summarize_context_model: Override the model used for the summarization call.
-            summarize_context_keep_recent: Override how many recent messages are kept verbatim.
+            summarize_context: Override instance summarization (bool or ``SummarizeContextConfig``).
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
@@ -2354,10 +2420,8 @@ class GlueLLM:
                 if cfg is None
                 else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
             )
-        # Per-call rate_limit_config or rate_limit_algorithm override; else client-level; else None (use settings)
+        # Per-call rate_limit_config override; else client-level; else None (use settings)
         effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else self.rate_limit_config
-        if rate_limit_algorithm is not None:
-            effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
         effective_eval_store = None if enable_eval_recording is False else self.eval_store
         call_model_kwargs = dict(model_kwargs)
         override_max_tool_iterations = call_model_kwargs.pop("max_tool_iterations", None)
@@ -2377,18 +2441,8 @@ class GlueLLM:
             effective_model_kwargs["session_label"] = session_label
         if parallel_tool_calls is not None:
             effective_model_kwargs["parallel_tool_calls"] = parallel_tool_calls
-        effective_summarize_context = summarize_context if summarize_context is not None else self.summarize_context
-        effective_summarize_context_threshold = (
-            summarize_context_threshold
-            if summarize_context_threshold is not None
-            else self.summarize_context_threshold
-        )
-        effective_summarize_context_model = summarize_context_model or self.summarize_context_model or self.model
-        effective_summarize_context_keep_recent = (
-            summarize_context_keep_recent
-            if summarize_context_keep_recent is not None
-            else self.summarize_context_keep_recent
-        )
+        effective_summarize_cfg = _merge_summarize_context_for_call(self._summarize_context_cfg, summarize_context)
+        effective_summarize_context_model = _summarize_model_for_call(effective_summarize_cfg, model or self.model)
 
         # Set correlation ID if provided
         if correlation_id:
@@ -2458,10 +2512,12 @@ class GlueLLM:
                     logger.debug(f"Tool execution iteration {iteration + 1}/{effective_max_tool_iterations}")
                     try:
                         # Context summarization: compress old messages when threshold is exceeded
-                        if effective_summarize_context and len(messages) > effective_summarize_context_threshold:
+                        _thr = effective_summarize_cfg.threshold
+                        _kr = effective_summarize_cfg.keep_recent
+                        if effective_summarize_cfg.enabled and _thr is not None and len(messages) > _thr:
                             messages = await _summarize_old_messages(
                                 messages,
-                                keep_recent=effective_summarize_context_keep_recent,
+                                keep_recent=_kr if _kr is not None else settings.default_summarize_context_keep_recent,
                                 model=effective_summarize_context_model,
                                 use_aaak=self.aaak_compression_enabled,
                                 aaak_model=self.aaak_compression_model,
@@ -2844,36 +2900,39 @@ class GlueLLM:
         self,
         user_message: str,
         response_format: type[T],
+        # -- Core --
+        api_key: str | None = None,
         model: str | None = None,
         tools: list[Callable] | None = None,
-        execute_tools: bool = True,
-        correlation_id: str | None = None,
-        request_timeout: float | None = None,
-        connect_timeout: float | None = None,
-        api_key: str | None = None,
-        guardrails: GuardrailsConfig | None = None,
-        on_status: OnStatusCallback = None,
-        max_tokens: int | None = None,
-        condense_tool_messages: bool | None = None,
-        tool_mode: ToolMode | None = None,
-        tool_execution_order: ToolExecutionOrder | None = None,
-        retry_enabled: bool | None = None,
-        retry_config: RetryConfig | None = None,
-        rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
-        rate_limit_config: RateLimitConfig | None = None,
-        track_costs: bool | None = None,
-        enable_eval_recording: bool | None = None,
-        reasoning_effort: ReasoningEffort | None = None,
+        # -- Model generation --
         logprobs: bool | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
         top_logprobs: int | None = None,
-        session_label: str | None = None,
+        # -- Tools --
+        condense_tool_messages: bool | None = None,
+        execute_tools: bool = True,
         parallel_tool_calls: bool | None = None,
+        tool_execution_order: ToolExecutionOrder | None = None,
+        tool_mode: ToolMode | None = None,
+        # -- Timeouts --
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
+        # -- Resilience --
+        rate_limit_config: RateLimitConfig | None = None,
+        retry_config: RetryConfig | None = None,
+        retry_enabled: bool | None = None,
+        # -- Context management --
+        summarize_context: SummarizeContextConfig | bool | None = None,
+        # -- Observability / behavior --
+        correlation_id: str | None = None,
+        enable_eval_recording: bool | None = None,
+        guardrails: GuardrailsConfig | None = None,
         max_validation_retries: int | None = None,
+        on_status: OnStatusCallback = None,
+        session_label: str | None = None,
         sinks: list[Sink] | None = None,
-        summarize_context: bool | None = None,
-        summarize_context_threshold: int | None = None,
-        summarize_context_model: str | None = None,
-        summarize_context_keep_recent: int | None = None,
+        track_costs: bool | None = None,
         **model_kwargs: Any,
     ) -> ExecutionResult[T]:
         """Complete a request and return structured output.
@@ -2899,8 +2958,7 @@ class GlueLLM:
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
             retry_enabled: If False, disables retries for this call (shorthand for retry_config.retry_enabled=False).
             retry_config: Per-call retry configuration override (includes optional callback).
-            rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
-            rate_limit_config: Per-call rate limit configuration override.
+            rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
             reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto".
@@ -2910,10 +2968,7 @@ class GlueLLM:
             parallel_tool_calls: Allow parallel tool calls.
             max_validation_retries: Max retries when Pydantic validation fails (default 3).
                 On validation error, the error is fed back to the model for self-correction.
-            summarize_context: Override the instance-level summarize_context setting for this call.
-            summarize_context_threshold: Override the message-count threshold that triggers summarization.
-            summarize_context_model: Override the model used for the summarization call.
-            summarize_context_keep_recent: Override how many recent messages are kept verbatim.
+            summarize_context: Override instance summarization (bool or ``SummarizeContextConfig``).
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
@@ -2955,8 +3010,6 @@ class GlueLLM:
                 else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
             )
         effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else self.rate_limit_config
-        if rate_limit_algorithm is not None:
-            effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
         effective_eval_store = None if enable_eval_recording is False else self.eval_store
         call_model_kwargs = dict(model_kwargs)
         override_max_tool_iterations = call_model_kwargs.pop("max_tool_iterations", None)
@@ -2976,18 +3029,8 @@ class GlueLLM:
             effective_model_kwargs["session_label"] = session_label
         if parallel_tool_calls is not None:
             effective_model_kwargs["parallel_tool_calls"] = parallel_tool_calls
-        effective_summarize_context = summarize_context if summarize_context is not None else self.summarize_context
-        effective_summarize_context_threshold = (
-            summarize_context_threshold
-            if summarize_context_threshold is not None
-            else self.summarize_context_threshold
-        )
-        effective_summarize_context_model = summarize_context_model or self.summarize_context_model or self.model
-        effective_summarize_context_keep_recent = (
-            summarize_context_keep_recent
-            if summarize_context_keep_recent is not None
-            else self.summarize_context_keep_recent
-        )
+        effective_summarize_cfg = _merge_summarize_context_for_call(self._summarize_context_cfg, summarize_context)
+        effective_summarize_context_model = _summarize_model_for_call(effective_summarize_cfg, model or self.model)
 
         # Set correlation ID if provided
         if correlation_id:
@@ -3089,10 +3132,14 @@ class GlueLLM:
 
                         try:
                             # Context summarization: compress old messages when threshold is exceeded
-                            if effective_summarize_context and len(messages) > effective_summarize_context_threshold:
+                            _thr_sc = effective_summarize_cfg.threshold
+                            _kr_sc = effective_summarize_cfg.keep_recent
+                            if effective_summarize_cfg.enabled and _thr_sc is not None and len(messages) > _thr_sc:
                                 messages = await _summarize_old_messages(
                                     messages,
-                                    keep_recent=effective_summarize_context_keep_recent,
+                                    keep_recent=_kr_sc
+                                    if _kr_sc is not None
+                                    else settings.default_summarize_context_keep_recent,
                                     model=effective_summarize_context_model,
                                     use_aaak=self.aaak_compression_enabled,
                                     aaak_model=self.aaak_compression_model,
@@ -3813,29 +3860,32 @@ class GlueLLM:
     async def stream_complete(
         self,
         user_message: str,
-        execute_tools: bool = ...,
+        # -- Core --
         model: str | None = ...,
         guardrails: GuardrailsConfig | None = ...,
         response_format: type[T] = ...,
-        on_status: OnStatusCallback = ...,
-        correlation_id: str | None = ...,
-        request_timeout: float | None = ...,
-        connect_timeout: float | None = ...,
+        # -- Model generation --
         max_tokens: int | None = ...,
+        # -- Tools --
         condense_tool_messages: bool | None = ...,
-        tool_mode: ToolMode | None = ...,
+        execute_tools: bool = ...,
         tool_execution_order: ToolExecutionOrder | None = ...,
-        retry_enabled: bool | None = ...,
-        retry_config: RetryConfig | None = ...,
-        rate_limit_algorithm: RateLimitAlgorithm | str | None = ...,
+        tool_mode: ToolMode | None = ...,
+        # -- Timeouts --
+        connect_timeout: float | None = ...,
+        request_timeout: float | None = ...,
+        # -- Resilience --
         rate_limit_config: RateLimitConfig | None = ...,
-        track_costs: bool | None = ...,
+        retry_config: RetryConfig | None = ...,
+        retry_enabled: bool | None = ...,
+        # -- Context management --
+        summarize_context: SummarizeContextConfig | bool | None = ...,
+        # -- Observability / behavior --
+        correlation_id: str | None = ...,
         enable_eval_recording: bool | None = ...,
+        on_status: OnStatusCallback = ...,
         sinks: list[Sink] | None = ...,
-        summarize_context: bool | None = ...,
-        summarize_context_threshold: int | None = ...,
-        summarize_context_model: str | None = ...,
-        summarize_context_keep_recent: int | None = ...,
+        track_costs: bool | None = ...,
         **model_kwargs: Any,
     ) -> AsyncIterator[StreamingChunk[T]]: ...
 
@@ -3843,58 +3893,64 @@ class GlueLLM:
     async def stream_complete(
         self,
         user_message: str,
-        execute_tools: bool = ...,
+        # -- Core --
         model: str | None = ...,
         guardrails: GuardrailsConfig | None = ...,
         response_format: None = ...,
-        on_status: OnStatusCallback = ...,
-        correlation_id: str | None = ...,
-        request_timeout: float | None = ...,
-        connect_timeout: float | None = ...,
+        # -- Model generation --
         max_tokens: int | None = ...,
+        # -- Tools --
         condense_tool_messages: bool | None = ...,
-        tool_mode: ToolMode | None = ...,
+        execute_tools: bool = ...,
         tool_execution_order: ToolExecutionOrder | None = ...,
-        retry_enabled: bool | None = ...,
-        retry_config: RetryConfig | None = ...,
-        rate_limit_algorithm: RateLimitAlgorithm | str | None = ...,
+        tool_mode: ToolMode | None = ...,
+        # -- Timeouts --
+        connect_timeout: float | None = ...,
+        request_timeout: float | None = ...,
+        # -- Resilience --
         rate_limit_config: RateLimitConfig | None = ...,
-        track_costs: bool | None = ...,
+        retry_config: RetryConfig | None = ...,
+        retry_enabled: bool | None = ...,
+        # -- Context management --
+        summarize_context: SummarizeContextConfig | bool | None = ...,
+        # -- Observability / behavior --
+        correlation_id: str | None = ...,
         enable_eval_recording: bool | None = ...,
+        on_status: OnStatusCallback = ...,
         sinks: list[Sink] | None = ...,
-        summarize_context: bool | None = ...,
-        summarize_context_threshold: int | None = ...,
-        summarize_context_model: str | None = ...,
-        summarize_context_keep_recent: int | None = ...,
+        track_costs: bool | None = ...,
         **model_kwargs: Any,
     ) -> AsyncIterator[StreamingChunk[Any]]: ...
 
     async def stream_complete(
         self,
         user_message: str,
-        execute_tools: bool = True,
+        # -- Core --
         model: str | None = None,
         guardrails: GuardrailsConfig | None = None,
         response_format: type[T] | None = None,
-        on_status: OnStatusCallback = None,
-        correlation_id: str | None = None,
-        request_timeout: float | None = None,
-        connect_timeout: float | None = None,
+        # -- Model generation --
         max_tokens: int | None = None,
+        # -- Tools --
         condense_tool_messages: bool | None = None,
-        tool_mode: ToolMode | None = None,
+        execute_tools: bool = True,
         tool_execution_order: ToolExecutionOrder | None = None,
-        retry_enabled: bool | None = None,
-        retry_config: RetryConfig | None = None,
-        rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
+        tool_mode: ToolMode | None = None,
+        # -- Timeouts --
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
+        # -- Resilience --
         rate_limit_config: RateLimitConfig | None = None,
-        track_costs: bool | None = None,
+        retry_config: RetryConfig | None = None,
+        retry_enabled: bool | None = None,
+        # -- Context management --
+        summarize_context: SummarizeContextConfig | bool | None = None,
+        # -- Observability / behavior --
+        correlation_id: str | None = None,
         enable_eval_recording: bool | None = None,
+        on_status: OnStatusCallback = None,
         sinks: list[Sink] | None = None,
-        summarize_context: bool | None = None,
-        summarize_context_threshold: int | None = None,
-        summarize_context_model: str | None = None,
-        summarize_context_keep_recent: int | None = None,
+        track_costs: bool | None = None,
         **model_kwargs: Any,
     ) -> AsyncIterator[StreamingChunk[Any]]:
         """Stream completion with automatic tool execution.
@@ -3929,12 +3985,10 @@ class GlueLLM:
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
             retry_enabled: If False, disables retries for this call (shorthand for retry_config.retry_enabled=False).
             retry_config: Per-call retry configuration override (includes optional callback).
+            rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
-            summarize_context: Override the instance-level summarize_context setting for this call.
-            summarize_context_threshold: Override the message-count threshold that triggers summarization.
-            summarize_context_model: Override the model used for the summarization call.
-            summarize_context_keep_recent: Override how many recent messages are kept verbatim.
+            summarize_context: Override instance summarization (bool or ``SummarizeContextConfig``).
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p), merged over instance defaults.
 
         Yields:
@@ -3971,20 +4025,8 @@ class GlueLLM:
                 else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
             )
         effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else self.rate_limit_config
-        if rate_limit_algorithm is not None:
-            effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
-        effective_summarize_context = summarize_context if summarize_context is not None else self.summarize_context
-        effective_summarize_context_threshold = (
-            summarize_context_threshold
-            if summarize_context_threshold is not None
-            else self.summarize_context_threshold
-        )
-        effective_summarize_context_model = summarize_context_model or self.summarize_context_model or self.model
-        effective_summarize_context_keep_recent = (
-            summarize_context_keep_recent
-            if summarize_context_keep_recent is not None
-            else self.summarize_context_keep_recent
-        )
+        effective_summarize_cfg = _merge_summarize_context_for_call(self._summarize_context_cfg, summarize_context)
+        effective_summarize_context_model = _summarize_model_for_call(effective_summarize_cfg, model or self.model)
 
         # Instance sampling / provider extras (parity with complete() → _llm_call)
         stream_call_kwargs = dict(model_kwargs)
@@ -4081,10 +4123,14 @@ class GlueLLM:
                 assistant_message = None
                 try:
                     # Context summarization: compress old messages when threshold is exceeded
-                    if effective_summarize_context and len(messages) > effective_summarize_context_threshold:
+                    _thr_st = effective_summarize_cfg.threshold
+                    _kr_st = effective_summarize_cfg.keep_recent
+                    if effective_summarize_cfg.enabled and _thr_st is not None and len(messages) > _thr_st:
                         messages = await _summarize_old_messages(
                             messages,
-                            keep_recent=effective_summarize_context_keep_recent,
+                            keep_recent=_kr_st
+                            if _kr_st is not None
+                            else settings.default_summarize_context_keep_recent,
                             model=effective_summarize_context_model,
                             use_aaak=self.aaak_compression_enabled,
                             aaak_model=self.aaak_compression_model,
@@ -4614,38 +4660,41 @@ class GlueLLM:
 
 async def complete(
     user_message: str,
+    # -- Core --
     model: str | None = None,
     system_prompt: str | None = None,
     tools: list[Callable] | None = None,
+    # -- Model generation --
+    logprobs: bool | None = None,
+    max_tokens: int | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+    top_logprobs: int | None = None,
+    # -- Tools --
+    condense_tool_messages: bool | None = None,
     execute_tools: bool = True,
     max_tool_iterations: int | None = None,
-    correlation_id: str | None = None,
-    request_timeout: float | None = None,
-    connect_timeout: float | None = None,
-    guardrails: GuardrailsConfig | None = None,
-    on_status: OnStatusCallback = None,
-    max_tokens: int | None = None,
-    condense_tool_messages: bool | None = None,
-    tool_mode: ToolMode | None = None,
-    tool_execution_order: ToolExecutionOrder | None = None,
-    tool_route_model: str | None = None,
-    retry_enabled: bool | None = None,
-    retry_config: RetryConfig | None = None,
-    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
-    rate_limit_config: RateLimitConfig | None = None,
-    track_costs: bool | None = None,
-    enable_eval_recording: bool | None = None,
-    reasoning_effort: ReasoningEffort | None = None,
-    logprobs: bool | None = None,
-    top_logprobs: int | None = None,
-    session_label: str | None = None,
     parallel_tool_calls: bool | None = None,
-    sinks: list[Sink] | None = None,
+    tool_execution_order: ToolExecutionOrder | None = None,
+    tool_mode: ToolMode | None = None,
+    tool_route_model: str | None = None,
+    # -- Timeouts --
+    connect_timeout: float | None = None,
+    request_timeout: float | None = None,
+    # -- Resilience --
+    rate_limit_config: RateLimitConfig | None = None,
+    retry_config: RetryConfig | None = None,
+    retry_enabled: bool | None = None,
+    # -- Context management --
+    summarize_context: SummarizeContextConfig | bool | None = None,
+    # -- Observability / behavior --
+    correlation_id: str | None = None,
+    enable_eval_recording: bool | None = None,
+    guardrails: GuardrailsConfig | None = None,
     hook_registry: HookRegistry | None = None,
-    summarize_context: bool = False,
-    summarize_context_threshold: int | None = None,
-    summarize_context_model: str | None = None,
-    summarize_context_keep_recent: int | None = None,
+    on_status: OnStatusCallback = None,
+    session_label: str | None = None,
+    sinks: list[Sink] | None = None,
+    track_costs: bool | None = None,
     **model_kwargs: Any,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
@@ -4669,15 +4718,11 @@ async def complete(
         tool_route_model: Fast model for dynamic tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model).
         retry_enabled: If False, disables retries for this call.
         retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
-        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
-        rate_limit_config: Per-call rate limit configuration override.
+        rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
         track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
         hook_registry: Optional hook registry for pre/post tool and iteration hooks.
-        summarize_context: If True, older messages are summarized when context exceeds threshold. Defaults to False.
-        summarize_context_threshold: Message count that triggers summarization (defaults to settings value).
-        summarize_context_model: Model used for summarization (defaults to primary model).
-        summarize_context_keep_recent: Number of recent messages kept verbatim (defaults to settings value).
+        summarize_context: ``True``/``False``, or ``SummarizeContextConfig`` for summarization defaults.
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
     Returns:
@@ -4688,45 +4733,50 @@ async def complete(
     client = GlueLLM(
         model=model,
         system_prompt=system_prompt,
-        tools=tools,
-        max_tool_iterations=max_tool_iterations,
-        guardrails=guardrails,
+        logprobs=logprobs,
         max_tokens=max_tokens,
-        condense_tool_messages=condense_tool_messages,
-        tool_mode=effective_tool_mode,
-        tool_execution_order=effective_tool_execution_order,
-        tool_route_model=tool_route_model,
-        retry_config=retry_config,
-        rate_limit_config=rate_limit_config,
         model_kwargs=model_kwargs if model_kwargs else None,
-        hook_registry=hook_registry,
+        reasoning_effort=reasoning_effort,
+        top_logprobs=top_logprobs,
+        condense_tool_messages=condense_tool_messages,
+        max_tool_iterations=max_tool_iterations,
+        parallel_tool_calls=parallel_tool_calls,
+        tool_execution_order=effective_tool_execution_order,
+        tool_mode=effective_tool_mode,
+        tool_route_model=tool_route_model,
+        tools=tools,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
         summarize_context=summarize_context,
-        summarize_context_threshold=summarize_context_threshold,
-        summarize_context_model=summarize_context_model,
-        summarize_context_keep_recent=summarize_context_keep_recent,
+        guardrails=guardrails,
+        hook_registry=hook_registry,
+        session_label=session_label,
     )
     return await client.complete(
         user_message,
-        execute_tools=execute_tools,
-        correlation_id=correlation_id,
-        request_timeout=request_timeout,
-        connect_timeout=connect_timeout,
-        on_status=on_status,
-        sinks=sinks,
-        tool_mode=tool_mode,
-        tool_execution_order=tool_execution_order,
-        max_tokens=max_tokens,
-        retry_enabled=retry_enabled,
-        retry_config=retry_config,
-        rate_limit_algorithm=rate_limit_algorithm,
-        rate_limit_config=rate_limit_config,
-        track_costs=track_costs,
-        enable_eval_recording=enable_eval_recording,
-        reasoning_effort=reasoning_effort,
+        model=model,
         logprobs=logprobs,
+        max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
         top_logprobs=top_logprobs,
-        session_label=session_label,
+        condense_tool_messages=condense_tool_messages,
+        execute_tools=execute_tools,
         parallel_tool_calls=parallel_tool_calls,
+        tool_execution_order=tool_execution_order,
+        tool_mode=tool_mode,
+        connect_timeout=connect_timeout,
+        request_timeout=request_timeout,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
+        retry_enabled=retry_enabled,
+        summarize_context=summarize_context,
+        correlation_id=correlation_id,
+        enable_eval_recording=enable_eval_recording,
+        guardrails=guardrails,
+        on_status=on_status,
+        session_label=session_label,
+        sinks=sinks,
+        track_costs=track_costs,
         **model_kwargs,
     )
 
@@ -4734,39 +4784,42 @@ async def complete(
 async def structured_complete(
     user_message: str,
     response_format: type[T],
+    # -- Core --
     model: str | None = None,
     system_prompt: str | None = None,
     tools: list[Callable] | None = None,
+    # -- Model generation --
+    logprobs: bool | None = None,
+    max_tokens: int | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+    top_logprobs: int | None = None,
+    # -- Tools --
+    condense_tool_messages: bool | None = None,
     execute_tools: bool = True,
     max_tool_iterations: int | None = None,
-    correlation_id: str | None = None,
-    request_timeout: float | None = None,
-    connect_timeout: float | None = None,
-    guardrails: GuardrailsConfig | None = None,
-    on_status: OnStatusCallback = None,
-    max_tokens: int | None = None,
-    condense_tool_messages: bool | None = None,
-    tool_mode: ToolMode | None = None,
-    tool_execution_order: ToolExecutionOrder | None = None,
-    tool_route_model: str | None = None,
-    retry_enabled: bool | None = None,
-    retry_config: RetryConfig | None = None,
-    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
-    rate_limit_config: RateLimitConfig | None = None,
-    track_costs: bool | None = None,
-    enable_eval_recording: bool | None = None,
-    reasoning_effort: ReasoningEffort | None = None,
-    logprobs: bool | None = None,
-    top_logprobs: int | None = None,
-    session_label: str | None = None,
     parallel_tool_calls: bool | None = None,
+    tool_execution_order: ToolExecutionOrder | None = None,
+    tool_mode: ToolMode | None = None,
+    tool_route_model: str | None = None,
+    # -- Timeouts --
+    connect_timeout: float | None = None,
+    request_timeout: float | None = None,
+    # -- Resilience --
+    rate_limit_config: RateLimitConfig | None = None,
+    retry_config: RetryConfig | None = None,
+    retry_enabled: bool | None = None,
+    # -- Context management --
+    summarize_context: SummarizeContextConfig | bool | None = None,
+    # -- Observability / behavior --
+    correlation_id: str | None = None,
+    enable_eval_recording: bool | None = None,
+    guardrails: GuardrailsConfig | None = None,
     max_validation_retries: int | None = None,
+    on_status: OnStatusCallback = None,
+    session_label: str | None = None,
     sinks: list[Sink] | None = None,
     hook_registry: HookRegistry | None = None,
-    summarize_context: bool = False,
-    summarize_context_threshold: int | None = None,
-    summarize_context_model: str | None = None,
-    summarize_context_keep_recent: int | None = None,
+    track_costs: bool | None = None,
     **model_kwargs: Any,
 ) -> ExecutionResult[T]:
     """Quick structured completion with optional tool support.
@@ -4795,11 +4848,11 @@ async def structured_complete(
         tool_route_model: Fast model for dynamic tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model).
         retry_enabled: If False, disables retries for this call.
         retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
-        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
-        rate_limit_config: Per-call rate limit configuration override.
+        rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
         track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
         max_validation_retries: Max retries when Pydantic validation fails (default 3).
+        summarize_context: ``True``/``False``, or ``SummarizeContextConfig`` for summarization defaults.
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
     Returns:
@@ -4844,48 +4897,53 @@ async def structured_complete(
     client = GlueLLM(
         model=model,
         system_prompt=system_prompt,
-        tools=tools,
-        max_tool_iterations=max_tool_iterations,
-        guardrails=guardrails,
+        logprobs=logprobs,
         max_tokens=max_tokens,
-        condense_tool_messages=condense_tool_messages,
-        tool_mode=effective_tool_mode,
-        tool_execution_order=effective_tool_execution_order,
-        tool_route_model=tool_route_model,
-        retry_config=retry_config,
-        rate_limit_config=rate_limit_config,
         model_kwargs=model_kwargs if model_kwargs else None,
-        hook_registry=hook_registry,
+        reasoning_effort=reasoning_effort,
+        top_logprobs=top_logprobs,
+        condense_tool_messages=condense_tool_messages,
+        max_tool_iterations=max_tool_iterations,
+        parallel_tool_calls=parallel_tool_calls,
+        tool_execution_order=effective_tool_execution_order,
+        tool_mode=effective_tool_mode,
+        tool_route_model=tool_route_model,
+        tools=tools,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
         summarize_context=summarize_context,
-        summarize_context_threshold=summarize_context_threshold,
-        summarize_context_model=summarize_context_model,
-        summarize_context_keep_recent=summarize_context_keep_recent,
+        guardrails=guardrails,
+        hook_registry=hook_registry,
+        session_label=session_label,
     )
     return await client.structured_complete(
         user_message,
         response_format,
+        model=model,
         tools=tools,
-        execute_tools=execute_tools,
-        correlation_id=correlation_id,
-        request_timeout=request_timeout,
-        connect_timeout=connect_timeout,
-        on_status=on_status,
-        tool_mode=tool_mode,
-        tool_execution_order=tool_execution_order,
-        max_tokens=max_tokens,
-        retry_enabled=retry_enabled,
-        retry_config=retry_config,
-        rate_limit_algorithm=rate_limit_algorithm,
-        rate_limit_config=rate_limit_config,
-        track_costs=track_costs,
-        enable_eval_recording=enable_eval_recording,
-        reasoning_effort=reasoning_effort,
         logprobs=logprobs,
+        max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
         top_logprobs=top_logprobs,
-        session_label=session_label,
+        condense_tool_messages=condense_tool_messages,
+        execute_tools=execute_tools,
         parallel_tool_calls=parallel_tool_calls,
+        tool_execution_order=tool_execution_order,
+        tool_mode=tool_mode,
+        connect_timeout=connect_timeout,
+        request_timeout=request_timeout,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
+        retry_enabled=retry_enabled,
+        summarize_context=summarize_context,
+        correlation_id=correlation_id,
+        enable_eval_recording=enable_eval_recording,
+        guardrails=guardrails,
         max_validation_retries=max_validation_retries,
+        on_status=on_status,
+        session_label=session_label,
         sinks=sinks,
+        track_costs=track_costs,
         **model_kwargs,
     )
 
@@ -4927,11 +4985,10 @@ async def embed(
     texts: str | list[str],
     model: str | None = None,
     correlation_id: str | None = None,
-    request_timeout: float | None = None,
     connect_timeout: float | None = None,
+    request_timeout: float | None = None,
     encoding_format: str | None = None,
     dimensions: int | None = None,
-    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
     rate_limit_config: RateLimitConfig | None = None,
     **kwargs: Any,
 ) -> "EmbeddingResult":
@@ -4948,8 +5005,7 @@ async def embed(
             the standard list[float] format.
         dimensions: Optional number of dimensions for the embedding output. Supported by some
             providers (e.g., OpenAI text-embedding-3-* models) to truncate vectors.
-        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
-        rate_limit_config: Per-call rate limit configuration override.
+        rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
         **kwargs: Additional provider-specific arguments passed through to the embedding API.
             Examples: `user` (OpenAI) for end-user identification.
 
@@ -4976,7 +5032,6 @@ async def embed(
         connect_timeout=connect_timeout,
         encoding_format=encoding_format,
         dimensions=dimensions,
-        rate_limit_algorithm=rate_limit_algorithm,
         rate_limit_config=rate_limit_config,
         **kwargs,
     )
@@ -4985,33 +5040,36 @@ async def embed(
 @overload
 async def stream_complete(
     user_message: str,
+    # -- Core --
     model: str | None = ...,
     system_prompt: str | None = ...,
     tools: list[Callable] | None = ...,
-    execute_tools: bool = ...,
-    max_tool_iterations: int | None = ...,
-    correlation_id: str | None = ...,
     guardrails: GuardrailsConfig | None = ...,
     response_format: type[T] = ...,
-    on_status: OnStatusCallback = ...,
-    request_timeout: float | None = ...,
-    connect_timeout: float | None = ...,
+    # -- Model generation --
     max_tokens: int | None = ...,
+    # -- Tools --
     condense_tool_messages: bool | None = ...,
-    tool_mode: ToolMode | None = ...,
+    execute_tools: bool = ...,
+    max_tool_iterations: int | None = ...,
     tool_execution_order: ToolExecutionOrder | None = ...,
+    tool_mode: ToolMode | None = ...,
     tool_route_model: str | None = ...,
-    retry_enabled: bool | None = ...,
-    retry_config: RetryConfig | None = ...,
-    rate_limit_algorithm: RateLimitAlgorithm | str | None = ...,
+    # -- Timeouts --
+    connect_timeout: float | None = ...,
+    request_timeout: float | None = ...,
+    # -- Resilience --
     rate_limit_config: RateLimitConfig | None = ...,
-    track_costs: bool | None = ...,
+    retry_config: RetryConfig | None = ...,
+    retry_enabled: bool | None = ...,
+    # -- Context management --
+    summarize_context: SummarizeContextConfig | bool | None = ...,
+    # -- Observability / behavior --
+    correlation_id: str | None = ...,
     enable_eval_recording: bool | None = ...,
+    on_status: OnStatusCallback = ...,
     sinks: list[Sink] | None = ...,
-    summarize_context: bool = ...,
-    summarize_context_threshold: int | None = ...,
-    summarize_context_model: str | None = ...,
-    summarize_context_keep_recent: int | None = ...,
+    track_costs: bool | None = ...,
     **model_kwargs: Any,
 ) -> AsyncIterator[StreamingChunk[T]]: ...
 
@@ -5019,66 +5077,72 @@ async def stream_complete(
 @overload
 async def stream_complete(
     user_message: str,
+    # -- Core --
     model: str | None = ...,
     system_prompt: str | None = ...,
     tools: list[Callable] | None = ...,
-    execute_tools: bool = ...,
-    max_tool_iterations: int | None = ...,
-    correlation_id: str | None = ...,
     guardrails: GuardrailsConfig | None = ...,
     response_format: None = ...,
-    on_status: OnStatusCallback = ...,
-    request_timeout: float | None = ...,
-    connect_timeout: float | None = ...,
+    # -- Model generation --
     max_tokens: int | None = ...,
+    # -- Tools --
     condense_tool_messages: bool | None = ...,
-    tool_mode: ToolMode | None = ...,
+    execute_tools: bool = ...,
+    max_tool_iterations: int | None = ...,
     tool_execution_order: ToolExecutionOrder | None = ...,
+    tool_mode: ToolMode | None = ...,
     tool_route_model: str | None = ...,
-    retry_enabled: bool | None = ...,
-    retry_config: RetryConfig | None = ...,
-    rate_limit_algorithm: RateLimitAlgorithm | str | None = ...,
+    # -- Timeouts --
+    connect_timeout: float | None = ...,
+    request_timeout: float | None = ...,
+    # -- Resilience --
     rate_limit_config: RateLimitConfig | None = ...,
-    track_costs: bool | None = ...,
+    retry_config: RetryConfig | None = ...,
+    retry_enabled: bool | None = ...,
+    # -- Context management --
+    summarize_context: SummarizeContextConfig | bool | None = ...,
+    # -- Observability / behavior --
+    correlation_id: str | None = ...,
     enable_eval_recording: bool | None = ...,
+    on_status: OnStatusCallback = ...,
     sinks: list[Sink] | None = ...,
-    summarize_context: bool = ...,
-    summarize_context_threshold: int | None = ...,
-    summarize_context_model: str | None = ...,
-    summarize_context_keep_recent: int | None = ...,
+    track_costs: bool | None = ...,
     **model_kwargs: Any,
 ) -> AsyncIterator[StreamingChunk[Any]]: ...
 
 
 async def stream_complete(
     user_message: str,
+    # -- Core --
     model: str | None = None,
     system_prompt: str | None = None,
     tools: list[Callable] | None = None,
-    execute_tools: bool = True,
-    max_tool_iterations: int | None = None,
-    correlation_id: str | None = None,
     guardrails: GuardrailsConfig | None = None,
     response_format: type[T] | None = None,
-    on_status: OnStatusCallback = None,
-    request_timeout: float | None = None,
-    connect_timeout: float | None = None,
+    # -- Model generation --
     max_tokens: int | None = None,
+    # -- Tools --
     condense_tool_messages: bool | None = None,
-    tool_mode: ToolMode | None = None,
+    execute_tools: bool = True,
+    max_tool_iterations: int | None = None,
     tool_execution_order: ToolExecutionOrder | None = None,
+    tool_mode: ToolMode | None = None,
     tool_route_model: str | None = None,
-    retry_enabled: bool | None = None,
-    retry_config: RetryConfig | None = None,
-    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
+    # -- Timeouts --
+    connect_timeout: float | None = None,
+    request_timeout: float | None = None,
+    # -- Resilience --
     rate_limit_config: RateLimitConfig | None = None,
-    track_costs: bool | None = None,
+    retry_config: RetryConfig | None = None,
+    retry_enabled: bool | None = None,
+    # -- Context management --
+    summarize_context: SummarizeContextConfig | bool | None = None,
+    # -- Observability / behavior --
+    correlation_id: str | None = None,
     enable_eval_recording: bool | None = None,
+    on_status: OnStatusCallback = None,
     sinks: list[Sink] | None = None,
-    summarize_context: bool = False,
-    summarize_context_threshold: int | None = None,
-    summarize_context_model: str | None = None,
-    summarize_context_keep_recent: int | None = None,
+    track_costs: bool | None = None,
     **model_kwargs: Any,
 ) -> AsyncIterator[StreamingChunk[Any]]:
     """Stream completion with automatic tool execution.
@@ -5114,10 +5178,10 @@ async def stream_complete(
         tool_route_model: Fast model for dynamic tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model).
         retry_enabled: If False, disables retries for this call.
         retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
-        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
-        rate_limit_config: Per-call rate limit configuration override.
+        rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
         track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this).
+        summarize_context: ``True``/``False``, or ``SummarizeContextConfig`` for summarization defaults.
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p), same as ``complete``.
 
     Yields:
@@ -5134,40 +5198,40 @@ async def stream_complete(
     client = GlueLLM(
         model=model,
         system_prompt=system_prompt,
-        tools=tools,
-        max_tool_iterations=max_tool_iterations,
-        guardrails=guardrails,
         max_tokens=max_tokens,
-        condense_tool_messages=condense_tool_messages,
-        tool_mode=effective_tool_mode,
-        tool_execution_order=effective_tool_execution_order,
-        tool_route_model=tool_route_model,
-        retry_config=retry_config,
-        rate_limit_config=rate_limit_config,
-        summarize_context=summarize_context,
-        summarize_context_threshold=summarize_context_threshold,
-        summarize_context_model=summarize_context_model,
-        summarize_context_keep_recent=summarize_context_keep_recent,
         model_kwargs=model_kwargs if model_kwargs else None,
+        condense_tool_messages=condense_tool_messages,
+        max_tool_iterations=max_tool_iterations,
+        tool_execution_order=effective_tool_execution_order,
+        tool_mode=effective_tool_mode,
+        tool_route_model=tool_route_model,
+        tools=tools,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
+        summarize_context=summarize_context,
+        guardrails=guardrails,
     )
     async for chunk in client.stream_complete(
         user_message,
-        execute_tools=execute_tools,
+        model=model,
+        guardrails=guardrails,
         response_format=response_format,
+        max_tokens=max_tokens,
+        condense_tool_messages=condense_tool_messages,
+        execute_tools=execute_tools,
+        tool_execution_order=tool_execution_order,
+        tool_mode=tool_mode,
+        connect_timeout=connect_timeout,
+        request_timeout=request_timeout,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
+        retry_enabled=retry_enabled,
+        summarize_context=summarize_context,
+        correlation_id=correlation_id,
+        enable_eval_recording=enable_eval_recording,
         on_status=on_status,
         sinks=sinks,
-        correlation_id=correlation_id,
-        request_timeout=request_timeout,
-        connect_timeout=connect_timeout,
-        tool_mode=tool_mode,
-        tool_execution_order=tool_execution_order,
-        max_tokens=max_tokens,
-        retry_enabled=retry_enabled,
-        retry_config=retry_config,
-        rate_limit_algorithm=rate_limit_algorithm,
-        rate_limit_config=rate_limit_config,
         track_costs=track_costs,
-        enable_eval_recording=enable_eval_recording,
         **model_kwargs,
     ):
         yield chunk

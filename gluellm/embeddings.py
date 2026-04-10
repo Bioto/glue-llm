@@ -33,7 +33,6 @@ from gluellm.api import (
     _provider_cache,
     classify_llm_error,
 )
-from gluellm.rate_limit_types import RateLimitAlgorithm
 from gluellm.config import settings
 from gluellm.costing.pricing_data import calculate_embedding_cost
 from gluellm.models.embedding import EmbeddingResult
@@ -392,12 +391,11 @@ async def embed(
     texts: str | list[str],
     model: str | None = None,
     correlation_id: str | None = None,
-    request_timeout: float | None = None,
     connect_timeout: float | None = None,
+    request_timeout: float | None = None,
     api_key: str | None = None,
     encoding_format: str | None = None,
     dimensions: int | None = None,
-    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
     rate_limit_config: RateLimitConfig | None = None,
     **kwargs: Any,
 ) -> EmbeddingResult:
@@ -419,8 +417,7 @@ async def embed(
         dimensions: Optional number of dimensions for the embedding output. Supported by some
             providers (e.g., OpenAI text-embedding-3-* models) to truncate vectors. Defaults to
             settings.default_embedding_dimensions if not specified.
-        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
-        rate_limit_config: Per-call rate limit configuration override.
+        rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
         **kwargs: Additional provider-specific arguments passed through to the embedding API.
             Examples: `user` (OpenAI) for end-user identification.
 
@@ -473,10 +470,8 @@ async def embed(
         f"Starting embedding request: correlation_id={correlation_id}, model={model}, input_count={input_count}"
     )
 
-    # Per-call rate_limit_config or rate_limit_algorithm override
+    # Per-call rate_limit_config override
     effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else None
-    if rate_limit_algorithm is not None:
-        effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
 
     # Build embedding kwargs from explicit parameters and any additional kwargs
     embedding_kwargs: dict[str, Any] = {}

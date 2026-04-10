@@ -1,9 +1,10 @@
 """Example: Conversation Summarization
 
 Demonstrates GlueLLM's automatic context summarization for long multi-turn
-conversations. When the message count exceeds `summarize_context_threshold`,
-older messages are compressed into a single [Conversation Summary] message
-while the most recent messages are kept verbatim.
+conversations. When the message count exceeds the configured threshold (see
+``SummarizeContextConfig.threshold``), older messages are compressed into a
+single [Conversation Summary] message while the most recent messages are kept
+verbatim.
 
 This keeps context size bounded regardless of conversation length, preventing
 token bloat and context-window exhaustion in production chatbots.
@@ -11,7 +12,7 @@ token bloat and context-window exhaustion in production chatbots.
 
 import asyncio
 
-from gluellm.api import GlueLLM
+from gluellm import GlueLLM, SummarizeContextConfig
 
 
 def add(a: float, b: float) -> str:
@@ -44,9 +45,11 @@ async def example_basic_summarization():
     client = GlueLLM(
         model="openai:gpt-4o-mini",
         system_prompt="You are a helpful assistant. Keep answers brief.",
-        summarize_context=True,
-        summarize_context_threshold=8,   # low threshold to trigger quickly
-        summarize_context_keep_recent=4,
+        summarize_context=SummarizeContextConfig(
+            enabled=True,
+            threshold=8,  # low threshold to trigger quickly
+            keep_recent=4,
+        ),
     )
 
     exchanges = [
@@ -73,7 +76,7 @@ async def example_basic_summarization():
 
 # Example 2: Per-call override of summarization parameters
 async def example_per_call_override():
-    """summarize_context and its parameters can be overridden on each complete() call."""
+    """summarize_context can be overridden on each complete() call."""
     print("=" * 70)
     print("Example 2: Per-call Override")
     print("=" * 70)
@@ -87,9 +90,7 @@ async def example_per_call_override():
     # … but we turn it on (with a custom threshold) for a specific call.
     result = await client.complete(
         "Briefly explain what Python is.",
-        summarize_context=True,
-        summarize_context_threshold=20,
-        summarize_context_keep_recent=6,
+        summarize_context=SummarizeContextConfig(enabled=True, threshold=20, keep_recent=6),
     )
 
     print(f"Response: {result.final_response}\n")
@@ -107,11 +108,13 @@ async def example_custom_summarization_model():
     print("=" * 70)
 
     client = GlueLLM(
-        model="openai:gpt-4o",              # expensive primary model
+        model="openai:gpt-4o",  # expensive primary model
         system_prompt="You are a helpful assistant. Keep answers brief.",
-        summarize_context=True,
-        summarize_context_threshold=6,
-        summarize_context_model="openai:gpt-4o-mini",  # cheap summarizer
+        summarize_context=SummarizeContextConfig(
+            enabled=True,
+            threshold=6,
+            model="openai:gpt-4o-mini",  # cheap summarizer
+        ),
     )
 
     for msg in [
@@ -142,9 +145,11 @@ async def example_summarization_with_tools():
         model="openai:gpt-4o-mini",
         system_prompt="You are a math assistant. Use tools for all calculations.",
         tools=[add, multiply],
-        summarize_context=True,
-        summarize_context_threshold=8,
-        summarize_context_keep_recent=4,
+        summarize_context=SummarizeContextConfig(
+            enabled=True,
+            threshold=8,
+            keep_recent=4,
+        ),
     )
 
     exchanges = [

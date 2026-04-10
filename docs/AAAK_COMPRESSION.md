@@ -218,15 +218,17 @@ All settings are in `GlueLLMSettings` (env prefix `GLUELLM_`).
 ### Opt-in per conversation client
 
 ```python
-from gluellm.api import GlueLLM
+from gluellm import GlueLLM, SummarizeContextConfig
 
 client = GlueLLM(
     model="openai:gpt-4o",
-    summarize_context=True,           # compress when history grows long
-    aaak_compression_enabled=True,    # use AAAK (default when summarize_context=True)
+    summarize_context=SummarizeContextConfig(
+        enabled=True,               # compress when history grows long
+        threshold=20,             # compress after 20 non-system messages
+        keep_recent=6,            # always keep last 6 messages verbatim
+    ),
+    aaak_compression_enabled=True,    # use AAAK (default when summarize_context is enabled)
     aaak_compression_model="openai:gpt-4-turbo",  # stronger compressor, cheaper answerer
-    summarize_context_threshold=20,   # compress after 20 non-system messages
-    summarize_context_keep_recent=6,  # always keep last 6 messages verbatim
     condense_tool_messages=True,      # collapse tool rounds into [AT] blocks
 )
 
@@ -236,10 +238,11 @@ result = await client.complete("Design the auth layer for our FastAPI service.")
 ### Opt-in per-call
 
 ```python
+from gluellm import SummarizeContextConfig, complete
+
 result = await complete(
     user_message="...",
-    summarize_context=True,
-    aaak_compression_enabled=True,
+    summarize_context=SummarizeContextConfig(enabled=True),
     condense_tool_messages=True,
 )
 ```
@@ -260,8 +263,10 @@ gluellm.configure(
 ### Disable AAAK, use prose summarization instead
 
 ```python
+from gluellm import GlueLLM, SummarizeContextConfig
+
 client = GlueLLM(
-    summarize_context=True,
+    summarize_context=SummarizeContextConfig(enabled=True),
     aaak_compression_enabled=False,   # falls back to prose summarization
 )
 ```

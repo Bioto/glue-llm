@@ -488,14 +488,14 @@ result = await client.complete(
     rate_limit_config=RateLimitConfig(algorithm=RateLimitAlgorithm.TOKEN_BUCKET),
 )
 
-# Shorthand for algorithm-only overrides
+# Algorithm-only override (set algorithm on RateLimitConfig)
 result = await client.complete(
     "Hello",
-    rate_limit_algorithm=RateLimitAlgorithm.GCRA,
+    rate_limit_config=RateLimitConfig(algorithm=RateLimitAlgorithm.GCRA),
 )
 ```
 
-Priority order (highest → lowest): per-call `rate_limit_config` → per-call `rate_limit_algorithm` → client-level `rate_limit_config` → `gluellm.configure()` / env vars.
+Priority order (highest → lowest): per-call `rate_limit_config` → client-level `rate_limit_config` → `gluellm.configure()` / env vars.
 
 ## Shutdown Handling
 

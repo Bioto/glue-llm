@@ -3408,13 +3408,23 @@ class TestSummarizeContextIntegration:
         assert client.summarize_context_keep_recent == settings.default_summarize_context_keep_recent
 
     async def test_summarize_context_threshold_can_be_overridden(self):
-        """Custom summarize_context_threshold is respected."""
-        client = GlueLLM(model="openai:gpt-4o-mini", summarize_context_threshold=10)
+        """Custom summarize_context threshold is respected."""
+        from gluellm import SummarizeContextConfig
+
+        client = GlueLLM(
+            model="openai:gpt-4o-mini",
+            summarize_context=SummarizeContextConfig(threshold=10),
+        )
         assert client.summarize_context_threshold == 10
 
     async def test_summarize_context_keep_recent_can_be_overridden(self):
-        """Custom summarize_context_keep_recent is respected."""
-        client = GlueLLM(model="openai:gpt-4o-mini", summarize_context_keep_recent=3)
+        """Custom summarize_context keep_recent is respected."""
+        from gluellm import SummarizeContextConfig
+
+        client = GlueLLM(
+            model="openai:gpt-4o-mini",
+            summarize_context=SummarizeContextConfig(keep_recent=3),
+        )
         assert client.summarize_context_keep_recent == 3
 
     async def test_summarize_context_triggers_when_threshold_exceeded(self):
@@ -3440,10 +3450,11 @@ class TestSummarizeContextIntegration:
             patch("gluellm.api._summarize_old_messages", side_effect=fake_summarize) as mock_sum,
             patch("gluellm.api._llm_call_with_retry", AsyncMock(return_value=mock_response)),
         ):
+            from gluellm import SummarizeContextConfig
+
             client = GlueLLM(
                 model="openai:gpt-4o-mini",
-                summarize_context=True,
-                summarize_context_threshold=4,
+                summarize_context=SummarizeContextConfig(enabled=True, threshold=4),
             )
             # Pre-seed conversation: 4 messages → messages list before complete("new")
             # will be [system, u1, a1, u2, a2, new_user] = 6 > threshold 4
@@ -3465,10 +3476,11 @@ class TestSummarizeContextIntegration:
             patch("gluellm.api._summarize_old_messages", AsyncMock()) as mock_sum,
             patch("gluellm.api._llm_call_with_retry", AsyncMock(return_value=mock_response)),
         ):
+            from gluellm import SummarizeContextConfig
+
             client = GlueLLM(
                 model="openai:gpt-4o-mini",
-                summarize_context=True,
-                summarize_context_threshold=20,
+                summarize_context=SummarizeContextConfig(enabled=True, threshold=20),
             )
             await client.complete("Hi")
 

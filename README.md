@@ -177,14 +177,18 @@ Two levels, composable:
 | History compression | `summarize_context=True` + `aaak_compression_enabled=True` | ✅ one extra call | `[AAAK CTX]` block |
 
 ```python
+from gluellm import GlueLLM, SummarizeContextConfig
+
 client = GlueLLM(
     model="openai:gpt-4o",
     condense_tool_messages=True,       # collapses each tool round into an [AT] block (free)
-    summarize_context=True,            # compresses old history when it grows long
-    aaak_compression_enabled=True,     # use AAAK instead of prose (default when summarize_context=True)
+    summarize_context=SummarizeContextConfig(
+        enabled=True,                  # compresses old history when it grows long
+        threshold=20,                # compress after 20 non-system messages
+        keep_recent=6,               # always keep last 6 messages verbatim
+    ),
+    aaak_compression_enabled=True,     # use AAAK instead of prose (default when summarize_context is enabled)
     aaak_compression_model="openai:gpt-4-turbo",  # stronger compressor → smaller context
-    summarize_context_threshold=20,    # compress after 20 non-system messages
-    summarize_context_keep_recent=6,   # always keep last 6 messages verbatim
 )
 ```
 

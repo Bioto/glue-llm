@@ -81,12 +81,13 @@ from gluellm.api import (
     GlueLLM,
     InvalidRequestError,
     LLMError,
-    RateLimitError,
-    RetryConfig,
-    RetryCallback,
     RateLimitAlgorithm,
     RateLimitConfig,
+    RateLimitError,
+    RetryCallback,
+    RetryConfig,
     StreamingChunk,
+    SummarizeContextConfig,
     TokenLimitError,
     close_providers,
     complete,
@@ -97,16 +98,14 @@ from gluellm.api import (
     stream_complete,
     structured_complete,
 )
-from gluellm.responses import ResponseResult, WEB_SEARCH, CODE_INTERPRETER, FILE_SEARCH, responses
 from gluellm.batch import (
     BatchProcessor,
     batch_complete,
     batch_complete_simple,
     batch_structured_complete,
 )
-from gluellm.compression.aaak import AAAKCompressor, AAAK_SPEC
+from gluellm.compression.aaak import AAAK_SPEC, AAAKCompressor
 from gluellm.config import GlueLLMSettings, ToolExecutionOrder, configure, get_settings, reload_settings, settings
-from gluellm.tool_router import ToolMode, static_tool
 from gluellm.eval import (
     CallbackStore,
     EvalRecord,
@@ -125,6 +124,11 @@ from gluellm.guardrails import (
     GuardrailsConfig,
     PromptGuidedConfig,
 )
+from gluellm.hooks.manager import (
+    clear_global_hooks,
+    register_global_hook,
+    unregister_global_hook,
+)
 from gluellm.models.batch import (
     APIKeyConfig,
     BatchConfig,
@@ -136,9 +140,11 @@ from gluellm.models.batch import (
 from gluellm.models.config import RequestConfig
 from gluellm.models.conversation import Conversation, Message, Role
 from gluellm.models.embedding import EmbeddingResult
+from gluellm.models.hook import HookConfig, HookContext, HookErrorStrategy, HookRegistry, HookStage
 from gluellm.models.prompt import Prompt, SystemPrompt
 from gluellm.observability.logging_config import setup_logging
 from gluellm.rate_limiting.api_key_pool import APIKeyPool
+from gluellm.responses import CODE_INTERPRETER, FILE_SEARCH, WEB_SEARCH, ResponseResult, responses
 from gluellm.runtime.context import (
     clear_correlation_id,
     clear_request_metadata,
@@ -160,17 +166,12 @@ from gluellm.runtime.shutdown import (
     unregister_shutdown_callback,
     wait_for_shutdown,
 )
-from gluellm.hooks.manager import (
-    clear_global_hooks,
-    register_global_hook,
-    unregister_global_hook,
-)
-from gluellm.models.hook import HookConfig, HookContext, HookErrorStrategy, HookRegistry, HookStage
 from gluellm.schema import (
     create_normalized_model,
     create_openai_response_format,
     normalize_schema_for_openai,
 )
+from gluellm.tool_router import ToolMode, static_tool
 
 # Initialize logging on package import
 _setup_logging_called = False
@@ -240,6 +241,7 @@ __all__ = [
     "RetryCallback",
     "RateLimitAlgorithm",
     "RateLimitConfig",
+    "SummarizeContextConfig",
     # Guardrails
     "GuardrailsConfig",
     "PromptGuidedConfig",
