@@ -103,7 +103,7 @@ async def example_key_config_with_rate_limits():
         requests_per_minute=30,
         burst=5,
     )
-    print(f"Key config: provider={config.provider}, rpm=30, burst=5, hash={config.key_hash}")  # lgtm[py/clear-text-logging-sensitive-data]
+    print(f"Key config: provider={config.provider}, rpm=30, burst=5, hash={config.key_hash}")  # codeql[py/clear-text-logging-sensitive-data]
     print()
 
 

@@ -159,7 +159,7 @@ class APIKeyPool:
             key_config: API key configuration
         """
         self._keys_by_provider[key_config.provider].append(key_config)
-        logger.info(f"Added API key to pool: provider={key_config.provider}, key_hash={key_config.key_hash}")  # lgtm[py/clear-text-logging-sensitive-data]
+        logger.info(f"Added API key to pool: provider={key_config.provider}, key_hash={key_config.key_hash}")  # codeql[py/clear-text-logging-sensitive-data]
 
     def get_key(self, provider: str, model: str | None = None) -> str | None:
         """Get an API key for a provider (non-blocking, for synchronous use).
