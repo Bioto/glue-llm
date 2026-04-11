@@ -85,7 +85,8 @@ JUDGE_MODEL = "openai:gpt-4o-mini"
 
 # Benchmark-only: merged into provider.acompletion for judge, recall answers, prose summarize,
 # and AAAK compress. Overridable via --no-deterministic-sampling.
-_benchmark_completion_extra: dict[str, Any] = {"temperature": 0, "top_p": 1}
+_DETERMINISTIC_COMPLETION_EXTRA: dict[str, Any] = {"temperature": 0, "top_p": 1}
+_benchmark_completion_extra: dict[str, Any] = dict(_DETERMINISTIC_COMPLETION_EXTRA)
 _benchmark_verbose_section_a: bool = False
 
 # Semaphore caps in-flight provider calls across all concurrent recall/judge/compress tasks.
@@ -108,7 +109,7 @@ _PROVIDER_API_KEY_ENV: dict[str, str] = {
 
 def api_key_env_for_model(model_id: str) -> str:
     prov = model_id.split(":", 1)[0].lower() if ":" in model_id else "openai"
-    return _PROVIDER_API_KEY_ENV.get(prov, "OPENAI_API_KEY")
+    return _PROVIDER_API_KEY_ENV.get(prov, f"{prov.upper()}_API_KEY")
 
 
 def missing_benchmark_key_errors(compression_model: str, judge_model: str) -> list[str]:
@@ -122,6 +123,18 @@ def missing_benchmark_key_errors(compression_model: str, judge_model: str) -> li
             detail = "; ".join(f"{role}={mid!r}" for role, mid in items)
             errs.append(f"{env} not set ({detail})")
     return errs
+
+
+def _reset_runtime_state(*, deterministic_sampling: bool, verbose_section_a: bool, concurrency: int) -> None:
+    """Initialize process-local benchmark runtime state for one invocation."""
+    global _benchmark_completion_extra, _benchmark_verbose_section_a, _benchmark_semaphore
+
+    if deterministic_sampling:
+        _benchmark_completion_extra = dict(_DETERMINISTIC_COMPLETION_EXTRA)
+    else:
+        _benchmark_completion_extra = {}
+    _benchmark_verbose_section_a = bool(verbose_section_a)
+    _benchmark_semaphore = asyncio.Semaphore(max(1, int(concurrency)))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1501,18 +1514,26 @@ async def _eval_one_question(
     normalized = _normalize_answer(answer)
     key_facts = _coerce_key_facts(qa["key_facts"])
     deterministic_ok = all(_contains_atomic_fact(normalized, fact) for fact in key_facts)
-    judge_user = (
-        f"Question: {qa['question']}\n"
-        f"Required facts JSON: {json.dumps(key_facts, ensure_ascii=True)}\n"
-        f"Model answer: {normalized}"
-    )
-    verdict, tok_j = await _call([
-        {"role": "system", "content": JUDGE_SYSTEM},
-        {"role": "user", "content": judge_user},
-    ], model=JUDGE_MODEL)
-    judge_ok = verdict.strip().startswith("1")
-    ok = 1 if deterministic_ok or judge_ok else 0
-    tok = TokenUsage(tok_a.prompt + tok_j.prompt, tok_a.completion + tok_j.completion)
+    judge_user: str | None = None
+    verdict_raw: str | None = None
+    judge_ok: bool | None = None
+    tok = tok_a
+
+    if not deterministic_ok:
+        judge_user = (
+            f"Question: {qa['question']}\n"
+            f"Required facts JSON: {json.dumps(key_facts, ensure_ascii=True)}\n"
+            f"Model answer: {normalized}"
+        )
+        verdict, tok_j = await _call([
+            {"role": "system", "content": JUDGE_SYSTEM},
+            {"role": "user", "content": judge_user},
+        ], model=JUDGE_MODEL)
+        verdict_raw = verdict.strip()
+        judge_ok = verdict_raw.startswith("1")
+        tok = TokenUsage(tok_a.prompt + tok_j.prompt, tok_a.completion + tok_j.completion)
+
+    ok = 1 if deterministic_ok or bool(judge_ok) else 0
     row = None
     if collect_debug:
         row = {
@@ -1522,7 +1543,7 @@ async def _eval_one_question(
             "normalized_answer": normalized,
             "deterministic_ok": deterministic_ok,
             "judge_ok": judge_ok,
-            "verdict_raw": verdict.strip(),
+            "verdict_raw": verdict_raw,
             "judge_user": judge_user,
             "score": ok,
         }
@@ -2017,13 +2038,11 @@ async def main_async(args: argparse.Namespace) -> None:
             print(f"  - {line}")
         return
 
-    if args.no_deterministic_sampling:
-        _benchmark_completion_extra = {}
-    else:
-        _benchmark_completion_extra = {"temperature": 0, "top_p": 1}
-
-    _benchmark_verbose_section_a = bool(args.verbose_section_a)
-    _benchmark_semaphore = asyncio.Semaphore(max(1, int(args.concurrency)))
+    _reset_runtime_state(
+        deterministic_sampling=not args.no_deterministic_sampling,
+        verbose_section_a=bool(args.verbose_section_a),
+        concurrency=args.concurrency,
+    )
 
     keep_recent = 2
     trials_n = max(1, int(args.trials))

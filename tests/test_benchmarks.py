@@ -95,3 +95,104 @@ async def test_streaming_benchmark() -> None:
         no_deterministic_sampling=False,
     )
     await streaming_benchmark.main_async(args)
+
+
+def test_aaak_live_api_key_env_for_model_uses_provider_specific_env() -> None:
+    assert aaak_live_benchmark.api_key_env_for_model("openai:gpt-5.4-nano") == "OPENAI_API_KEY"
+    assert aaak_live_benchmark.api_key_env_for_model("groq:qwen/qwen3-32b") == "GROQ_API_KEY"
+    assert aaak_live_benchmark.api_key_env_for_model("mystery:model-x") == "MYSTERY_API_KEY"
+
+
+@pytest.mark.asyncio
+async def test_eval_one_question_skips_judge_when_deterministic_match(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    async def _fake_call(messages: list[dict], *, model: str = aaak_live_benchmark.MODEL) -> tuple[str, aaak_live_benchmark.TokenUsage]:
+        calls.append(model)
+        if model == aaak_live_benchmark.JUDGE_MODEL:
+            raise AssertionError("judge should not be called when deterministic check succeeds")
+        return "JWT access tokens expire in 15 minutes.", aaak_live_benchmark.TokenUsage(prompt=3, completion=2)
+
+    monkeypatch.setattr(aaak_live_benchmark, "_call", _fake_call)
+
+    ok, tok, row = await aaak_live_benchmark._eval_one_question(
+        [{"role": "system", "content": "You are helpful."}],
+        {"question": "What is the expiry?", "key_facts": ["15 minutes"]},
+        collect_debug=True,
+    )
+
+    assert ok == 1
+    assert tok == aaak_live_benchmark.TokenUsage(prompt=3, completion=2)
+    assert calls == [aaak_live_benchmark.MODEL]
+    assert row is not None
+    assert row["deterministic_ok"] is True
+    assert row["judge_ok"] is None
+    assert row["verdict_raw"] is None
+    assert row["judge_user"] is None
+
+
+@pytest.mark.asyncio
+async def test_standard_benchmark_main_async_restores_deterministic_completion_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_run_task(task_name: str, samples: int, *, model: str = standard_benchmark.MODEL):
+        return [], []
+
+    monkeypatch.setattr(standard_benchmark, "run_task", _fake_run_task)
+    monkeypatch.setattr(standard_benchmark, "print_full_report", lambda task_data: None)
+
+    await standard_benchmark.main_async(argparse.Namespace(
+        tasks=["gsm8k"],
+        samples=1,
+        concurrency=1,
+        no_deterministic_sampling=True,
+        model=None,
+    ))
+    assert standard_benchmark._benchmark_completion_extra == {}
+
+    await standard_benchmark.main_async(argparse.Namespace(
+        tasks=["gsm8k"],
+        samples=1,
+        concurrency=1,
+        no_deterministic_sampling=False,
+        model=None,
+    ))
+    assert standard_benchmark._benchmark_completion_extra == {"temperature": 0, "top_p": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("samples", "concurrency", "expected_error"),
+    [
+        (0, 1, "ERROR: --samples must be > 0"),
+        (1, 0, "ERROR: --concurrency must be > 0"),
+    ],
+)
+async def test_standard_benchmark_main_async_validates_positive_args_before_dispatch(
+    samples: int,
+    concurrency: int,
+    expected_error: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    called = False
+
+    async def _fake_run_task(task_name: str, sample_count: int, *, model: str = standard_benchmark.MODEL):
+        nonlocal called
+        called = True
+        return [], []
+
+    monkeypatch.setattr(standard_benchmark, "run_task", _fake_run_task)
+    monkeypatch.setattr(standard_benchmark, "print_full_report", lambda task_data: None)
+
+    await standard_benchmark.main_async(argparse.Namespace(
+        tasks=["gsm8k"],
+        samples=samples,
+        concurrency=concurrency,
+        no_deterministic_sampling=False,
+        model=None,
+    ))
+
+    out = capsys.readouterr().out
+    assert expected_error in out
+    assert called is False

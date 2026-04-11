@@ -61,7 +61,8 @@ GSM8K_FEW_SHOT_N = 8    # CoT examples from train used as compressible context
 # through raw in AAAK mode and the sample is flagged as "passthrough".
 AAAK_MIN_CONTEXT_TOKENS = 400
 
-_benchmark_completion_extra: dict[str, Any] = {"temperature": 0, "top_p": 1}
+_DETERMINISTIC_COMPLETION_EXTRA: dict[str, Any] = {"temperature": 0, "top_p": 1}
+_benchmark_completion_extra: dict[str, Any] = dict(_DETERMINISTIC_COMPLETION_EXTRA)
 _benchmark_semaphore: asyncio.Semaphore | None = None
 
 AVAILABLE_TASKS = [
@@ -230,11 +231,9 @@ class SampleResult:
 
 
 async def _call(messages: list[dict], *, model: str = MODEL) -> tuple[str, TokenUsage]:
-    from gluellm.api import _provider_cache
-
     sem = _benchmark_semaphore
     async with sem if sem is not None else asyncio.Lock():
-        provider, model_id = _provider_cache.get_provider(model, api_key=None)
+        provider, model_id = _get_provider_for_model(model, api_key=None)
         resp = await provider.acompletion(model=model_id, messages=messages, **dict(_benchmark_completion_extra))
     content = resp.choices[0].message.content or ""
     usage = getattr(resp, "usage", None)
@@ -242,6 +241,29 @@ async def _call(messages: list[dict], *, model: str = MODEL) -> tuple[str, Token
         prompt=getattr(usage, "prompt_tokens", 0) or 0,
         completion=getattr(usage, "completion_tokens", 0) or 0,
     )
+
+
+def _get_provider_for_model(model: str, *, api_key: str | None = None) -> tuple[Any, str]:
+    """Provider access wrapper to isolate benchmark's use of internals."""
+    from gluellm.api import _provider_cache
+
+    return _provider_cache.get_provider(model, api_key=api_key)
+
+
+def _build_tracked_provider(provider: Any, captured: list[TokenUsage]) -> Any:
+    """Return provider wrapper that records token usage from ``acompletion`` calls."""
+
+    class _Tracked:
+        async def acompletion(self, **kwargs: Any) -> Any:
+            resp = await provider.acompletion(**kwargs)
+            usage = getattr(resp, "usage", None)
+            captured.append(TokenUsage(
+                getattr(usage, "prompt_tokens", 0) or 0,
+                getattr(usage, "completion_tokens", 0) or 0,
+            ))
+            return resp
+
+    return _Tracked()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -261,18 +283,7 @@ async def _aaak_compress(old_messages: list[dict], *, model: str = MODEL) -> tup
 
     def tracking_get(model: str, api_key: str | None = None) -> tuple[Any, str]:
         provider, model_id = orig_get(model, api_key)
-
-        class _Tracked:
-            async def acompletion(_, **kwargs: Any) -> Any:
-                resp = await provider.acompletion(**kwargs)
-                u = getattr(resp, "usage", None)
-                captured.append(TokenUsage(
-                    getattr(u, "prompt_tokens", 0) or 0,
-                    getattr(u, "completion_tokens", 0) or 0,
-                ))
-                return resp
-
-        return _Tracked(), model_id
+        return _build_tracked_provider(provider, captured), model_id
 
     _provider_cache.get_provider = tracking_get
     try:
@@ -661,15 +672,23 @@ async def main_async(args: argparse.Namespace) -> None:
         _benchmark_completion_extra = {}
         print("  completion_extra={} (no deterministic sampling kwargs)")
     else:
+        _benchmark_completion_extra = dict(_DETERMINISTIC_COMPLETION_EXTRA)
         print(f"  completion_extra={_benchmark_completion_extra}")
-
-    _benchmark_semaphore = asyncio.Semaphore(args.concurrency)
 
     task_names: list[str] = args.tasks or AVAILABLE_TASKS
     for t in task_names:
         if t not in AVAILABLE_TASKS:
             print(f"ERROR: Unknown task {t!r}. Available: {AVAILABLE_TASKS}")
             return
+    if args.samples <= 0:
+        print(f"ERROR: --samples must be > 0 (got {args.samples})")
+        return
+    if args.concurrency <= 0:
+        print(f"ERROR: --concurrency must be > 0 (got {args.concurrency})")
+        return
+
+    _benchmark_semaphore = asyncio.Semaphore(args.concurrency)
+
     print(f"  tasks={task_names}  samples_per_task={args.samples}  model={bench_model}")
     print(f"  gsm8k_few_shot_n={GSM8K_FEW_SHOT_N}  aaak_min_context_tokens={AAAK_MIN_CONTEXT_TOKENS}\n")
 
