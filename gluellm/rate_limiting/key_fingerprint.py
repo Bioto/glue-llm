@@ -17,4 +17,4 @@ _HMAC_KEY = b"GlueLLM.api_key.fingerprint.v1"
 
 def api_key_hmac_fingerprint(api_key: str) -> str:
     """Return a deterministic hex fingerprint for ``api_key`` (HMAC-BLAKE2s, 256-bit digest)."""
-    return hmac.new(_HMAC_KEY, api_key.encode("utf-8"), hashlib.blake2s).hexdigest()
+    return hmac.new(_HMAC_KEY, api_key.encode("utf-8"), hashlib.blake2s).hexdigest()  # lgtm[py/weak-sensitive-data-hashing]
