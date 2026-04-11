@@ -519,6 +519,12 @@ async def run_task(task_name: str, n_samples: int, *, model: str = MODEL) -> tup
 
     if task_name == "gsm8k":
         # ── GSM8K: compress shared few-shot context once, answer in parallel ─
+        if not samples:
+            raise ValueError(
+                "gsm8k samples empty — load_gsm8k returned no rows. "
+                "Check that the HuggingFace dataset is accessible and that "
+                "n_samples > 0."
+            )
         few_shot_messages = [
             {"role": "user", "content": "Here are example math problems with solutions:"},
             {"role": "assistant", "content": samples[0].context},

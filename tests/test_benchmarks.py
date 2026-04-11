@@ -161,6 +161,16 @@ async def test_standard_benchmark_main_async_restores_deterministic_completion_e
 
 
 @pytest.mark.asyncio
+async def test_run_task_raises_clear_error_when_gsm8k_samples_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(standard_benchmark._TASK_LOADERS, "gsm8k", lambda n: [])
+
+    with pytest.raises(ValueError, match="gsm8k samples empty"):
+        await standard_benchmark.run_task("gsm8k", n_samples=1)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("samples", "concurrency", "expected_error"),
     [
