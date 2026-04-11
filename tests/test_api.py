@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from gluellm.api import (
     ExecutionResult,
     GlueLLM,
+    LLMError,
     _condense_tool_round,
     complete,
     get_session_summary,
@@ -1213,6 +1214,72 @@ class TestStreamCompleteWithTools:
         )
         assert any(ch.done for ch in chunks), "Should receive a final done chunk"
 
+    async def test_stream_complete_tool_path_terminal_chunk_empty_no_duplicate_text(self):
+        """Tool-enabled stream: final chunk must not repeat full text (already sent as deltas)."""
+        call_count = 0
+
+        async def fake_safe_llm_call(*, messages, stream, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if not stream:
+                raise NotImplementedError("This test only covers stream=True path")
+            if call_count == 1:
+                async def first_stream():
+                    yield SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(content=" ", tool_calls=None),
+                            )
+                        ]
+                    )
+                    yield SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(
+                                    content=None,
+                                    tool_calls=[
+                                        SimpleNamespace(
+                                            index=0,
+                                            id="call_1",
+                                            function=SimpleNamespace(
+                                                name="dummy_tool",
+                                                arguments='{"value":"x"}',
+                                            ),
+                                        )
+                                    ],
+                                ),
+                            )
+                        ]
+                    )
+
+                return first_stream()
+
+            async def second_stream():
+                yield SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="Done", tool_calls=None),
+                        )
+                    ]
+                )
+
+            return second_stream()
+
+        with patch("gluellm.api._safe_llm_call", side_effect=fake_safe_llm_call):
+            chunks = []
+            async for ch in stream_complete(
+                user_message="Use dummy_tool with value x",
+                system_prompt="Use the tool when asked.",
+                tools=[dummy_tool],
+                execute_tools=True,
+            ):
+                chunks.append(ch)
+
+        assert chunks[-1].done is True
+        assert chunks[-1].content == ""
+        combined = "".join(c.content for c in chunks)
+        assert combined.count("Done") == 1
+
 
 class TestStreamingStructuredOutput:
     """Test stream_complete with response_format (structured output on final chunk)."""
@@ -1686,7 +1753,7 @@ class TestCondenseToolRound:
         condensed = messages[-1]
         assert condensed["role"] == "user"
         assert "[Tool Results]" in condensed["content"]
-        assert "get_weather()" in condensed["content"]
+        assert "- get_weather ->" in condensed["content"]
         assert "Sunny, 72°F" in condensed["content"]
 
     async def test_multiple_tool_calls_condensed(self):
@@ -1708,9 +1775,9 @@ class TestCondenseToolRound:
         assert len(messages) == 2
         condensed = messages[-1]
         assert condensed["role"] == "user"
-        assert "tool_a()" in condensed["content"]
+        assert "- tool_a ->" in condensed["content"]
         assert "Result A" in condensed["content"]
-        assert "tool_b()" in condensed["content"]
+        assert "- tool_b ->" in condensed["content"]
         assert "Result B" in condensed["content"]
 
     async def test_no_condensation_when_assistant_has_content(self):
@@ -1765,7 +1832,7 @@ class TestCondenseToolRound:
 
         assert len(messages) == 2
         condensed = messages[-1]
-        assert "flaky_tool()" in condensed["content"]
+        assert "- flaky_tool ->" in condensed["content"]
         assert "TimeoutError" in condensed["content"]
 
     async def test_preserves_earlier_messages(self):
@@ -1789,7 +1856,7 @@ class TestCondenseToolRound:
         assert messages[2]["content"] == "Turn 1 reply"
         assert messages[3]["content"] == "Turn 2"
         assert messages[4]["role"] == "user"
-        assert "lookup()" in messages[4]["content"]
+        assert "- lookup ->" in messages[4]["content"]
 
     async def test_condense_tool_messages_disabled_by_default(self):
         """condense_tool_messages defaults to False on GlueLLM and module-level helpers."""
@@ -1800,6 +1867,103 @@ class TestCondenseToolRound:
         """condense_tool_messages=True can be set on the GlueLLM instance."""
         client = GlueLLM(condense_tool_messages=True)
         assert client.condense_tool_messages is True
+
+    async def test_aaak_tool_condensing_produces_aaak_tool_marker(self):
+        """With aaak_tool_condensing=True the condensed message starts with [AT]."""
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Find auth files"},
+            self._make_assistant_with_tool_calls(
+                [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "search_files", "arguments": '{"q":"auth"}'},
+                    }
+                ]
+            ),
+            self._make_tool_response("c1", '["auth.py","config.py"]'),
+        ]
+
+        _condense_tool_round(messages, aaak_tool_condensing=True)
+
+        assert len(messages) == 3
+        condensed = messages[-1]
+        assert condensed["role"] == "user"
+        assert "[AT]" in condensed["content"]
+        assert "search_files" in condensed["content"]
+        assert "T:search_files" in condensed["content"]
+        # Unique function name → args dropped
+        assert "q=auth" not in condensed["content"]
+        assert "T:search_files()" in condensed["content"]
+        assert "→" in condensed["content"]
+        # JSON array tool results are flattened to indexed lines
+        assert "[0]=auth.py" in condensed["content"]
+        assert "[1]=config.py" in condensed["content"]
+
+    async def test_aaak_tool_condensing_injects_preamble_into_system_message(self):
+        """With aaak_tool_condensing=True the system message receives the AAAK decoding hint."""
+        from gluellm.compression.aaak import AAAK_PREAMBLE_MARKER
+
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hi"},
+            self._make_assistant_with_tool_calls(
+                [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]
+            ),
+            self._make_tool_response("c1", "ok"),
+        ]
+
+        _condense_tool_round(messages, aaak_tool_condensing=True)
+
+        assert AAAK_PREAMBLE_MARKER in messages[0]["content"]
+
+    async def test_aaak_tool_condensing_false_keeps_plain_tool_results_format(self):
+        """With aaak_tool_condensing=False (default) the classic [Tool Results] format is used."""
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hi"},
+            self._make_assistant_with_tool_calls(
+                [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]
+            ),
+            self._make_tool_response("c1", "result"),
+        ]
+
+        _condense_tool_round(messages, aaak_tool_condensing=False)
+
+        condensed = messages[-1]
+        assert "[Tool Results]" in condensed["content"]
+        assert "[AT]" not in condensed["content"]
+
+    async def test_aaak_tool_condensing_multiple_tools_all_appear(self):
+        """Multiple tool calls in one round all appear in the AAAK-encoded message."""
+        messages = [
+            {"role": "user", "content": "Do things"},
+            self._make_assistant_with_tool_calls(
+                [
+                    {"id": "c1", "type": "function", "function": {"name": "tool_a", "arguments": '{"x":1}'}},
+                    {"id": "c2", "type": "function", "function": {"name": "tool_b", "arguments": '{"y":2}'}},
+                ]
+            ),
+            self._make_tool_response("c1", "Result A"),
+            self._make_tool_response("c2", "Result B"),
+        ]
+
+        _condense_tool_round(messages, aaak_tool_condensing=True)
+
+        condensed = messages[-1]["content"]
+        assert "tool_a" in condensed
+        assert "tool_b" in condensed
+        assert "Result A" in condensed
+        assert "Result B" in condensed
+        assert " | " in condensed
+
+    async def test_aaak_tool_condensing_defaults_to_client_setting(self):
+        """GlueLLM.aaak_tool_condensing defaults to False; can be set to True."""
+        default_client = GlueLLM()
+        assert default_client.aaak_tool_condensing is False
+        aaak_client = GlueLLM(aaak_tool_condensing=True)
+        assert aaak_client.aaak_tool_condensing is True
 
 
 def _make_tool_response(content: str, finish_reason: str = "stop") -> SimpleNamespace:
@@ -1916,7 +2080,7 @@ class TestCondenseToolMessagesIntegration:
             None,
         )
         assert condensed is not None, "Condensed summary message not found"
-        assert "dummy_tool()" in condensed["content"]
+        assert "- dummy_tool ->" in condensed["content"]
         assert "Tool received: hello" in condensed["content"]
 
     async def test_no_condensation_when_disabled(self):
@@ -1986,9 +2150,9 @@ class TestCondenseToolMessagesIntegration:
             f"Expected two condensed summaries (one per round), got {len(condensed_summaries)}"
         )
         # First summary references round 1 tool
-        assert "dummy_tool()" in condensed_summaries[0]["content"]
+        assert "- dummy_tool ->" in condensed_summaries[0]["content"]
         # Second summary references round 2 tool
-        assert "math_tool()" in condensed_summaries[1]["content"]
+        assert "- math_tool ->" in condensed_summaries[1]["content"]
 
     async def test_multi_turn_conversation_final_response_carries_forward(self):
         """Across two separate client.complete() calls, the final assistant text from turn 1
@@ -2065,7 +2229,7 @@ class TestCondenseToolMessagesIntegration:
         )
         assert condensed is not None
         # The error text from malformed JSON should be in the summary
-        assert "dummy_tool()" in condensed["content"]
+        assert "- dummy_tool ->" in condensed["content"]
 
     async def test_stream_complete_condensed_message_on_second_iteration(self):
         """stream_complete with condense=True passes a condensed message to the second
@@ -2127,7 +2291,7 @@ class TestCondenseToolMessagesIntegration:
             None,
         )
         assert condensed is not None, "Condensed summary missing from second streaming call"
-        assert "dummy_tool()" in condensed["content"]
+        assert "- dummy_tool ->" in condensed["content"]
 
     async def test_ten_turns_with_tool_use(self):
         """10 consecutive turns on the same client, each with one tool call.
@@ -2728,6 +2892,31 @@ class TestPerCallConfigGaps:
         # At least one chunk should have been yielded
         assert len(chunks) >= 1
 
+    async def test_stream_complete_clears_correlation_id_in_finally(self):
+        """After stream_complete finishes, correlation ContextVar is cleared (parity with complete())."""
+        from gluellm.runtime.context import get_correlation_id
+
+        async def fake_llm(*args, **kwargs):
+            async def stream():
+                yield SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="Hi", tool_calls=None),
+                        )
+                    ]
+                )
+
+            return stream()
+
+        with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
+            async for _ch in stream_complete(
+                user_message="Hi",
+                tools=[],
+                correlation_id="run-stream-clear-test",
+            ):
+                assert get_correlation_id() == "run-stream-clear-test"
+        assert get_correlation_id() is None
+
     async def test_complete_track_costs_false_skips_session_tracker(self):
         """When track_costs=False, cost is not recorded to session tracker."""
         reset_session_tracker()
@@ -2776,6 +2965,112 @@ class TestPerCallConfigGaps:
             # All _record_eval_data calls should have eval_store=None when enable_eval_recording=False
             for call in mock_record.call_args_list:
                 assert call.kwargs.get("eval_store") is None
+
+    async def test_stream_complete_records_eval_on_success(self):
+        """stream_complete calls _record_eval_data with ExecutionResult on success."""
+
+        async def fake_llm(*args, **kwargs):
+            if kwargs.get("stream"):
+                async def stream():
+                    yield SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(content="Hello", tool_calls=None),
+                            )
+                        ]
+                    )
+
+                return stream()
+            raise AssertionError("non-stream path not expected")
+
+        eval_store = AsyncMock()
+        client = GlueLLM(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a test assistant.",
+            tools=[],
+            eval_store=eval_store,
+        )
+        with (
+            patch("gluellm.api._record_eval_data", new_callable=AsyncMock) as mock_record,
+            patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm),
+        ):
+            chunks = []
+            async for ch in client.stream_complete("Hi", execute_tools=False):
+                chunks.append(ch)
+
+        mock_record.assert_awaited_once()
+        rec = mock_record.await_args.kwargs
+        assert rec.get("eval_store") is eval_store
+        assert rec.get("error") is None
+        result = rec.get("result")
+        assert result is not None
+        assert result.final_response == "Hello"
+        assert result.tool_calls_made == 0
+        assert result.raw_response is None
+        assert result.tokens_used is None
+        assert any(ch.done for ch in chunks)
+
+    async def test_stream_complete_records_eval_on_error(self):
+        """stream_complete calls _record_eval_data with error when streaming LLM call fails."""
+
+        async def fake_llm(*args, **kwargs):
+            if kwargs.get("stream"):
+                raise LLMError("stream failed")
+            raise AssertionError("non-stream path not expected")
+
+        eval_store = AsyncMock()
+        client = GlueLLM(
+            model="openai:gpt-4o-mini",
+            system_prompt="You are a test assistant.",
+            tools=[],
+            eval_store=eval_store,
+        )
+        with (
+            patch("gluellm.api._record_eval_data", new_callable=AsyncMock) as mock_record,
+            patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm),
+            pytest.raises(LLMError),
+        ):
+            async for _ch in client.stream_complete("Hi", execute_tools=False):
+                pass
+
+        mock_record.assert_awaited_once()
+        rec = mock_record.await_args.kwargs
+        assert rec.get("result") is None
+        assert rec.get("error") is not None
+        assert isinstance(rec.get("error"), LLMError)
+        assert rec.get("eval_store") is eval_store
+
+    async def test_stream_complete_enable_eval_recording_false_skips_store(self):
+        """When enable_eval_recording=False, _record_eval_data gets eval_store=None."""
+
+        async def fake_llm(*args, **kwargs):
+            if kwargs.get("stream"):
+                async def stream():
+                    yield SimpleNamespace(
+                        choices=[
+                            SimpleNamespace(
+                                delta=SimpleNamespace(content="Hi", tool_calls=None),
+                            )
+                        ]
+                    )
+
+                return stream()
+            raise AssertionError("non-stream path not expected")
+
+        with (
+            patch("gluellm.api._record_eval_data", new_callable=AsyncMock) as mock_record,
+            patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm),
+        ):
+            async for _ch in stream_complete(
+                user_message="Hi",
+                tools=[],
+                execute_tools=False,
+                enable_eval_recording=False,
+            ):
+                pass
+
+        for call in mock_record.call_args_list:
+            assert call.kwargs.get("eval_store") is None
 
 
 class TestNewParameters:
@@ -2996,6 +3291,185 @@ class TestSummarizeOldMessages:
         # The image_url part should not appear (no 'text' key)
         assert "http://example.com" not in transcript_content
 
+    async def test_aaak_compression_wraps_output_in_aaak_ctx_tags(self):
+        """With use_aaak=True the summary message is wrapped in [AAAK CTX]...[/AAAK CTX]."""
+        from unittest.mock import AsyncMock, patch
+
+        from gluellm.api import _summarize_old_messages
+
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Tell me about JWT"},
+            {"role": "assistant", "content": "JWT consists of header.payload.signature"},
+            {"role": "user", "content": "Recent question"},
+        ]
+        mock_encoded = "USR:jwt.about? | AST:jwt=header.payload.sig"
+        with patch(
+            "gluellm.compression.aaak.AAAKCompressor.compress_messages",
+            AsyncMock(return_value=mock_encoded),
+        ):
+            result = await _summarize_old_messages(
+                messages,
+                keep_recent=1,
+                model="openai:gpt-4o-mini",
+                use_aaak=True,
+            )
+
+        assert len(result) == 3
+        summary = result[1]
+        assert summary["role"] == "user"
+        assert "[AAAK CTX]" in summary["content"]
+        assert "[/AAAK CTX]" in summary["content"]
+        assert mock_encoded in summary["content"]
+
+    async def test_aaak_compression_injects_preamble_into_system_message(self):
+        """With use_aaak=True the AAAK decoding hint is added to the system message."""
+        from unittest.mock import AsyncMock, patch
+
+        from gluellm.api import _summarize_old_messages
+        from gluellm.compression.aaak import AAAK_PREAMBLE_MARKER
+
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "Recent"},
+        ]
+        with patch(
+            "gluellm.compression.aaak.AAAKCompressor.compress_messages",
+            AsyncMock(return_value="USR:A | AST:B"),
+        ):
+            result = await _summarize_old_messages(
+                messages,
+                keep_recent=1,
+                model="openai:gpt-4o-mini",
+                use_aaak=True,
+            )
+
+        assert AAAK_PREAMBLE_MARKER in result[0]["content"]
+
+    async def test_aaak_compression_fallback_when_empty_response(self):
+        """When compress_messages returns an empty string, original messages are returned unchanged."""
+        from unittest.mock import AsyncMock, patch
+
+        from gluellm.api import _summarize_old_messages
+
+        messages = [
+            {"role": "system", "content": "Sys."},
+            {"role": "user", "content": "A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "Recent"},
+        ]
+        with patch(
+            "gluellm.compression.aaak.AAAKCompressor.compress_messages",
+            AsyncMock(return_value=""),
+        ):
+            result = await _summarize_old_messages(
+                messages,
+                keep_recent=1,
+                model="openai:gpt-4o-mini",
+                use_aaak=True,
+            )
+
+        assert result is messages
+
+    async def test_aaak_compression_uses_aaak_model_when_provided(self):
+        """aaak_model parameter is forwarded to AAAKCompressor.compress_messages."""
+        from unittest.mock import AsyncMock, patch
+
+        from gluellm.api import _summarize_old_messages
+
+        messages = [
+            {"role": "system", "content": "Sys."},
+            {"role": "user", "content": "A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "Recent"},
+        ]
+        mock_compress = AsyncMock(return_value="USR:A|AST:B")
+        with patch("gluellm.compression.aaak.AAAKCompressor.compress_messages", mock_compress):
+            await _summarize_old_messages(
+                messages,
+                keep_recent=1,
+                model="openai:gpt-4o-mini",
+                use_aaak=True,
+                aaak_model="openai:gpt-4o-nano",
+            )
+
+        mock_compress.assert_called_once()
+        _, kwargs = mock_compress.call_args
+        assert kwargs.get("model") == "openai:gpt-4o-nano"
+
+    async def test_prose_summarization_used_when_aaak_disabled(self):
+        """When use_aaak=False (default), prose [Conversation Summary] is used, not AAAK."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from gluellm.api import _summarize_old_messages
+
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "A"},
+            {"role": "assistant", "content": "B"},
+            {"role": "user", "content": "Recent"},
+        ]
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(return_value=_make_summarize_response("Prose summary."))
+
+        with patch("gluellm.api._ProviderCache") as MockCache:
+            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-4o-mini")
+            result = await _summarize_old_messages(
+                messages,
+                keep_recent=1,
+                model="openai:gpt-4o-mini",
+                use_aaak=False,
+            )
+
+        summary = result[1]
+        assert "[Conversation Summary]" in summary["content"]
+        assert "[AAAK CTX]" not in summary["content"]
+
+
+class TestAAAKClientSettings:
+    """Tests for the AAAK constructor settings on GlueLLM."""
+
+    async def test_aaak_compression_disabled_by_default(self):
+        """GlueLLM.aaak_compression_enabled defaults to False."""
+        assert GlueLLM().aaak_compression_enabled is False
+
+    async def test_aaak_compression_can_be_enabled(self):
+        """aaak_compression_enabled=True is stored on the instance."""
+        assert GlueLLM(aaak_compression_enabled=True).aaak_compression_enabled is True
+
+    async def test_aaak_compression_model_defaults_to_none(self):
+        """aaak_compression_model defaults to None (falls back to summarize model)."""
+        assert GlueLLM().aaak_compression_model is None
+
+    async def test_aaak_compression_model_can_be_set(self):
+        """A custom aaak_compression_model is stored on the instance."""
+        client = GlueLLM(aaak_compression_model="openai:gpt-4o-nano")
+        assert client.aaak_compression_model == "openai:gpt-4o-nano"
+
+    async def test_aaak_tool_condensing_disabled_by_default(self):
+        """GlueLLM.aaak_tool_condensing defaults to False."""
+        assert GlueLLM().aaak_tool_condensing is False
+
+    async def test_aaak_tool_condensing_can_be_enabled(self):
+        """aaak_tool_condensing=True is stored on the instance."""
+        assert GlueLLM(aaak_tool_condensing=True).aaak_tool_condensing is True
+
+    async def test_aaak_settings_from_global_settings(self):
+        """AAAK settings are picked up from the global GlueLLMSettings when not passed."""
+        from unittest.mock import patch
+
+        from gluellm.config import settings as real_settings
+
+        modified = real_settings.model_copy(
+            update={"aaak_compression_enabled": True, "aaak_tool_condensing": True}
+        )
+        with patch("gluellm.api.settings", modified):
+            client = GlueLLM()
+        assert client.aaak_compression_enabled is True
+        assert client.aaak_tool_condensing is True
+
 
 class TestSummarizeContextIntegration:
     """Integration tests for the summarize_context feature on GlueLLM."""
@@ -3025,13 +3499,23 @@ class TestSummarizeContextIntegration:
         assert client.summarize_context_keep_recent == settings.default_summarize_context_keep_recent
 
     async def test_summarize_context_threshold_can_be_overridden(self):
-        """Custom summarize_context_threshold is respected."""
-        client = GlueLLM(model="openai:gpt-4o-mini", summarize_context_threshold=10)
+        """Custom summarize_context threshold is respected."""
+        from gluellm import SummarizeContextConfig
+
+        client = GlueLLM(
+            model="openai:gpt-4o-mini",
+            summarize_context=SummarizeContextConfig(threshold=10),
+        )
         assert client.summarize_context_threshold == 10
 
     async def test_summarize_context_keep_recent_can_be_overridden(self):
-        """Custom summarize_context_keep_recent is respected."""
-        client = GlueLLM(model="openai:gpt-4o-mini", summarize_context_keep_recent=3)
+        """Custom summarize_context keep_recent is respected."""
+        from gluellm import SummarizeContextConfig
+
+        client = GlueLLM(
+            model="openai:gpt-4o-mini",
+            summarize_context=SummarizeContextConfig(keep_recent=3),
+        )
         assert client.summarize_context_keep_recent == 3
 
     async def test_summarize_context_triggers_when_threshold_exceeded(self):
@@ -3047,7 +3531,7 @@ class TestSummarizeContextIntegration:
 
         summarize_called: list = []
 
-        async def fake_summarize(messages, keep_recent, model):
+        async def fake_summarize(messages, keep_recent, model, **kwargs):
             summarize_called.append(True)
             return messages  # return unchanged so complete() can proceed
 
@@ -3057,10 +3541,11 @@ class TestSummarizeContextIntegration:
             patch("gluellm.api._summarize_old_messages", side_effect=fake_summarize) as mock_sum,
             patch("gluellm.api._llm_call_with_retry", AsyncMock(return_value=mock_response)),
         ):
+            from gluellm import SummarizeContextConfig
+
             client = GlueLLM(
                 model="openai:gpt-4o-mini",
-                summarize_context=True,
-                summarize_context_threshold=4,
+                summarize_context=SummarizeContextConfig(enabled=True, threshold=4),
             )
             # Pre-seed conversation: 4 messages → messages list before complete("new")
             # will be [system, u1, a1, u2, a2, new_user] = 6 > threshold 4
@@ -3072,6 +3557,40 @@ class TestSummarizeContextIntegration:
 
         assert mock_sum.called, "_summarize_old_messages was not called despite threshold being exceeded"
 
+    async def test_summarize_old_messages_receives_completion_extra(self):
+        """Provider extras (model_kwargs) are forwarded to _summarize_old_messages as completion_extra."""
+        from unittest.mock import AsyncMock, patch
+
+        from gluellm.models.conversation import Role as ConvRole
+
+        extras_seen: list[dict[str, object] | None] = []
+
+        async def fake_summarize(messages, keep_recent, model, **kwargs):
+            extras_seen.append(kwargs.get("completion_extra"))
+            return messages
+
+        mock_response = _make_tool_response("Done")
+
+        with (
+            patch("gluellm.api._summarize_old_messages", side_effect=fake_summarize),
+            patch("gluellm.api._llm_call_with_retry", AsyncMock(return_value=mock_response)),
+        ):
+            from gluellm import SummarizeContextConfig
+
+            client = GlueLLM(
+                model="openai:gpt-4o-mini",
+                model_kwargs={"temperature": 0.2},
+                summarize_context=SummarizeContextConfig(enabled=True, threshold=4),
+            )
+            client._conversation.add_message(ConvRole.USER, "Msg 1")
+            client._conversation.add_message(ConvRole.ASSISTANT, "Reply 1")
+            client._conversation.add_message(ConvRole.USER, "Msg 2")
+            client._conversation.add_message(ConvRole.ASSISTANT, "Reply 2")
+            await client.complete("Msg 3")
+
+        assert extras_seen and extras_seen[0] is not None
+        assert extras_seen[0].get("temperature") == 0.2
+
     async def test_summarize_context_not_triggered_below_threshold(self):
         """_summarize_old_messages is not called when messages are below threshold."""
         from unittest.mock import AsyncMock, patch
@@ -3082,10 +3601,11 @@ class TestSummarizeContextIntegration:
             patch("gluellm.api._summarize_old_messages", AsyncMock()) as mock_sum,
             patch("gluellm.api._llm_call_with_retry", AsyncMock(return_value=mock_response)),
         ):
+            from gluellm import SummarizeContextConfig
+
             client = GlueLLM(
                 model="openai:gpt-4o-mini",
-                summarize_context=True,
-                summarize_context_threshold=20,
+                summarize_context=SummarizeContextConfig(enabled=True, threshold=20),
             )
             await client.complete("Hi")
 

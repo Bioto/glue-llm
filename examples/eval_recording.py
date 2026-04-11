@@ -205,7 +205,9 @@ async def example_8_read_records():
     print(f"Total records: {len(records)}")
     for record in records:
         print(f"  - {record['id']}: {record['user_message'][:50]}...")
-        print(f"    Cost: ${record.get('estimated_cost_usd', 0):.6f}")
+        cost = record.get("estimated_cost_usd")
+        cost_f = 0.0 if cost is None else float(cost)
+        print(f"    Cost: ${cost_f:.6f}")
         print(f"    Latency: {record['latency_ms']:.2f}ms")
 
 

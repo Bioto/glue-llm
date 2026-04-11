@@ -49,7 +49,6 @@ Example:
 """
 
 import asyncio
-import hashlib
 
 import httpx
 import importlib
@@ -94,6 +93,7 @@ from gluellm.models.eval import EvalRecord
 from gluellm.observability.logging_config import get_logger
 from gluellm.provider_params import normalize_model_params
 from gluellm.rate_limiting.api_key_pool import extract_provider_from_model
+from gluellm.rate_limiting.key_fingerprint import api_key_hmac_fingerprint
 from gluellm.rate_limiting.rate_limiter import acquire_rate_limit
 from gluellm.rate_limit_types import RateLimitAlgorithm
 from gluellm.runtime.context import clear_correlation_id, get_correlation_id, set_correlation_id
@@ -112,6 +112,9 @@ type OnStatusCallback = Callable[[ProcessEvent], None] | Callable[[ProcessEvent]
 
 # Reasoning effort for o3, o4-mini, Claude thinking models (any_llm 1.11.0)
 type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "auto"]
+
+# GlueLLM call-level options that must never be forwarded to provider.acompletion (OpenAI, etc.).
+_PROVIDER_ACOMPLETION_SKIP_KEYS = frozenset({"max_tool_iterations", "execute_tools", "rate_limit_algorithm"})
 
 
 # ============================================================================
@@ -182,6 +185,69 @@ class RateLimitConfig(BaseModel):
                 f"Must be one of: {', '.join(e.value for e in RateLimitAlgorithm)}"
             )
         return v
+
+
+class SummarizeContextConfig(BaseModel):
+    """Configuration for automatic context summarization."""
+
+    enabled: bool = False
+    threshold: int | None = None
+    model: str | None = None
+    keep_recent: int | None = None
+
+    @field_validator("threshold", "keep_recent")
+    @classmethod
+    def _positive_optional(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError("must be > 0")
+        return v
+
+
+def _default_summarize_context_config() -> SummarizeContextConfig:
+    return SummarizeContextConfig(
+        enabled=settings.default_summarize_context,
+        threshold=settings.default_summarize_context_threshold,
+        model=None,
+        keep_recent=settings.default_summarize_context_keep_recent,
+    )
+
+
+def _normalize_summarize_context_init(value: SummarizeContextConfig | bool | None) -> SummarizeContextConfig:
+    """Build instance-level summarization config from ctor argument."""
+    base = _default_summarize_context_config()
+    if value is None:
+        return base
+    if isinstance(value, bool):
+        return base.model_copy(update={"enabled": value})
+    merged = base.model_copy(update=value.model_dump(exclude_unset=True))
+    if merged.threshold is None:
+        merged = merged.model_copy(update={"threshold": settings.default_summarize_context_threshold})
+    if merged.keep_recent is None:
+        merged = merged.model_copy(update={"keep_recent": settings.default_summarize_context_keep_recent})
+    return merged
+
+
+def _merge_summarize_context_for_call(
+    base: SummarizeContextConfig,
+    override: SummarizeContextConfig | bool | None,
+) -> SummarizeContextConfig:
+    """Merge per-call override with instance-level config."""
+    if override is None:
+        return base
+    if isinstance(override, bool):
+        return base.model_copy(update={"enabled": override})
+    merged = base.model_copy(update=override.model_dump(exclude_unset=True))
+    if merged.threshold is None:
+        merged = merged.model_copy(update={"threshold": base.threshold})
+    if merged.keep_recent is None:
+        merged = merged.model_copy(update={"keep_recent": base.keep_recent})
+    return merged
+
+
+def _summarize_model_for_call(cfg: SummarizeContextConfig, primary_model: str) -> str:
+    """Resolve model for summarization (explicit config, then primary)."""
+    return cfg.model or primary_model
+
 
 # Configure logging
 logger = get_logger(__name__)
@@ -963,7 +1029,11 @@ def _serialize_chat_completion_to_dict(completion: Any) -> dict[str, Any]:
         if usage
         else None,
     }
-def _condense_tool_round(messages: list[dict[str, Any]]) -> None:
+def _condense_tool_round(
+    messages: list[dict[str, Any]],
+    *,
+    aaak_tool_condensing: bool = False,
+) -> None:
     """Replace the last tool-call round in messages with a single condensed summary.
 
     Finds the trailing sequence of ``role: "tool"`` messages preceded by a
@@ -975,6 +1045,11 @@ def _condense_tool_round(messages: list[dict[str, Any]]) -> None:
 
     Rounds where the assistant produced visible text content alongside tool calls
     are left untouched, because that text carries meaning the model needs to see.
+
+    Args:
+        messages: Conversation messages (mutated in place).
+        aaak_tool_condensing: If True, encode the round as an ``[AT]`` AAAK block
+            and ensure the system message has the AAAK decoding preamble.
     """
     # Collect trailing tool-response messages
     tool_response_indices: list[int] = []
@@ -1011,12 +1086,27 @@ def _condense_tool_round(messages: list[dict[str, Any]]) -> None:
         name = fn.get("name", "unknown") if isinstance(fn, dict) else getattr(fn, "name", "unknown")
         id_to_name[tc_id] = name
 
+    if aaak_tool_condensing:
+        from gluellm.compression.aaak import AAAKCompressor
+
+        if messages and messages[0].get("role") == "system":
+            AAAKCompressor.ensure_preamble_in_system(messages[0])
+        tool_messages = [messages[i] for i in tool_response_indices]
+        condensed_content = AAAKCompressor.encode_tool_round(
+            list(tool_calls),
+            tool_messages,
+            id_to_name,
+        )
+        del messages[assistant_idx:]
+        messages.append({"role": "user", "content": condensed_content})
+        return
+
     lines = ["[Tool Results]"]
     for tool_msg in (messages[i] for i in tool_response_indices):
         tc_id = tool_msg.get("tool_call_id", "")
         name = id_to_name.get(tc_id, tc_id)
         result = tool_msg.get("content", "")
-        lines.append(f"- {name}() -> {result}")
+        lines.append(f"- {name} -> {result}")
 
     condensed_content = "\n".join(lines)
 
@@ -1042,12 +1132,17 @@ async def _summarize_old_messages(
     messages: list[dict[str, Any]],
     keep_recent: int,
     model: str,
+    *,
+    use_aaak: bool = False,
+    aaak_model: str | None = None,
+    completion_extra: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Compress older conversation messages into a single summary message.
 
     Preserves the system prompt (index 0) and the most recent ``keep_recent``
-    messages verbatim. Everything in between is sent to the LLM for summarization
-    and replaced with one ``role: "user"`` summary message.
+    messages verbatim. Everything in between is replaced with one ``role: "user"``
+    summary message: prose ``[Conversation Summary]`` by default, or AAAK
+    ``[AAAK CTX]`` blocks when ``use_aaak`` is True.
 
     Returns the original list unchanged when there is nothing old enough to
     summarize (i.e. the non-system messages number ``keep_recent`` or fewer).
@@ -1055,11 +1150,14 @@ async def _summarize_old_messages(
     Args:
         messages: Full message list including the system prompt at index 0.
         keep_recent: Number of trailing messages to keep verbatim.
-        model: Model identifier used for the summarization call.
+        model: Model identifier used for prose summarization and default AAAK model.
+        use_aaak: If True, run AAAK compression on old messages instead of prose summary.
+        aaak_model: Model for AAAK compression when ``use_aaak`` (defaults to ``model``).
+        completion_extra: Optional kwargs merged into provider ``acompletion`` calls.
 
     Returns:
         A shortened message list: [system] + [summary] + recent_messages,
-        or the original list if no summarization was needed.
+        or the original list if no summarization was needed (or AAAK returned empty).
     """
     if len(messages) < 2:
         return messages
@@ -1073,14 +1171,41 @@ async def _summarize_old_messages(
     old_messages = non_system[: len(non_system) - keep_recent]
     recent_messages = non_system[len(non_system) - keep_recent :]
 
-    # Build a readable transcript of the old messages for the summarizer.
-    # Skip messages with non-string content (e.g. tool-call dicts) gracefully.
+    if use_aaak:
+        from gluellm.compression.aaak import AAAKCompressor
+
+        sys_out: dict[str, Any] = {**system_msg}
+        AAAKCompressor.ensure_preamble_in_system(sys_out)
+        compress_model = aaak_model or model
+        try:
+            encoded = await AAAKCompressor.compress_messages(
+                old_messages,
+                model=compress_model,
+                completion_extra=completion_extra,
+            )
+        except Exception:
+            logger.warning("AAAK context compression failed; continuing with original messages.", exc_info=True)
+            return messages
+
+        if not (encoded or "").strip():
+            return messages
+
+        summary_msg: dict[str, Any] = {
+            "role": "user",
+            "content": f"[AAAK CTX]\n{encoded}\n[/AAAK CTX]",
+        }
+        logger.debug(
+            f"Context AAAK-compressed: {len(old_messages)} old messages → 1 summary message "
+            f"({len(recent_messages)} recent messages kept verbatim)"
+        )
+        return [sys_out, summary_msg, *recent_messages]
+
+    # Prose summarization (default)
     transcript_lines: list[str] = []
     for msg in old_messages:
         role = msg.get("role", "unknown")
         content = msg.get("content") or ""
         if isinstance(content, list):
-            # Multi-part content (vision, tool results) — join text parts only
             text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
             content = " ".join(text_parts)
         transcript_lines.append(f"{role.upper()}: {content}")
@@ -1095,13 +1220,14 @@ async def _summarize_old_messages(
     try:
         provider_cache = _ProviderCache()
         provider, model_id = provider_cache.get_provider(model, api_key=None)
-        response = await provider.acompletion(model=model_id, messages=summarize_messages)
+        extra = dict(completion_extra or {})
+        response = await provider.acompletion(model=model_id, messages=summarize_messages, **extra)
         summary_text = response.choices[0].message.content or ""
     except Exception:
         logger.warning("Context summarization failed; continuing with original messages.", exc_info=True)
         return messages
 
-    summary_msg: dict[str, Any] = {
+    summary_msg = {
         "role": "user",
         "content": f"[Conversation Summary]\n{summary_text}",
     }
@@ -1476,6 +1602,10 @@ async def _safe_llm_call(
     connect_timeout = min(connect_timeout, settings.max_connect_timeout)  # Enforce max connect timeout
     _patch_any_llm_openai_converter()
 
+    model_kwargs = dict(model_kwargs)
+    for _k in _PROVIDER_ACOMPLETION_SKIP_KEYS:
+        model_kwargs.pop(_k, None)
+
     # Inject httpx.Timeout into model_kwargs if caller hasn't set it (provider SDKs accept this)
     if "timeout" not in model_kwargs:
         model_kwargs["timeout"] = httpx.Timeout(
@@ -1491,7 +1621,7 @@ async def _safe_llm_call(
     # Apply rate limiting before making the call
     provider = extract_provider_from_model(model)
     rate_limit_key = (
-        f"global:{provider}" if not api_key else f"api_key:{hashlib.sha256(api_key.encode()).hexdigest()[:8]}"
+        f"global:{provider}" if not api_key else f"api_key:{api_key_hmac_fingerprint(api_key)}"
     )
     rate_limit_algorithm = rate_limit_config.algorithm if rate_limit_config else None
     await acquire_rate_limit(rate_limit_key, algorithm=rate_limit_algorithm)
@@ -1897,31 +2027,37 @@ class GlueLLM:
 
     def __init__(
         self,
-        model: str | None = None,
+        # -- Core --
         embedding_model: str | None = None,
+        model: str | None = None,
         system_prompt: str | None = None,
-        tools: list[Callable] | None = None,
-        max_tool_iterations: int | None = None,
-        eval_store: EvalStore | None = None,
-        guardrails: GuardrailsConfig | None = None,
-        condense_tool_messages: bool | None = None,
-        tool_mode: ToolMode = "standard",
-        tool_execution_order: ToolExecutionOrder | None = None,
-        tool_route_model: str | None = None,
+        # -- Model generation --
+        logprobs: bool | None = None,
         max_tokens: int | None = None,
-        retry_config: RetryConfig | None = None,
-        rate_limit_config: RateLimitConfig | None = None,
         model_kwargs: dict[str, Any] | None = None,
         reasoning_effort: ReasoningEffort | None = None,
-        logprobs: bool | None = None,
         top_logprobs: int | None = None,
-        session_label: str | None = None,
+        # -- Tools --
+        condense_tool_messages: bool | None = None,
+        max_tool_iterations: int | None = None,
         parallel_tool_calls: bool | None = None,
+        tool_execution_order: ToolExecutionOrder | None = None,
+        tool_mode: ToolMode = "standard",
+        tool_route_model: str | None = None,
+        tools: list[Callable] | None = None,
+        # -- Resilience --
+        rate_limit_config: RateLimitConfig | None = None,
+        retry_config: RetryConfig | None = None,
+        # -- Context management --
+        aaak_compression_enabled: bool | None = None,
+        aaak_compression_model: str | None = None,
+        aaak_tool_condensing: bool | None = None,
+        summarize_context: SummarizeContextConfig | bool | None = None,
+        # -- Observability / behavior --
+        eval_store: EvalStore | None = None,
+        guardrails: GuardrailsConfig | None = None,
         hook_registry: HookRegistry | None = None,
-        summarize_context: bool = False,
-        summarize_context_threshold: int | None = None,
-        summarize_context_model: str | None = None,
-        summarize_context_keep_recent: int | None = None,
+        session_label: str | None = None,
     ):
         """Initialize GlueLLM client.
 
@@ -1953,15 +2089,11 @@ class GlueLLM:
             parallel_tool_calls: Allow parallel tool calls when multiple tools are requested.
             hook_registry: Optional hook registry for pre/post tool and iteration hooks. Merged
                 with the global registry at call time so global hooks always apply.
-            summarize_context: If True, older conversation messages are automatically summarized
-                into a single message when the context exceeds summarize_context_threshold messages.
-                Defaults to False.
-            summarize_context_threshold: Number of messages (excluding the system prompt) that
-                triggers summarization. Defaults to settings.default_summarize_context_threshold (20).
-            summarize_context_model: Model used for the summarization call. Defaults to the
-                client's primary model. A cheaper/faster model is often sufficient here.
-            summarize_context_keep_recent: Number of most-recent messages to always keep verbatim.
-                Defaults to settings.default_summarize_context_keep_recent (6).
+            summarize_context: ``True``/``False``, or ``SummarizeContextConfig`` for automatic summarization
+                of older messages when the context exceeds the threshold. Defaults from settings.
+            aaak_compression_enabled: Use AAAK LLM compression when summarizing context (defaults to settings).
+            aaak_compression_model: Model for AAAK compression when enabled (defaults to settings).
+            aaak_tool_condensing: Encode condensed tool rounds as AAAK ``[AT]`` blocks (defaults to settings).
         """
         self.model = model or settings.default_model
         self.embedding_model = embedding_model or settings.default_embedding_model
@@ -1996,18 +2128,38 @@ class GlueLLM:
             self.model_kwargs["parallel_tool_calls"] = effective_parallel_tool_calls
         self._hook_registry = hook_registry or HookRegistry()
         self._hook_manager = HookManager()
-        self.summarize_context = summarize_context
-        self.summarize_context_threshold = (
-            summarize_context_threshold
-            if summarize_context_threshold is not None
-            else settings.default_summarize_context_threshold
+        self._summarize_context_cfg = _normalize_summarize_context_init(summarize_context)
+        self.aaak_compression_enabled = (
+            aaak_compression_enabled
+            if aaak_compression_enabled is not None
+            else settings.aaak_compression_enabled
         )
-        self.summarize_context_model = summarize_context_model
-        self.summarize_context_keep_recent = (
-            summarize_context_keep_recent
-            if summarize_context_keep_recent is not None
-            else settings.default_summarize_context_keep_recent
+        self.aaak_compression_model = (
+            aaak_compression_model if aaak_compression_model is not None else settings.aaak_compression_model
         )
+        self.aaak_tool_condensing = (
+            aaak_tool_condensing if aaak_tool_condensing is not None else settings.aaak_tool_condensing
+        )
+
+    @property
+    def summarize_context(self) -> bool:
+        return self._summarize_context_cfg.enabled
+
+    @property
+    def summarize_context_threshold(self) -> int:
+        t = self._summarize_context_cfg.threshold
+        assert t is not None  # normalized at init
+        return t
+
+    @property
+    def summarize_context_model(self) -> str | None:
+        return self._summarize_context_cfg.model
+
+    @property
+    def summarize_context_keep_recent(self) -> int:
+        k = self._summarize_context_cfg.keep_recent
+        assert k is not None  # normalized at init
+        return k
 
     def _get_merged_hook_registry(self) -> HookRegistry:
         """Return the global hook registry merged with this instance's registry."""
@@ -2170,45 +2322,48 @@ class GlueLLM:
     async def complete(
         self,
         user_message: str,
-        model: str | None = None,
-        execute_tools: bool = True,
-        correlation_id: str | None = None,
-        request_timeout: float | None = None,
-        connect_timeout: float | None = None,
+        # -- Core --
         api_key: str | None = None,
+        model: str | None = None,
+        # -- Model generation --
+        logprobs: bool | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        top_logprobs: int | None = None,
+        # -- Tools --
+        condense_tool_messages: bool | None = None,
+        execute_tools: bool = True,
+        parallel_tool_calls: bool | None = None,
+        tool_execution_order: ToolExecutionOrder | None = None,
+        tool_mode: ToolMode | None = None,
+        # -- Timeouts --
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
+        # -- Resilience --
+        rate_limit_config: RateLimitConfig | None = None,
+        retry_config: RetryConfig | None = None,
+        retry_enabled: bool | None = None,
+        # -- Context management --
+        summarize_context: SummarizeContextConfig | bool | None = None,
+        # -- Observability / behavior --
+        correlation_id: str | None = None,
+        enable_eval_recording: bool | None = None,
         guardrails: GuardrailsConfig | None = None,
         on_status: OnStatusCallback = None,
-        max_tokens: int | None = None,
-        condense_tool_messages: bool | None = None,
-        tool_mode: ToolMode | None = None,
-        tool_execution_order: ToolExecutionOrder | None = None,
-        retry_enabled: bool | None = None,
-        retry_config: RetryConfig | None = None,
-        rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
-        rate_limit_config: RateLimitConfig | None = None,
-        track_costs: bool | None = None,
-        enable_eval_recording: bool | None = None,
-        reasoning_effort: ReasoningEffort | None = None,
-        logprobs: bool | None = None,
-        top_logprobs: int | None = None,
         session_label: str | None = None,
-        parallel_tool_calls: bool | None = None,
         sinks: list[Sink] | None = None,
-        summarize_context: bool | None = None,
-        summarize_context_threshold: int | None = None,
-        summarize_context_model: str | None = None,
-        summarize_context_keep_recent: int | None = None,
+        track_costs: bool | None = None,
         **model_kwargs: Any,
     ) -> ExecutionResult:
         """Complete a request with automatic tool execution loop.
 
         Args:
             user_message: The user's message/request
+            api_key: Optional API key override (for key pool usage)
             execute_tools: Whether to automatically execute tools and loop
             correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
             request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
             connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
-            api_key: Optional API key override (for key pool usage)
             guardrails: Optional guardrails configuration (overrides instance guardrails if provided)
             on_status: Optional callback for process status events (LLM call start/end, tool start/end, complete)
             max_tokens: Maximum number of tokens to generate. Overrides instance-level max_tokens if provided.
@@ -2216,9 +2371,7 @@ class GlueLLM:
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
             retry_enabled: If False, disables retries for this call (shorthand for retry_config.retry_enabled=False).
             retry_config: Per-call retry configuration override (includes optional callback).
-            rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
-                Shorthand for rate_limit_config=RateLimitConfig(algorithm=...).
-            rate_limit_config: Per-call rate limit configuration override.
+            rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
             reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto".
@@ -2226,10 +2379,7 @@ class GlueLLM:
             top_logprobs: Number of top log probs when logprobs=True.
             session_label: Observability metadata for gateway traces.
             parallel_tool_calls: Allow parallel tool calls.
-            summarize_context: Override the instance-level summarize_context setting for this call.
-            summarize_context_threshold: Override the message-count threshold that triggers summarization.
-            summarize_context_model: Override the model used for the summarization call.
-            summarize_context_keep_recent: Override how many recent messages are kept verbatim.
+            summarize_context: Override instance summarization (bool or ``SummarizeContextConfig``).
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
@@ -2270,12 +2420,17 @@ class GlueLLM:
                 if cfg is None
                 else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
             )
-        # Per-call rate_limit_config or rate_limit_algorithm override; else client-level; else None (use settings)
+        # Per-call rate_limit_config override; else client-level; else None (use settings)
         effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else self.rate_limit_config
-        if rate_limit_algorithm is not None:
-            effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
         effective_eval_store = None if enable_eval_recording is False else self.eval_store
-        effective_model_kwargs = {**self.model_kwargs, **model_kwargs}
+        call_model_kwargs = dict(model_kwargs)
+        override_max_tool_iterations = call_model_kwargs.pop("max_tool_iterations", None)
+        effective_max_tool_iterations = (
+            override_max_tool_iterations
+            if override_max_tool_iterations is not None
+            else self.max_tool_iterations
+        )
+        effective_model_kwargs = {**self.model_kwargs, **call_model_kwargs}
         if reasoning_effort is not None:
             effective_model_kwargs["reasoning_effort"] = reasoning_effort
         if logprobs is not None:
@@ -2286,18 +2441,8 @@ class GlueLLM:
             effective_model_kwargs["session_label"] = session_label
         if parallel_tool_calls is not None:
             effective_model_kwargs["parallel_tool_calls"] = parallel_tool_calls
-        effective_summarize_context = summarize_context if summarize_context is not None else self.summarize_context
-        effective_summarize_context_threshold = (
-            summarize_context_threshold
-            if summarize_context_threshold is not None
-            else self.summarize_context_threshold
-        )
-        effective_summarize_context_model = summarize_context_model or self.summarize_context_model or self.model
-        effective_summarize_context_keep_recent = (
-            summarize_context_keep_recent
-            if summarize_context_keep_recent is not None
-            else self.summarize_context_keep_recent
-        )
+        effective_summarize_cfg = _merge_summarize_context_for_call(self._summarize_context_cfg, summarize_context)
+        effective_summarize_context_model = _summarize_model_for_call(effective_summarize_cfg, model or self.model)
 
         # Set correlation ID if provided
         if correlation_id:
@@ -2360,18 +2505,23 @@ class GlueLLM:
 
                 # Tool execution loop
                 logger.debug(
-                    f"Starting tool execution loop: max_iterations={self.max_tool_iterations}, "
+                    f"Starting tool execution loop: max_iterations={effective_max_tool_iterations}, "
                     f"tools_available={len(active_tools) if active_tools else 0}, tool_mode={effective_tool_mode}"
                 )
-                for iteration in range(self.max_tool_iterations):
-                    logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
+                for iteration in range(effective_max_tool_iterations):
+                    logger.debug(f"Tool execution iteration {iteration + 1}/{effective_max_tool_iterations}")
                     try:
                         # Context summarization: compress old messages when threshold is exceeded
-                        if effective_summarize_context and len(messages) > effective_summarize_context_threshold:
+                        _thr = effective_summarize_cfg.threshold
+                        _kr = effective_summarize_cfg.keep_recent
+                        if effective_summarize_cfg.enabled and _thr is not None and len(messages) > _thr:
                             messages = await _summarize_old_messages(
                                 messages,
-                                keep_recent=effective_summarize_context_keep_recent,
+                                keep_recent=_kr if _kr is not None else settings.default_summarize_context_keep_recent,
                                 model=effective_summarize_context_model,
+                                use_aaak=self.aaak_compression_enabled,
+                                aaak_model=self.aaak_compression_model,
+                                completion_extra=effective_model_kwargs,
                             )
 
                         # PRE_ITERATION hook: content is the last user message in the conversation
@@ -2418,12 +2568,12 @@ class GlueLLM:
                         # Log the error and re-raise with context
                         cause_chain = _build_cause_chain(e)
                         logger.error(
-                            f"LLM call failed on iteration {iteration + 1}/{self.max_tool_iterations}: {e}, "
+                            f"LLM call failed on iteration {iteration + 1}/{effective_max_tool_iterations}: {e}, "
                             f"error_type={type(e).__name__}, cause_chain={cause_chain}"
                         )
                         # Add error context to the exception
                         error_msg = (
-                            f"Failed during tool execution loop (iteration {iteration + 1}/{self.max_tool_iterations})"
+                            f"Failed during tool execution loop (iteration {iteration + 1}/{effective_max_tool_iterations})"
                         )
                         raise type(e)(f"{error_msg}: {e}") from e
 
@@ -2500,7 +2650,7 @@ class GlueLLM:
                                 sinks=sinks,
                             )
                             # Update system prompt to reflect matched tools (no longer router)
-                            messages[0]["content"] = self._format_system_prompt(tools=active_tools)
+                            self._apply_system_prompt_after_tool_route(messages, active_tools)
                             continue
 
                         # Add assistant message with tool calls to history (dict for any_llm validation)
@@ -2522,7 +2672,7 @@ class GlueLLM:
                             messages.append(r["message"])
 
                         if effective_condense:
-                            _condense_tool_round(messages)
+                            _condense_tool_round(messages, aaak_tool_condensing=self.aaak_tool_condensing)
 
                         # Continue loop to get next response
                         continue
@@ -2675,7 +2825,7 @@ class GlueLLM:
                     return result
 
                 # Max iterations reached
-                logger.warning(f"Max tool execution iterations ({self.max_tool_iterations}) reached")
+                logger.warning(f"Max tool execution iterations ({effective_max_tool_iterations}) reached")
                 final_content = "Maximum tool execution iterations reached."
 
                 # Extract token usage if available
@@ -2751,36 +2901,39 @@ class GlueLLM:
         self,
         user_message: str,
         response_format: type[T],
+        # -- Core --
+        api_key: str | None = None,
         model: str | None = None,
         tools: list[Callable] | None = None,
-        execute_tools: bool = True,
-        correlation_id: str | None = None,
-        request_timeout: float | None = None,
-        connect_timeout: float | None = None,
-        api_key: str | None = None,
-        guardrails: GuardrailsConfig | None = None,
-        on_status: OnStatusCallback = None,
-        max_tokens: int | None = None,
-        condense_tool_messages: bool | None = None,
-        tool_mode: ToolMode | None = None,
-        tool_execution_order: ToolExecutionOrder | None = None,
-        retry_enabled: bool | None = None,
-        retry_config: RetryConfig | None = None,
-        rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
-        rate_limit_config: RateLimitConfig | None = None,
-        track_costs: bool | None = None,
-        enable_eval_recording: bool | None = None,
-        reasoning_effort: ReasoningEffort | None = None,
+        # -- Model generation --
         logprobs: bool | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
         top_logprobs: int | None = None,
-        session_label: str | None = None,
+        # -- Tools --
+        condense_tool_messages: bool | None = None,
+        execute_tools: bool = True,
         parallel_tool_calls: bool | None = None,
+        tool_execution_order: ToolExecutionOrder | None = None,
+        tool_mode: ToolMode | None = None,
+        # -- Timeouts --
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
+        # -- Resilience --
+        rate_limit_config: RateLimitConfig | None = None,
+        retry_config: RetryConfig | None = None,
+        retry_enabled: bool | None = None,
+        # -- Context management --
+        summarize_context: SummarizeContextConfig | bool | None = None,
+        # -- Observability / behavior --
+        correlation_id: str | None = None,
+        enable_eval_recording: bool | None = None,
+        guardrails: GuardrailsConfig | None = None,
         max_validation_retries: int | None = None,
+        on_status: OnStatusCallback = None,
+        session_label: str | None = None,
         sinks: list[Sink] | None = None,
-        summarize_context: bool | None = None,
-        summarize_context_threshold: int | None = None,
-        summarize_context_model: str | None = None,
-        summarize_context_keep_recent: int | None = None,
+        track_costs: bool | None = None,
         **model_kwargs: Any,
     ) -> ExecutionResult[T]:
         """Complete a request and return structured output.
@@ -2806,8 +2959,7 @@ class GlueLLM:
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
             retry_enabled: If False, disables retries for this call (shorthand for retry_config.retry_enabled=False).
             retry_config: Per-call retry configuration override (includes optional callback).
-            rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
-            rate_limit_config: Per-call rate limit configuration override.
+            rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
             reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto".
@@ -2817,10 +2969,7 @@ class GlueLLM:
             parallel_tool_calls: Allow parallel tool calls.
             max_validation_retries: Max retries when Pydantic validation fails (default 3).
                 On validation error, the error is fed back to the model for self-correction.
-            summarize_context: Override the instance-level summarize_context setting for this call.
-            summarize_context_threshold: Override the message-count threshold that triggers summarization.
-            summarize_context_model: Override the model used for the summarization call.
-            summarize_context_keep_recent: Override how many recent messages are kept verbatim.
+            summarize_context: Override instance summarization (bool or ``SummarizeContextConfig``).
             **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
         Returns:
@@ -2862,10 +3011,15 @@ class GlueLLM:
                 else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
             )
         effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else self.rate_limit_config
-        if rate_limit_algorithm is not None:
-            effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
         effective_eval_store = None if enable_eval_recording is False else self.eval_store
-        effective_model_kwargs = {**self.model_kwargs, **model_kwargs}
+        call_model_kwargs = dict(model_kwargs)
+        override_max_tool_iterations = call_model_kwargs.pop("max_tool_iterations", None)
+        effective_max_tool_iterations = (
+            override_max_tool_iterations
+            if override_max_tool_iterations is not None
+            else self.max_tool_iterations
+        )
+        effective_model_kwargs = {**self.model_kwargs, **call_model_kwargs}
         if reasoning_effort is not None:
             effective_model_kwargs["reasoning_effort"] = reasoning_effort
         if logprobs is not None:
@@ -2876,18 +3030,8 @@ class GlueLLM:
             effective_model_kwargs["session_label"] = session_label
         if parallel_tool_calls is not None:
             effective_model_kwargs["parallel_tool_calls"] = parallel_tool_calls
-        effective_summarize_context = summarize_context if summarize_context is not None else self.summarize_context
-        effective_summarize_context_threshold = (
-            summarize_context_threshold
-            if summarize_context_threshold is not None
-            else self.summarize_context_threshold
-        )
-        effective_summarize_context_model = summarize_context_model or self.summarize_context_model or self.model
-        effective_summarize_context_keep_recent = (
-            summarize_context_keep_recent
-            if summarize_context_keep_recent is not None
-            else self.summarize_context_keep_recent
-        )
+        effective_summarize_cfg = _merge_summarize_context_for_call(self._summarize_context_cfg, summarize_context)
+        effective_summarize_context_model = _summarize_model_for_call(effective_summarize_cfg, model or self.model)
 
         # Set correlation ID if provided
         if correlation_id:
@@ -2979,21 +3123,28 @@ class GlueLLM:
                 # PHASE 1: Tool execution loop (if tools are provided and execute_tools is True)
                 if active_tools and execute_tools:
                     logger.debug(
-                        f"Starting tool execution phase: max_iterations={self.max_tool_iterations}, "
+                        f"Starting tool execution phase: max_iterations={effective_max_tool_iterations}, "
                         f"tools_available={len(active_tools)}, tool_mode={effective_tool_mode}"
                     )
                     _sc_pre_iter_hooks = _sc_merged_registry.get_hooks(HookStage.PRE_ITERATION)
                     _sc_post_iter_hooks = _sc_merged_registry.get_hooks(HookStage.POST_ITERATION)
-                    for iteration in range(self.max_tool_iterations):
-                        logger.debug(f"Tool execution iteration {iteration + 1}/{self.max_tool_iterations}")
+                    for iteration in range(effective_max_tool_iterations):
+                        logger.debug(f"Tool execution iteration {iteration + 1}/{effective_max_tool_iterations}")
 
                         try:
                             # Context summarization: compress old messages when threshold is exceeded
-                            if effective_summarize_context and len(messages) > effective_summarize_context_threshold:
+                            _thr_sc = effective_summarize_cfg.threshold
+                            _kr_sc = effective_summarize_cfg.keep_recent
+                            if effective_summarize_cfg.enabled and _thr_sc is not None and len(messages) > _thr_sc:
                                 messages = await _summarize_old_messages(
                                     messages,
-                                    keep_recent=effective_summarize_context_keep_recent,
+                                    keep_recent=_kr_sc
+                                    if _kr_sc is not None
+                                    else settings.default_summarize_context_keep_recent,
                                     model=effective_summarize_context_model,
+                                    use_aaak=self.aaak_compression_enabled,
+                                    aaak_model=self.aaak_compression_model,
+                                    completion_extra=effective_model_kwargs,
                                 )
 
                             if _sc_pre_iter_hooks:
@@ -3116,7 +3267,7 @@ class GlueLLM:
                                     sinks=sinks,
                                 )
                                 # Update system prompt to reflect matched tools (no longer router)
-                                messages[0]["content"] = self._format_system_prompt(tools=active_tools)
+                                self._apply_system_prompt_after_tool_route(messages, active_tools)
                                 continue
 
                             # Add assistant message with tool calls to history (dict for any_llm validation)
@@ -3138,7 +3289,7 @@ class GlueLLM:
                                 messages.append(r["message"])
 
                             if effective_condense:
-                                _condense_tool_round(messages)
+                                _condense_tool_round(messages, aaak_tool_condensing=self.aaak_tool_condensing)
                         # Continue to next iteration
                         else:
                             # LLM didn't call any tools - it has enough info, break out of tool loop
@@ -3154,7 +3305,7 @@ class GlueLLM:
                             break
                     else:
                         # Exhausted all iterations with tool calls - still need structured output
-                        logger.debug(f"Reached max tool iterations ({self.max_tool_iterations})")
+                        logger.debug(f"Reached max tool iterations ({effective_max_tool_iterations})")
 
                 # PHASE 2: Final structured output call
                 logger.debug(f"Requesting structured output: response_format={response_format.__name__}")
@@ -3444,6 +3595,18 @@ class GlueLLM:
             instructions=self.system_prompt,
         ).strip()
 
+    def _apply_system_prompt_after_tool_route(
+        self,
+        messages: list[dict[str, Any]],
+        active_tools: list[Callable],
+    ) -> None:
+        """Set system message content after dynamic routing; keep AAAK decode preamble if enabled."""
+        messages[0]["content"] = self._format_system_prompt(tools=active_tools)
+        if self.aaak_compression_enabled or self.aaak_tool_condensing:
+            from gluellm.compression.aaak import AAAKCompressor
+
+            AAAKCompressor.ensure_preamble_in_system(messages[0])
+
     def _find_tool(self, tool_name: str, tools: list[Callable] | None = None) -> Callable | None:
         """Find a tool by name.
 
@@ -3492,8 +3655,11 @@ class GlueLLM:
                 continue
             try:
                 coerced[param_name] = _coerce_pydantic_value(value, annotation)
-            except Exception:
-                pass  # leave as-is; the tool or error handler will surface the problem
+            except Exception as coerce_err:
+                logger.debug(
+                    f"Pydantic coercion failed for param '{param_name}' "
+                    f"({type(coerce_err).__name__}: {coerce_err}); passing raw value"
+                )
         return coerced
 
     async def _execute_tool_calls_round(
@@ -3708,86 +3874,98 @@ class GlueLLM:
     async def stream_complete(
         self,
         user_message: str,
-        execute_tools: bool = ...,
+        # -- Core --
         model: str | None = ...,
         guardrails: GuardrailsConfig | None = ...,
         response_format: type[T] = ...,
-        on_status: OnStatusCallback = ...,
-        correlation_id: str | None = ...,
-        request_timeout: float | None = ...,
-        connect_timeout: float | None = ...,
+        # -- Model generation --
         max_tokens: int | None = ...,
+        # -- Tools --
         condense_tool_messages: bool | None = ...,
-        tool_mode: ToolMode | None = ...,
+        execute_tools: bool = ...,
         tool_execution_order: ToolExecutionOrder | None = ...,
-        retry_enabled: bool | None = ...,
-        retry_config: RetryConfig | None = ...,
-        rate_limit_algorithm: RateLimitAlgorithm | str | None = ...,
+        tool_mode: ToolMode | None = ...,
+        # -- Timeouts --
+        connect_timeout: float | None = ...,
+        request_timeout: float | None = ...,
+        # -- Resilience --
         rate_limit_config: RateLimitConfig | None = ...,
-        track_costs: bool | None = ...,
+        retry_config: RetryConfig | None = ...,
+        retry_enabled: bool | None = ...,
+        # -- Context management --
+        summarize_context: SummarizeContextConfig | bool | None = ...,
+        # -- Observability / behavior --
+        correlation_id: str | None = ...,
         enable_eval_recording: bool | None = ...,
+        on_status: OnStatusCallback = ...,
         sinks: list[Sink] | None = ...,
-        summarize_context: bool | None = ...,
-        summarize_context_threshold: int | None = ...,
-        summarize_context_model: str | None = ...,
-        summarize_context_keep_recent: int | None = ...,
+        track_costs: bool | None = ...,
+        **model_kwargs: Any,
     ) -> AsyncIterator[StreamingChunk[T]]: ...
 
     @overload
     async def stream_complete(
         self,
         user_message: str,
-        execute_tools: bool = ...,
+        # -- Core --
         model: str | None = ...,
         guardrails: GuardrailsConfig | None = ...,
         response_format: None = ...,
-        on_status: OnStatusCallback = ...,
-        correlation_id: str | None = ...,
-        request_timeout: float | None = ...,
-        connect_timeout: float | None = ...,
+        # -- Model generation --
         max_tokens: int | None = ...,
+        # -- Tools --
         condense_tool_messages: bool | None = ...,
-        tool_mode: ToolMode | None = ...,
+        execute_tools: bool = ...,
         tool_execution_order: ToolExecutionOrder | None = ...,
-        retry_enabled: bool | None = ...,
-        retry_config: RetryConfig | None = ...,
-        rate_limit_algorithm: RateLimitAlgorithm | str | None = ...,
+        tool_mode: ToolMode | None = ...,
+        # -- Timeouts --
+        connect_timeout: float | None = ...,
+        request_timeout: float | None = ...,
+        # -- Resilience --
         rate_limit_config: RateLimitConfig | None = ...,
-        track_costs: bool | None = ...,
+        retry_config: RetryConfig | None = ...,
+        retry_enabled: bool | None = ...,
+        # -- Context management --
+        summarize_context: SummarizeContextConfig | bool | None = ...,
+        # -- Observability / behavior --
+        correlation_id: str | None = ...,
         enable_eval_recording: bool | None = ...,
+        on_status: OnStatusCallback = ...,
         sinks: list[Sink] | None = ...,
-        summarize_context: bool | None = ...,
-        summarize_context_threshold: int | None = ...,
-        summarize_context_model: str | None = ...,
-        summarize_context_keep_recent: int | None = ...,
+        track_costs: bool | None = ...,
+        **model_kwargs: Any,
     ) -> AsyncIterator[StreamingChunk[Any]]: ...
 
     async def stream_complete(
         self,
         user_message: str,
-        execute_tools: bool = True,
+        # -- Core --
         model: str | None = None,
         guardrails: GuardrailsConfig | None = None,
         response_format: type[T] | None = None,
-        on_status: OnStatusCallback = None,
-        correlation_id: str | None = None,
-        request_timeout: float | None = None,
-        connect_timeout: float | None = None,
+        # -- Model generation --
         max_tokens: int | None = None,
+        # -- Tools --
         condense_tool_messages: bool | None = None,
-        tool_mode: ToolMode | None = None,
+        execute_tools: bool = True,
         tool_execution_order: ToolExecutionOrder | None = None,
-        retry_enabled: bool | None = None,
-        retry_config: RetryConfig | None = None,
-        rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
+        tool_mode: ToolMode | None = None,
+        # -- Timeouts --
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
+        # -- Resilience --
         rate_limit_config: RateLimitConfig | None = None,
-        track_costs: bool | None = None,
+        retry_config: RetryConfig | None = None,
+        retry_enabled: bool | None = None,
+        # -- Context management --
+        summarize_context: SummarizeContextConfig | bool | None = None,
+        # -- Observability / behavior --
+        correlation_id: str | None = None,
         enable_eval_recording: bool | None = None,
+        on_status: OnStatusCallback = None,
         sinks: list[Sink] | None = None,
-        summarize_context: bool | None = None,
-        summarize_context_threshold: int | None = None,
-        summarize_context_model: str | None = None,
-        summarize_context_keep_recent: int | None = None,
+        track_costs: bool | None = None,
+        **model_kwargs: Any,
     ) -> AsyncIterator[StreamingChunk[Any]]:
         """Stream completion with automatic tool execution.
 
@@ -3821,12 +3999,11 @@ class GlueLLM:
             tool_mode: Override the instance-level tool_mode for this call ("standard" or "dynamic").
             retry_enabled: If False, disables retries for this call (shorthand for retry_config.retry_enabled=False).
             retry_config: Per-call retry configuration override (includes optional callback).
+            rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
-            summarize_context: Override the instance-level summarize_context setting for this call.
-            summarize_context_threshold: Override the message-count threshold that triggers summarization.
-            summarize_context_model: Override the model used for the summarization call.
-            summarize_context_keep_recent: Override how many recent messages are kept verbatim.
+            summarize_context: Override instance summarization (bool or ``SummarizeContextConfig``).
+            **model_kwargs: Extra params for acompletion (e.g. temperature, top_p), merged over instance defaults.
 
         Yields:
             StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)
@@ -3862,20 +4039,19 @@ class GlueLLM:
                 else RetryConfig(**{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback})
             )
         effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else self.rate_limit_config
-        if rate_limit_algorithm is not None:
-            effective_rate_limit_config = RateLimitConfig(algorithm=rate_limit_algorithm)
-        effective_summarize_context = summarize_context if summarize_context is not None else self.summarize_context
-        effective_summarize_context_threshold = (
-            summarize_context_threshold
-            if summarize_context_threshold is not None
-            else self.summarize_context_threshold
+        effective_summarize_cfg = _merge_summarize_context_for_call(self._summarize_context_cfg, summarize_context)
+        effective_summarize_context_model = _summarize_model_for_call(effective_summarize_cfg, model or self.model)
+
+        # Instance sampling / provider extras (parity with complete() → _llm_call)
+        stream_call_kwargs = dict(model_kwargs)
+        override_stream_max_tool_iterations = stream_call_kwargs.pop("max_tool_iterations", None)
+        effective_stream_max_tool_iterations = (
+            override_stream_max_tool_iterations
+            if override_stream_max_tool_iterations is not None
+            else self.max_tool_iterations
         )
-        effective_summarize_context_model = summarize_context_model or self.summarize_context_model or self.model
-        effective_summarize_context_keep_recent = (
-            summarize_context_keep_recent
-            if summarize_context_keep_recent is not None
-            else self.summarize_context_keep_recent
-        )
+        effective_stream_model_kwargs = {**self.model_kwargs, **stream_call_kwargs}
+        effective_eval_store = None if enable_eval_recording is False else self.eval_store
 
         # Set correlation ID if provided
         if correlation_id:
@@ -3907,12 +4083,15 @@ class GlueLLM:
         # Add user message to conversation (after input guardrails)
         self._conversation.add_message(Role.USER, user_message)
 
-        # Build initial messages
+        # Build initial messages (snapshot for eval recording matches complete())
+        system_prompt_content = self._format_system_prompt(tools=active_tools)
         system_message = {
             "role": "system",
-            "content": self._format_system_prompt(tools=active_tools),
+            "content": system_prompt_content,
         }
         messages = [system_message] + self._conversation.messages_dict
+        messages_snapshot = messages.copy()
+        start_time = time.time()
 
         tool_execution_history = []
         tool_calls_made = 0
@@ -3921,34 +4100,180 @@ class GlueLLM:
         _stream_pre_iter_hooks = _stream_merged_registry.get_hooks(HookStage.PRE_ITERATION)
         _stream_post_iter_hooks = _stream_merged_registry.get_hooks(HookStage.POST_ITERATION)
 
+        error: Exception | None = None
+        eval_recorded = False
+
+        async def record_stream_eval_success(final_text: str, *, structured_out: Any = None) -> None:
+            nonlocal eval_recorded
+            if not effective_eval_store:
+                return
+            _eval_result = ExecutionResult(
+                final_response=final_text,
+                tool_calls_made=tool_calls_made,
+                tool_execution_history=tool_execution_history,
+                raw_response=None,
+                tokens_used=None,
+                estimated_cost_usd=None,
+                model=model or self.model,
+                structured_output=structured_out,
+            )
+            await _record_eval_data(
+                eval_store=effective_eval_store,
+                user_message=user_message,
+                system_prompt=system_prompt_content,
+                model=model or self.model,
+                messages_snapshot=messages_snapshot,
+                start_time=start_time,
+                result=_eval_result,
+                tools_available=self.tools,
+                on_eval_record_hooks=_stream_merged_registry.get_hooks(HookStage.PRE_EVAL_RECORD),
+                hook_manager=self._hook_manager,
+            )
+            eval_recorded = True
+
         # Tool execution loop
-        for iteration in range(self.max_tool_iterations):
-            try:
-                # Context summarization: compress old messages when threshold is exceeded
-                if effective_summarize_context and len(messages) > effective_summarize_context_threshold:
-                    messages = await _summarize_old_messages(
-                        messages,
-                        keep_recent=effective_summarize_context_keep_recent,
-                        model=effective_summarize_context_model,
-                    )
+        try:
+            for iteration in range(effective_stream_max_tool_iterations):
+                assistant_message = None
+                try:
+                    # Context summarization: compress old messages when threshold is exceeded
+                    _thr_st = effective_summarize_cfg.threshold
+                    _kr_st = effective_summarize_cfg.keep_recent
+                    if effective_summarize_cfg.enabled and _thr_st is not None and len(messages) > _thr_st:
+                        messages = await _summarize_old_messages(
+                            messages,
+                            keep_recent=_kr_st
+                            if _kr_st is not None
+                            else settings.default_summarize_context_keep_recent,
+                            model=effective_summarize_context_model,
+                            use_aaak=self.aaak_compression_enabled,
+                            aaak_model=self.aaak_compression_model,
+                            completion_extra=effective_stream_model_kwargs,
+                        )
 
-                if _stream_pre_iter_hooks:
-                    _stream_last_user = next(
-                        (m.get("content", "") or "" for m in reversed(messages) if m.get("role") == "user"),
-                        "",
-                    )
-                    if isinstance(_stream_last_user, list):
-                        _stream_last_user = ""
-                    await self._hook_manager.execute_hooks(
-                        content=_stream_last_user,
-                        stage=HookStage.PRE_ITERATION,
-                        metadata={"iteration": iteration + 1, "tool_count": len(active_tools)},
-                        hooks=_stream_pre_iter_hooks,
-                    )
+                    if _stream_pre_iter_hooks:
+                        _stream_last_user = next(
+                            (m.get("content", "") or "" for m in reversed(messages) if m.get("role") == "user"),
+                            "",
+                        )
+                        if isinstance(_stream_last_user, list):
+                            _stream_last_user = ""
+                        await self._hook_manager.execute_hooks(
+                            content=_stream_last_user,
+                            stage=HookStage.PRE_ITERATION,
+                            metadata={"iteration": iteration + 1, "tool_count": len(active_tools)},
+                            hooks=_stream_pre_iter_hooks,
+                        )
 
-                # Try streaming first (if no tools or tools disabled, stream directly)
-                if not execute_tools or not active_tools:
-                    # Simple streaming without tool execution
+                    # Try streaming first (if no tools or tools disabled, stream directly)
+                    if not execute_tools or not active_tools:
+                        # Simple streaming without tool execution
+                        await emit_status(
+                            ProcessEvent(
+                                kind="stream_start",
+                                correlation_id=get_correlation_id(),
+                                timestamp=time.time(),
+                            ),
+                            on_status,
+                            sinks=sinks,
+                        )
+                        # Providers (e.g. OpenAI) do not support response_format with stream=True;
+                        # we stream plain text and parse into response_format when the stream ends.
+                        stream_iter = await self._llm_call(
+                            _stream_merged_registry,
+                            messages=messages,
+                            model=model or self.model,
+                            tools=None,
+                            response_format=None,
+                            stream=True,
+                            request_timeout=request_timeout,
+                            connect_timeout=connect_timeout,
+                            max_tokens=effective_max_tokens,
+                            retry_config=effective_retry_config,
+                            rate_limit_config=effective_rate_limit_config,
+                            **effective_stream_model_kwargs,
+                        )
+                        async for chunk_response in stream_iter:
+                            if hasattr(chunk_response, "choices") and chunk_response.choices:
+                                delta = chunk_response.choices[0].delta
+                                if hasattr(delta, "content") and delta.content:
+                                    accumulated_content += delta.content
+                                    chunk = StreamingChunk(
+                                        content=delta.content,
+                                        done=False,
+                                        tool_calls_made=tool_calls_made,
+                                    )
+                                    await emit_status(
+                                        ProcessEvent(
+                                            kind="stream_chunk",
+                                            correlation_id=get_correlation_id(),
+                                            timestamp=time.time(),
+                                            content=delta.content,
+                                            done=False,
+                                        ),
+                                        on_status,
+                                        sinks=sinks,
+                                    )
+                                    yield chunk
+                        # Final chunk - run output guardrails on accumulated content
+                        await emit_status(
+                            ProcessEvent(
+                                kind="stream_end",
+                                correlation_id=get_correlation_id(),
+                                timestamp=time.time(),
+                            ),
+                            on_status,
+                            sinks=sinks,
+                        )
+                        structured_output = None
+                        if response_format and accumulated_content:
+                            structured_output = _parse_structured_content(accumulated_content, response_format)
+                        if accumulated_content:
+                            if effective_guardrails:
+                                try:
+                                    accumulated_content = await self._run_guardrails(
+                                        accumulated_content, effective_guardrails, "output",
+                                        _stream_merged_registry,
+                                    )
+                                except GuardrailRejectedError as e:
+                                    # For streaming, we can't easily retry, so raise blocked error
+                                    logger.warning(f"Output guardrails rejected streamed content: {e.reason}")
+                                    raise GuardrailBlockedError(
+                                        f"Output guardrails rejected streamed content: {e.reason}",
+                                        guardrail_name=e.guardrail_name,
+                                    ) from e
+                            self._conversation.add_message(Role.ASSISTANT, accumulated_content)
+                            yield StreamingChunk(
+                                content="",
+                                done=True,
+                                tool_calls_made=tool_calls_made,
+                                structured_output=structured_output,
+                            )
+                        else:
+                            yield StreamingChunk(
+                                content="",
+                                done=True,
+                                tool_calls_made=tool_calls_made,
+                                structured_output=structured_output,
+                            )
+                        if _stream_post_iter_hooks:
+                            await self._hook_manager.execute_hooks(
+                                content=accumulated_content,
+                                stage=HookStage.POST_ITERATION,
+                                metadata={
+                                    "iteration": iteration + 1,
+                                    "has_tool_calls": False,
+                                    "tool_count": 0,
+                                },
+                                hooks=_stream_post_iter_hooks,
+                            )
+                        await record_stream_eval_success(
+                            accumulated_content,
+                            structured_out=structured_output,
+                        )
+                        return
+
+                    # With tools: stream so we get token-by-token text and can detect tool_calls from the stream
                     await emit_status(
                         ProcessEvent(
                             kind="stream_start",
@@ -3958,13 +4283,23 @@ class GlueLLM:
                         on_status,
                         sinks=sinks,
                     )
-                    # Providers (e.g. OpenAI) do not support response_format with stream=True;
-                    # we stream plain text and parse into response_format when the stream ends.
+                    await emit_status(
+                        ProcessEvent(
+                            kind="llm_call_start",
+                            correlation_id=get_correlation_id(),
+                            timestamp=time.time(),
+                            iteration=iteration + 1,
+                            model=model or self.model,
+                            message_count=len(messages),
+                        ),
+                        on_status,
+                        sinks=sinks,
+                    )
                     stream_iter = await self._llm_call(
                         _stream_merged_registry,
                         messages=messages,
                         model=model or self.model,
-                        tools=None,
+                        tools=active_tools if active_tools else None,
                         response_format=None,
                         stream=True,
                         request_timeout=request_timeout,
@@ -3972,379 +4307,293 @@ class GlueLLM:
                         max_tokens=effective_max_tokens,
                         retry_config=effective_retry_config,
                         rate_limit_config=effective_rate_limit_config,
+                        **effective_stream_model_kwargs,
                     )
-                    async for chunk_response in stream_iter:
-                        if hasattr(chunk_response, "choices") and chunk_response.choices:
-                            delta = chunk_response.choices[0].delta
-                            if hasattr(delta, "content") and delta.content:
-                                accumulated_content += delta.content
-                                chunk = StreamingChunk(
-                                    content=delta.content,
+                    accumulated_content = ""
+                    assistant_message = None
+                    async for is_content, content_or_accumulated, msg in _consume_stream_with_tools(stream_iter):
+                        if is_content:
+                            await emit_status(
+                                ProcessEvent(
+                                    kind="stream_chunk",
+                                    correlation_id=get_correlation_id(),
+                                    timestamp=time.time(),
+                                    content=content_or_accumulated,
                                     done=False,
-                                    tool_calls_made=tool_calls_made,
-                                )
-                                await emit_status(
-                                    ProcessEvent(
-                                        kind="stream_chunk",
-                                        correlation_id=get_correlation_id(),
-                                        timestamp=time.time(),
-                                        content=delta.content,
-                                        done=False,
-                                    ),
-                                    on_status,
-                                    sinks=sinks,
-                                )
-                                yield chunk
-                    # Final chunk - run output guardrails on accumulated content
+                                ),
+                                on_status,
+                                sinks=sinks,
+                            )
+                            yield StreamingChunk(
+                                content=content_or_accumulated,
+                                done=False,
+                                tool_calls_made=tool_calls_made,
+                            )
+                        else:
+                            accumulated_content = content_or_accumulated
+                            assistant_message = msg
+                            break
+                    has_tool_calls = bool(assistant_message and getattr(assistant_message, "tool_calls", None))
                     await emit_status(
                         ProcessEvent(
-                            kind="stream_end",
+                            kind="llm_call_end",
                             correlation_id=get_correlation_id(),
                             timestamp=time.time(),
+                            iteration=iteration + 1,
+                            model=model or self.model,
+                            has_tool_calls=has_tool_calls,
+                            token_usage=None,
                         ),
                         on_status,
                         sinks=sinks,
                     )
-                    structured_output = None
-                    if response_format and accumulated_content:
-                        structured_output = _parse_structured_content(accumulated_content, response_format)
-                    if accumulated_content:
-                        if effective_guardrails:
-                            try:
-                                accumulated_content = await self._run_guardrails(
-                                    accumulated_content, effective_guardrails, "output",
-                                    _stream_merged_registry,
-                                )
-                            except GuardrailRejectedError as e:
-                                # For streaming, we can't easily retry, so raise blocked error
-                                logger.warning(f"Output guardrails rejected streamed content: {e.reason}")
-                                raise GuardrailBlockedError(
-                                    f"Output guardrails rejected streamed content: {e.reason}",
-                                    guardrail_name=e.guardrail_name,
-                                ) from e
-                        self._conversation.add_message(Role.ASSISTANT, accumulated_content)
-                        yield StreamingChunk(
-                            content="",
-                            done=True,
-                            tool_calls_made=tool_calls_made,
-                            structured_output=structured_output,
-                        )
-                    else:
-                        yield StreamingChunk(
-                            content="",
-                            done=True,
-                            tool_calls_made=tool_calls_made,
-                            structured_output=structured_output,
-                        )
-                    if _stream_post_iter_hooks:
-                        await self._hook_manager.execute_hooks(
-                            content=accumulated_content,
-                            stage=HookStage.POST_ITERATION,
-                            metadata={
-                                "iteration": iteration + 1,
-                                "has_tool_calls": False,
-                                "tool_count": 0,
-                            },
-                            hooks=_stream_post_iter_hooks,
-                        )
-                    return
+                except LLMError as e:
+                    cause_chain = _build_cause_chain(e)
+                    logger.error(
+                        f"LLM call failed on iteration {iteration + 1}: {e}, "
+                        f"error_type={type(e).__name__}, cause_chain={cause_chain}"
+                    )
+                    error_msg = f"Failed during tool execution loop (iteration {iteration + 1}/{effective_stream_max_tool_iterations})"
+                    raise type(e)(f"{error_msg}: {e}") from e
 
-                # With tools: stream so we get token-by-token text and can detect tool_calls from the stream
-                await emit_status(
-                    ProcessEvent(
-                        kind="stream_start",
-                        correlation_id=get_correlation_id(),
-                        timestamp=time.time(),
-                    ),
-                    on_status,
-                    sinks=sinks,
-                )
-                await emit_status(
-                    ProcessEvent(
-                        kind="llm_call_start",
-                        correlation_id=get_correlation_id(),
-                        timestamp=time.time(),
-                        iteration=iteration + 1,
-                        model=model or self.model,
-                        message_count=len(messages),
-                    ),
-                    on_status,
-                    sinks=sinks,
-                )
-                stream_iter = await self._llm_call(
-                    _stream_merged_registry,
-                    messages=messages,
-                    model=model or self.model,
-                    tools=active_tools if active_tools else None,
-                    response_format=None,
-                    stream=True,
-                    request_timeout=request_timeout,
-                    connect_timeout=connect_timeout,
-                    max_tokens=effective_max_tokens,
-                    retry_config=effective_retry_config,
-                    rate_limit_config=effective_rate_limit_config,
-                )
-                accumulated_content = ""
-                assistant_message = None
-                async for is_content, content_or_accumulated, msg in _consume_stream_with_tools(stream_iter):
-                    if is_content:
+                if _stream_post_iter_hooks:
+                    _stream_has_tools = bool(
+                        execute_tools and active_tools
+                        and assistant_message and getattr(assistant_message, "tool_calls", None)
+                    )
+                    await self._hook_manager.execute_hooks(
+                        content=accumulated_content,
+                        stage=HookStage.POST_ITERATION,
+                        metadata={
+                            "iteration": iteration + 1,
+                            "has_tool_calls": _stream_has_tools,
+                            "tool_count": len(active_tools),
+                        },
+                        hooks=_stream_post_iter_hooks,
+                    )
+
+                # Check if model wants to call tools (from streamed response)
+                if execute_tools and active_tools and assistant_message and getattr(assistant_message, "tool_calls", None):
+                    tool_calls = assistant_message.tool_calls
+                    logger.info(f"Stream iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
+
+                    # Handle router call: resolve tools, do NOT append messages, continue
+                    if router_tool is not None and is_router_call(tool_calls):
+                        query = json.loads(tool_calls[0].function.arguments)["query"]
+                        user_context = next(
+                            (m.get("content", "") or "" for m in messages if m.get("role") == "user"),
+                            query,
+                        )
+                        if isinstance(user_context, list):
+                            user_context = query
+                        matched = await self._route_tools(
+                            user_context,
+                            dynamic_tools,
+                            _stream_merged_registry,
+                            model=self.tool_route_model,
+                            api_key=None,
+                            timeout=request_timeout,
+                        )
+                        active_tools = matched + static_tools
+                        logger.debug(
+                            f"[{get_correlation_id()}] Dynamic tool routing complete: "
+                            f"matched={len(matched)}, static={len(static_tools)}, total_active={len(active_tools)}"
+                        )
                         await emit_status(
                             ProcessEvent(
-                                kind="stream_chunk",
+                                kind="tool_route",
                                 correlation_id=get_correlation_id(),
                                 timestamp=time.time(),
-                                content=content_or_accumulated,
-                                done=False,
+                                route_query=query,
+                                matched_tools=[t.__name__ for t in matched],
                             ),
                             on_status,
                             sinks=sinks,
                         )
-                        yield StreamingChunk(
-                            content=content_or_accumulated,
-                            done=False,
-                            tool_calls_made=tool_calls_made,
-                        )
-                    else:
-                        accumulated_content = content_or_accumulated
-                        assistant_message = msg
-                        break
-                has_tool_calls = bool(assistant_message and getattr(assistant_message, "tool_calls", None))
+                        # Update system prompt to reflect matched tools (no longer router)
+                        self._apply_system_prompt_after_tool_route(messages, active_tools)
+                        continue
+
+                    # Yield a chunk indicating tool execution is happening
+                    yield StreamingChunk(
+                        content="[Executing tools...]",
+                        done=False,
+                        tool_calls_made=tool_calls_made,
+                    )
+
+                    # Add assistant message with tool calls to history (dict for any_llm validation)
+                    msg_dict = _streamed_assistant_message_to_dict(assistant_message)
+                    if msg_dict is not None:
+                        messages.append(msg_dict)
+
+                    # Execute tool calls (sequential or parallel per effective_tool_execution_order)
+                    round_results = await self._execute_tool_calls_round(
+                        tool_calls=tool_calls,
+                        active_tools=active_tools,
+                        parallel=(effective_tool_execution_order == "parallel"),
+                        iteration=iteration + 1,
+                        correlation_id=get_correlation_id(),
+                        on_status=on_status,
+                        sinks=sinks,
+                    )
+                    tool_calls_made += len(round_results)
+                    for r in round_results:
+                        tool_execution_history.append(r["history"])
+                        messages.append(r["message"])
+
+                    if effective_condense:
+                        _condense_tool_round(messages, aaak_tool_condensing=self.aaak_tool_condensing)
+
+                    # Continue loop to get next response (stream again)
+                    continue
+
+                # No more tool calls: we streamed the final text; run guardrails and finish
+                final_content = accumulated_content or ""
+
+                # Output guardrails with retry loop (similar to complete())
+                if effective_guardrails and final_content:
+                    max_retries = effective_guardrails.max_output_guardrail_retries
+                    output_retry_count = 0
+                    while output_retry_count <= max_retries:
+                        try:
+                            # Run output guardrails
+                            final_content = await self._run_guardrails(
+                                final_content, effective_guardrails, "output",
+                                _stream_merged_registry, attempt=output_retry_count,
+                            )
+                            # Guardrails passed, break out of retry loop
+                            break
+                        except GuardrailRejectedError as e:
+                            output_retry_count += 1
+                            if output_retry_count > max_retries:
+                                # Max retries exceeded, raise blocked error
+                                logger.warning(f"Output guardrails failed after {max_retries} retries: {e.reason}")
+                                raise GuardrailBlockedError(
+                                    f"Output guardrails failed after {max_retries} retries: {e.reason}",
+                                    guardrail_name=e.guardrail_name,
+                                ) from e
+
+                            # Add rejected response to conversation (for context)
+                            messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": final_content,
+                                }
+                            )
+
+                            # Append feedback message requesting revised response
+                            feedback_message = (
+                                f"Your previous response was rejected: {e.reason}. "
+                                "Please provide a revised response that addresses this issue."
+                            )
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": feedback_message,
+                                }
+                            )
+                            logger.info(
+                                f"Output guardrail rejected response (attempt {output_retry_count}/{max_retries}): "
+                                f"{e.reason}. Requesting revised response."
+                            )
+
+                            # Call LLM again for revised response (no tools, just text response)
+                            try:
+                                response = await self._llm_call(
+                                    _stream_merged_registry,
+                                    messages=messages,
+                                    model=model or self.model,
+                                    tools=None,  # No tools on retry
+                                    request_timeout=request_timeout,
+                                    connect_timeout=connect_timeout,
+                                    max_tokens=effective_max_tokens,
+                                    retry_config=effective_retry_config,
+                                    rate_limit_config=effective_rate_limit_config,
+                                    **effective_stream_model_kwargs,
+                                )
+                            except LLMError as llm_error:
+                                # LLM call failed during retry, raise blocked error
+                                raise GuardrailBlockedError(
+                                    f"Failed to get revised response after guardrail rejection: {llm_error}",
+                                    guardrail_name=e.guardrail_name,
+                                ) from llm_error
+
+                            if not response.choices:
+                                raise InvalidRequestError(
+                                    "Empty response from LLM provider during guardrail retry"
+                                ) from None
+
+                            # Get the revised response
+                            final_content = response.choices[0].message.content or ""
+                            logger.debug(
+                                f"Received revised response (length={len(final_content)}), re-running output guardrails"
+                            )
+                            # Continue loop to re-check guardrails
+
+                # Stream the final response character by character (simulated streaming)
+                # In a real implementation, you'd stream from the API
                 await emit_status(
                     ProcessEvent(
-                        kind="llm_call_end",
+                        kind="stream_end",
                         correlation_id=get_correlation_id(),
                         timestamp=time.time(),
-                        iteration=iteration + 1,
-                        model=model or self.model,
-                        has_tool_calls=has_tool_calls,
-                        token_usage=None,
                     ),
                     on_status,
                     sinks=sinks,
                 )
-            except LLMError as e:
-                cause_chain = _build_cause_chain(e)
-                logger.error(
-                    f"LLM call failed on iteration {iteration + 1}: {e}, "
-                    f"error_type={type(e).__name__}, cause_chain={cause_chain}"
-                )
-                error_msg = f"Failed during tool execution loop (iteration {iteration + 1}/{self.max_tool_iterations})"
-                raise type(e)(f"{error_msg}: {e}") from e
-
-            if _stream_post_iter_hooks:
-                _stream_has_tools = bool(
-                    execute_tools and active_tools
-                    and assistant_message and getattr(assistant_message, "tool_calls", None)
-                )
-                await self._hook_manager.execute_hooks(
-                    content=accumulated_content,
-                    stage=HookStage.POST_ITERATION,
-                    metadata={
-                        "iteration": iteration + 1,
-                        "has_tool_calls": _stream_has_tools,
-                        "tool_count": len(active_tools),
-                    },
-                    hooks=_stream_post_iter_hooks,
-                )
-
-            # Check if model wants to call tools (from streamed response)
-            if execute_tools and active_tools and assistant_message and getattr(assistant_message, "tool_calls", None):
-                tool_calls = assistant_message.tool_calls
-                logger.info(f"Stream iteration {iteration + 1}: Model requested {len(tool_calls)} tool call(s)")
-
-                # Handle router call: resolve tools, do NOT append messages, continue
-                if router_tool is not None and is_router_call(tool_calls):
-                    query = json.loads(tool_calls[0].function.arguments)["query"]
-                    user_context = next(
-                        (m.get("content", "") or "" for m in messages if m.get("role") == "user"),
-                        query,
+                structured_output = None
+                if response_format and final_content:
+                    structured_output = _parse_structured_content(final_content, response_format)
+                if final_content:
+                    # Text was already streamed incrementally above; terminal chunk carries metadata only
+                    self._conversation.add_message(Role.ASSISTANT, final_content)
+                    yield StreamingChunk(
+                        content="",
+                        done=True,
+                        tool_calls_made=tool_calls_made,
+                        structured_output=structured_output,
                     )
-                    if isinstance(user_context, list):
-                        user_context = query
-                    matched = await self._route_tools(
-                        user_context,
-                        dynamic_tools,
-                        _stream_merged_registry,
-                        model=self.tool_route_model,
-                        api_key=None,
-                        timeout=request_timeout,
+                else:
+                    yield StreamingChunk(
+                        content="",
+                        done=True,
+                        tool_calls_made=tool_calls_made,
+                        structured_output=structured_output,
                     )
-                    active_tools = matched + static_tools
-                    logger.debug(
-                        f"[{get_correlation_id()}] Dynamic tool routing complete: "
-                        f"matched={len(matched)}, static={len(static_tools)}, total_active={len(active_tools)}"
-                    )
-                    await emit_status(
-                        ProcessEvent(
-                            kind="tool_route",
-                            correlation_id=get_correlation_id(),
-                            timestamp=time.time(),
-                            route_query=query,
-                            matched_tools=[t.__name__ for t in matched],
-                        ),
-                        on_status,
-                        sinks=sinks,
-                    )
-                    # Update system prompt to reflect matched tools (no longer router)
-                    messages[0]["content"] = self._format_system_prompt(tools=active_tools)
-                    continue
 
-                # Yield a chunk indicating tool execution is happening
-                yield StreamingChunk(
-                    content="[Executing tools...]",
-                    done=False,
-                    tool_calls_made=tool_calls_made,
+                await record_stream_eval_success(
+                    final_content,
+                    structured_out=structured_output,
                 )
+                return
 
-                # Add assistant message with tool calls to history (dict for any_llm validation)
-                msg_dict = _streamed_assistant_message_to_dict(assistant_message)
-                if msg_dict is not None:
-                    messages.append(msg_dict)
-
-                # Execute tool calls (sequential or parallel per effective_tool_execution_order)
-                round_results = await self._execute_tool_calls_round(
-                    tool_calls=tool_calls,
-                    active_tools=active_tools,
-                    parallel=(effective_tool_execution_order == "parallel"),
-                    iteration=iteration + 1,
-                    correlation_id=get_correlation_id(),
-                    on_status=on_status,
-                    sinks=sinks,
-                )
-                tool_calls_made += len(round_results)
-                for r in round_results:
-                    tool_execution_history.append(r["history"])
-                    messages.append(r["message"])
-
-                if effective_condense:
-                    _condense_tool_round(messages)
-
-                # Continue loop to get next response (stream again)
-                continue
-
-            # No more tool calls: we streamed the final text; run guardrails and finish
-            final_content = accumulated_content or ""
-
-            # Output guardrails with retry loop (similar to complete())
-            if effective_guardrails and final_content:
-                max_retries = effective_guardrails.max_output_guardrail_retries
-                output_retry_count = 0
-                while output_retry_count <= max_retries:
-                    try:
-                        # Run output guardrails
-                        final_content = await self._run_guardrails(
-                            final_content, effective_guardrails, "output",
-                            _stream_merged_registry, attempt=output_retry_count,
-                        )
-                        # Guardrails passed, break out of retry loop
-                        break
-                    except GuardrailRejectedError as e:
-                        output_retry_count += 1
-                        if output_retry_count > max_retries:
-                            # Max retries exceeded, raise blocked error
-                            logger.warning(f"Output guardrails failed after {max_retries} retries: {e.reason}")
-                            raise GuardrailBlockedError(
-                                f"Output guardrails failed after {max_retries} retries: {e.reason}",
-                                guardrail_name=e.guardrail_name,
-                            ) from e
-
-                        # Add rejected response to conversation (for context)
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": final_content,
-                            }
-                        )
-
-                        # Append feedback message requesting revised response
-                        feedback_message = (
-                            f"Your previous response was rejected: {e.reason}. "
-                            "Please provide a revised response that addresses this issue."
-                        )
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": feedback_message,
-                            }
-                        )
-                        logger.info(
-                            f"Output guardrail rejected response (attempt {output_retry_count}/{max_retries}): "
-                            f"{e.reason}. Requesting revised response."
-                        )
-
-                        # Call LLM again for revised response (no tools, just text response)
-                        try:
-                            response = await self._llm_call(
-                                _stream_merged_registry,
-                                messages=messages,
-                                model=model or self.model,
-                                tools=None,  # No tools on retry
-                                request_timeout=request_timeout,
-                                connect_timeout=connect_timeout,
-                                max_tokens=effective_max_tokens,
-                                retry_config=effective_retry_config,
-                                rate_limit_config=effective_rate_limit_config,
-                            )
-                        except LLMError as llm_error:
-                            # LLM call failed during retry, raise blocked error
-                            raise GuardrailBlockedError(
-                                f"Failed to get revised response after guardrail rejection: {llm_error}",
-                                guardrail_name=e.guardrail_name,
-                            ) from llm_error
-
-                        if not response.choices:
-                            raise InvalidRequestError(
-                                "Empty response from LLM provider during guardrail retry"
-                            ) from None
-
-                        # Get the revised response
-                        final_content = response.choices[0].message.content or ""
-                        logger.debug(
-                            f"Received revised response (length={len(final_content)}), re-running output guardrails"
-                        )
-                        # Continue loop to re-check guardrails
-
-            # Stream the final response character by character (simulated streaming)
-            # In a real implementation, you'd stream from the API
-            await emit_status(
-                ProcessEvent(
-                    kind="stream_end",
-                    correlation_id=get_correlation_id(),
-                    timestamp=time.time(),
-                ),
-                on_status,
-                sinks=sinks,
+            # Max iterations reached
+            logger.warning(f"Max tool execution iterations ({effective_stream_max_tool_iterations}) reached")
+            yield StreamingChunk(
+                content="Maximum tool execution iterations reached.",
+                done=True,
+                tool_calls_made=tool_calls_made,
             )
-            structured_output = None
-            if response_format and final_content:
-                structured_output = _parse_structured_content(final_content, response_format)
-            if final_content:
-                # For now, yield the full content as a single chunk
-                # In production, this would be actual streaming chunks from the API
-                self._conversation.add_message(Role.ASSISTANT, final_content)
-                yield StreamingChunk(
-                    content=final_content,
-                    done=True,
-                    tool_calls_made=tool_calls_made,
-                    structured_output=structured_output,
-                )
-            else:
-                yield StreamingChunk(
-                    content="",
-                    done=True,
-                    tool_calls_made=tool_calls_made,
-                    structured_output=structured_output,
-                )
+            await record_stream_eval_success("Maximum tool execution iterations reached.")
 
-            return
-
-        # Max iterations reached
-        logger.warning(f"Max tool execution iterations ({self.max_tool_iterations}) reached")
-        yield StreamingChunk(
-            content="Maximum tool execution iterations reached.",
-            done=True,
-            tool_calls_made=tool_calls_made,
-        )
+        except Exception as e:
+            error = e
+            raise
+        finally:
+            if error is not None and not eval_recorded:
+                await _record_eval_data(
+                    eval_store=effective_eval_store,
+                    user_message=user_message,
+                    system_prompt=system_prompt_content,
+                    model=model or self.model,
+                    messages_snapshot=messages_snapshot,
+                    start_time=start_time,
+                    error=error,
+                    tools_available=self.tools,
+                    on_eval_record_hooks=_stream_merged_registry.get_hooks(HookStage.PRE_EVAL_RECORD),
+                    hook_manager=self._hook_manager,
+                )
+            clear_correlation_id()
 
     def reset_conversation(self) -> None:
         """Reset the conversation history."""
@@ -4355,8 +4604,9 @@ class GlueLLM:
         texts: str | list[str],
         model: str | None = None,
         correlation_id: str | None = None,
-        request_timeout: float | None = None,
+        *,
         connect_timeout: float | None = None,
+        request_timeout: float | None = None,
         api_key: str | None = None,
         encoding_format: str | None = None,
         dimensions: int | None = None,
@@ -4368,8 +4618,8 @@ class GlueLLM:
             texts: Single text string or list of text strings to embed
             model: Model identifier (defaults to self.embedding_model)
             correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
-            request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
-            connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
+            connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout); keyword-only.
+            request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout); keyword-only.
             api_key: Optional API key override (for key pool usage)
             encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
                 Provider-specific. Note: If using "base64", the embedding format may differ from
@@ -4412,8 +4662,8 @@ class GlueLLM:
             texts=texts,
             model=model,
             correlation_id=correlation_id,
-            request_timeout=request_timeout,
             connect_timeout=connect_timeout,
+            request_timeout=request_timeout,
             api_key=api_key,
             encoding_format=encoding_format,
             dimensions=dimensions,
@@ -4426,38 +4676,41 @@ class GlueLLM:
 
 async def complete(
     user_message: str,
+    # -- Core --
     model: str | None = None,
     system_prompt: str | None = None,
     tools: list[Callable] | None = None,
+    # -- Model generation --
+    logprobs: bool | None = None,
+    max_tokens: int | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+    top_logprobs: int | None = None,
+    # -- Tools --
+    condense_tool_messages: bool | None = None,
     execute_tools: bool = True,
     max_tool_iterations: int | None = None,
-    correlation_id: str | None = None,
-    request_timeout: float | None = None,
-    connect_timeout: float | None = None,
-    guardrails: GuardrailsConfig | None = None,
-    on_status: OnStatusCallback = None,
-    max_tokens: int | None = None,
-    condense_tool_messages: bool | None = None,
-    tool_mode: ToolMode | None = None,
-    tool_execution_order: ToolExecutionOrder | None = None,
-    tool_route_model: str | None = None,
-    retry_enabled: bool | None = None,
-    retry_config: RetryConfig | None = None,
-    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
-    rate_limit_config: RateLimitConfig | None = None,
-    track_costs: bool | None = None,
-    enable_eval_recording: bool | None = None,
-    reasoning_effort: ReasoningEffort | None = None,
-    logprobs: bool | None = None,
-    top_logprobs: int | None = None,
-    session_label: str | None = None,
     parallel_tool_calls: bool | None = None,
-    sinks: list[Sink] | None = None,
+    tool_execution_order: ToolExecutionOrder | None = None,
+    tool_mode: ToolMode | None = None,
+    tool_route_model: str | None = None,
+    # -- Timeouts --
+    connect_timeout: float | None = None,
+    request_timeout: float | None = None,
+    # -- Resilience --
+    rate_limit_config: RateLimitConfig | None = None,
+    retry_config: RetryConfig | None = None,
+    retry_enabled: bool | None = None,
+    # -- Context management --
+    summarize_context: SummarizeContextConfig | bool | None = None,
+    # -- Observability / behavior --
+    correlation_id: str | None = None,
+    enable_eval_recording: bool | None = None,
+    guardrails: GuardrailsConfig | None = None,
     hook_registry: HookRegistry | None = None,
-    summarize_context: bool = False,
-    summarize_context_threshold: int | None = None,
-    summarize_context_model: str | None = None,
-    summarize_context_keep_recent: int | None = None,
+    on_status: OnStatusCallback = None,
+    session_label: str | None = None,
+    sinks: list[Sink] | None = None,
+    track_costs: bool | None = None,
     **model_kwargs: Any,
 ) -> ExecutionResult:
     """Quick completion with automatic tool execution.
@@ -4481,15 +4734,11 @@ async def complete(
         tool_route_model: Fast model for dynamic tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model).
         retry_enabled: If False, disables retries for this call.
         retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
-        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
-        rate_limit_config: Per-call rate limit configuration override.
+        rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
         track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
         hook_registry: Optional hook registry for pre/post tool and iteration hooks.
-        summarize_context: If True, older messages are summarized when context exceeds threshold. Defaults to False.
-        summarize_context_threshold: Message count that triggers summarization (defaults to settings value).
-        summarize_context_model: Model used for summarization (defaults to primary model).
-        summarize_context_keep_recent: Number of recent messages kept verbatim (defaults to settings value).
+        summarize_context: ``True``/``False``, or ``SummarizeContextConfig`` for summarization defaults.
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
     Returns:
@@ -4500,45 +4749,50 @@ async def complete(
     client = GlueLLM(
         model=model,
         system_prompt=system_prompt,
-        tools=tools,
-        max_tool_iterations=max_tool_iterations,
-        guardrails=guardrails,
+        logprobs=logprobs,
         max_tokens=max_tokens,
-        condense_tool_messages=condense_tool_messages,
-        tool_mode=effective_tool_mode,
-        tool_execution_order=effective_tool_execution_order,
-        tool_route_model=tool_route_model,
-        retry_config=retry_config,
-        rate_limit_config=rate_limit_config,
         model_kwargs=model_kwargs if model_kwargs else None,
-        hook_registry=hook_registry,
+        reasoning_effort=reasoning_effort,
+        top_logprobs=top_logprobs,
+        condense_tool_messages=condense_tool_messages,
+        max_tool_iterations=max_tool_iterations,
+        parallel_tool_calls=parallel_tool_calls,
+        tool_execution_order=effective_tool_execution_order,
+        tool_mode=effective_tool_mode,
+        tool_route_model=tool_route_model,
+        tools=tools,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
         summarize_context=summarize_context,
-        summarize_context_threshold=summarize_context_threshold,
-        summarize_context_model=summarize_context_model,
-        summarize_context_keep_recent=summarize_context_keep_recent,
+        guardrails=guardrails,
+        hook_registry=hook_registry,
+        session_label=session_label,
     )
     return await client.complete(
         user_message,
-        execute_tools=execute_tools,
-        correlation_id=correlation_id,
-        request_timeout=request_timeout,
-        connect_timeout=connect_timeout,
-        on_status=on_status,
-        sinks=sinks,
-        tool_mode=tool_mode,
-        tool_execution_order=tool_execution_order,
-        max_tokens=max_tokens,
-        retry_enabled=retry_enabled,
-        retry_config=retry_config,
-        rate_limit_algorithm=rate_limit_algorithm,
-        rate_limit_config=rate_limit_config,
-        track_costs=track_costs,
-        enable_eval_recording=enable_eval_recording,
-        reasoning_effort=reasoning_effort,
+        model=model,
         logprobs=logprobs,
+        max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
         top_logprobs=top_logprobs,
-        session_label=session_label,
+        condense_tool_messages=condense_tool_messages,
+        execute_tools=execute_tools,
         parallel_tool_calls=parallel_tool_calls,
+        tool_execution_order=tool_execution_order,
+        tool_mode=tool_mode,
+        connect_timeout=connect_timeout,
+        request_timeout=request_timeout,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
+        retry_enabled=retry_enabled,
+        summarize_context=summarize_context,
+        correlation_id=correlation_id,
+        enable_eval_recording=enable_eval_recording,
+        guardrails=guardrails,
+        on_status=on_status,
+        session_label=session_label,
+        sinks=sinks,
+        track_costs=track_costs,
         **model_kwargs,
     )
 
@@ -4546,39 +4800,42 @@ async def complete(
 async def structured_complete(
     user_message: str,
     response_format: type[T],
+    # -- Core --
     model: str | None = None,
     system_prompt: str | None = None,
     tools: list[Callable] | None = None,
+    # -- Model generation --
+    logprobs: bool | None = None,
+    max_tokens: int | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+    top_logprobs: int | None = None,
+    # -- Tools --
+    condense_tool_messages: bool | None = None,
     execute_tools: bool = True,
     max_tool_iterations: int | None = None,
-    correlation_id: str | None = None,
-    request_timeout: float | None = None,
-    connect_timeout: float | None = None,
-    guardrails: GuardrailsConfig | None = None,
-    on_status: OnStatusCallback = None,
-    max_tokens: int | None = None,
-    condense_tool_messages: bool | None = None,
-    tool_mode: ToolMode | None = None,
-    tool_execution_order: ToolExecutionOrder | None = None,
-    tool_route_model: str | None = None,
-    retry_enabled: bool | None = None,
-    retry_config: RetryConfig | None = None,
-    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
-    rate_limit_config: RateLimitConfig | None = None,
-    track_costs: bool | None = None,
-    enable_eval_recording: bool | None = None,
-    reasoning_effort: ReasoningEffort | None = None,
-    logprobs: bool | None = None,
-    top_logprobs: int | None = None,
-    session_label: str | None = None,
     parallel_tool_calls: bool | None = None,
+    tool_execution_order: ToolExecutionOrder | None = None,
+    tool_mode: ToolMode | None = None,
+    tool_route_model: str | None = None,
+    # -- Timeouts --
+    connect_timeout: float | None = None,
+    request_timeout: float | None = None,
+    # -- Resilience --
+    rate_limit_config: RateLimitConfig | None = None,
+    retry_config: RetryConfig | None = None,
+    retry_enabled: bool | None = None,
+    # -- Context management --
+    summarize_context: SummarizeContextConfig | bool | None = None,
+    # -- Observability / behavior --
+    correlation_id: str | None = None,
+    enable_eval_recording: bool | None = None,
+    guardrails: GuardrailsConfig | None = None,
     max_validation_retries: int | None = None,
+    on_status: OnStatusCallback = None,
+    session_label: str | None = None,
     sinks: list[Sink] | None = None,
     hook_registry: HookRegistry | None = None,
-    summarize_context: bool = False,
-    summarize_context_threshold: int | None = None,
-    summarize_context_model: str | None = None,
-    summarize_context_keep_recent: int | None = None,
+    track_costs: bool | None = None,
     **model_kwargs: Any,
 ) -> ExecutionResult[T]:
     """Quick structured completion with optional tool support.
@@ -4607,11 +4864,11 @@ async def structured_complete(
         tool_route_model: Fast model for dynamic tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model).
         retry_enabled: If False, disables retries for this call.
         retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
-        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
-        rate_limit_config: Per-call rate limit configuration override.
+        rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
         track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
         max_validation_retries: Max retries when Pydantic validation fails (default 3).
+        summarize_context: ``True``/``False``, or ``SummarizeContextConfig`` for summarization defaults.
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
     Returns:
@@ -4656,48 +4913,53 @@ async def structured_complete(
     client = GlueLLM(
         model=model,
         system_prompt=system_prompt,
-        tools=tools,
-        max_tool_iterations=max_tool_iterations,
-        guardrails=guardrails,
+        logprobs=logprobs,
         max_tokens=max_tokens,
-        condense_tool_messages=condense_tool_messages,
-        tool_mode=effective_tool_mode,
-        tool_execution_order=effective_tool_execution_order,
-        tool_route_model=tool_route_model,
-        retry_config=retry_config,
-        rate_limit_config=rate_limit_config,
         model_kwargs=model_kwargs if model_kwargs else None,
-        hook_registry=hook_registry,
+        reasoning_effort=reasoning_effort,
+        top_logprobs=top_logprobs,
+        condense_tool_messages=condense_tool_messages,
+        max_tool_iterations=max_tool_iterations,
+        parallel_tool_calls=parallel_tool_calls,
+        tool_execution_order=effective_tool_execution_order,
+        tool_mode=effective_tool_mode,
+        tool_route_model=tool_route_model,
+        tools=tools,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
         summarize_context=summarize_context,
-        summarize_context_threshold=summarize_context_threshold,
-        summarize_context_model=summarize_context_model,
-        summarize_context_keep_recent=summarize_context_keep_recent,
+        guardrails=guardrails,
+        hook_registry=hook_registry,
+        session_label=session_label,
     )
     return await client.structured_complete(
         user_message,
         response_format,
+        model=model,
         tools=tools,
-        execute_tools=execute_tools,
-        correlation_id=correlation_id,
-        request_timeout=request_timeout,
-        connect_timeout=connect_timeout,
-        on_status=on_status,
-        tool_mode=tool_mode,
-        tool_execution_order=tool_execution_order,
-        max_tokens=max_tokens,
-        retry_enabled=retry_enabled,
-        retry_config=retry_config,
-        rate_limit_algorithm=rate_limit_algorithm,
-        rate_limit_config=rate_limit_config,
-        track_costs=track_costs,
-        enable_eval_recording=enable_eval_recording,
-        reasoning_effort=reasoning_effort,
         logprobs=logprobs,
+        max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
         top_logprobs=top_logprobs,
-        session_label=session_label,
+        condense_tool_messages=condense_tool_messages,
+        execute_tools=execute_tools,
         parallel_tool_calls=parallel_tool_calls,
+        tool_execution_order=tool_execution_order,
+        tool_mode=tool_mode,
+        connect_timeout=connect_timeout,
+        request_timeout=request_timeout,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
+        retry_enabled=retry_enabled,
+        summarize_context=summarize_context,
+        correlation_id=correlation_id,
+        enable_eval_recording=enable_eval_recording,
+        guardrails=guardrails,
         max_validation_retries=max_validation_retries,
+        on_status=on_status,
+        session_label=session_label,
         sinks=sinks,
+        track_costs=track_costs,
         **model_kwargs,
     )
 
@@ -4739,11 +5001,11 @@ async def embed(
     texts: str | list[str],
     model: str | None = None,
     correlation_id: str | None = None,
-    request_timeout: float | None = None,
+    *,
     connect_timeout: float | None = None,
+    request_timeout: float | None = None,
     encoding_format: str | None = None,
     dimensions: int | None = None,
-    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
     rate_limit_config: RateLimitConfig | None = None,
     **kwargs: Any,
 ) -> "EmbeddingResult":
@@ -4753,15 +5015,14 @@ async def embed(
         texts: Single text string or list of text strings to embed
         model: Model identifier (defaults to settings.default_embedding_model)
         correlation_id: Optional correlation ID for request tracking (auto-generated if not provided)
-        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout)
-        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout)
+        connect_timeout: Connection timeout in seconds (defaults to settings.default_connect_timeout); keyword-only.
+        request_timeout: Request timeout in seconds (defaults to settings.default_request_timeout); keyword-only.
         encoding_format: Optional format to return embeddings in (e.g., "float" or "base64").
             Provider-specific. Note: If using "base64", the embedding format may differ from
             the standard list[float] format.
         dimensions: Optional number of dimensions for the embedding output. Supported by some
             providers (e.g., OpenAI text-embedding-3-* models) to truncate vectors.
-        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
-        rate_limit_config: Per-call rate limit configuration override.
+        rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
         **kwargs: Additional provider-specific arguments passed through to the embedding API.
             Examples: `user` (OpenAI) for end-user identification.
 
@@ -4784,11 +5045,10 @@ async def embed(
         texts=texts,
         model=model,
         correlation_id=correlation_id,
-        request_timeout=request_timeout,
         connect_timeout=connect_timeout,
+        request_timeout=request_timeout,
         encoding_format=encoding_format,
         dimensions=dimensions,
-        rate_limit_algorithm=rate_limit_algorithm,
         rate_limit_config=rate_limit_config,
         **kwargs,
     )
@@ -4797,98 +5057,110 @@ async def embed(
 @overload
 async def stream_complete(
     user_message: str,
+    # -- Core --
     model: str | None = ...,
     system_prompt: str | None = ...,
     tools: list[Callable] | None = ...,
-    execute_tools: bool = ...,
-    max_tool_iterations: int | None = ...,
-    correlation_id: str | None = ...,
     guardrails: GuardrailsConfig | None = ...,
     response_format: type[T] = ...,
-    on_status: OnStatusCallback = ...,
-    request_timeout: float | None = ...,
-    connect_timeout: float | None = ...,
+    # -- Model generation --
     max_tokens: int | None = ...,
+    # -- Tools --
     condense_tool_messages: bool | None = ...,
-    tool_mode: ToolMode | None = ...,
+    execute_tools: bool = ...,
+    max_tool_iterations: int | None = ...,
     tool_execution_order: ToolExecutionOrder | None = ...,
+    tool_mode: ToolMode | None = ...,
     tool_route_model: str | None = ...,
-    retry_enabled: bool | None = ...,
-    retry_config: RetryConfig | None = ...,
-    rate_limit_algorithm: RateLimitAlgorithm | str | None = ...,
+    # -- Timeouts --
+    connect_timeout: float | None = ...,
+    request_timeout: float | None = ...,
+    # -- Resilience --
     rate_limit_config: RateLimitConfig | None = ...,
-    track_costs: bool | None = ...,
+    retry_config: RetryConfig | None = ...,
+    retry_enabled: bool | None = ...,
+    # -- Context management --
+    summarize_context: SummarizeContextConfig | bool | None = ...,
+    # -- Observability / behavior --
+    correlation_id: str | None = ...,
     enable_eval_recording: bool | None = ...,
+    on_status: OnStatusCallback = ...,
     sinks: list[Sink] | None = ...,
-    summarize_context: bool = ...,
-    summarize_context_threshold: int | None = ...,
-    summarize_context_model: str | None = ...,
-    summarize_context_keep_recent: int | None = ...,
+    track_costs: bool | None = ...,
+    **model_kwargs: Any,
 ) -> AsyncIterator[StreamingChunk[T]]: ...
 
 
 @overload
 async def stream_complete(
     user_message: str,
+    # -- Core --
     model: str | None = ...,
     system_prompt: str | None = ...,
     tools: list[Callable] | None = ...,
-    execute_tools: bool = ...,
-    max_tool_iterations: int | None = ...,
-    correlation_id: str | None = ...,
     guardrails: GuardrailsConfig | None = ...,
     response_format: None = ...,
-    on_status: OnStatusCallback = ...,
-    request_timeout: float | None = ...,
-    connect_timeout: float | None = ...,
+    # -- Model generation --
     max_tokens: int | None = ...,
+    # -- Tools --
     condense_tool_messages: bool | None = ...,
-    tool_mode: ToolMode | None = ...,
+    execute_tools: bool = ...,
+    max_tool_iterations: int | None = ...,
     tool_execution_order: ToolExecutionOrder | None = ...,
+    tool_mode: ToolMode | None = ...,
     tool_route_model: str | None = ...,
-    retry_enabled: bool | None = ...,
-    retry_config: RetryConfig | None = ...,
-    rate_limit_algorithm: RateLimitAlgorithm | str | None = ...,
+    # -- Timeouts --
+    connect_timeout: float | None = ...,
+    request_timeout: float | None = ...,
+    # -- Resilience --
     rate_limit_config: RateLimitConfig | None = ...,
-    track_costs: bool | None = ...,
+    retry_config: RetryConfig | None = ...,
+    retry_enabled: bool | None = ...,
+    # -- Context management --
+    summarize_context: SummarizeContextConfig | bool | None = ...,
+    # -- Observability / behavior --
+    correlation_id: str | None = ...,
     enable_eval_recording: bool | None = ...,
+    on_status: OnStatusCallback = ...,
     sinks: list[Sink] | None = ...,
-    summarize_context: bool = ...,
-    summarize_context_threshold: int | None = ...,
-    summarize_context_model: str | None = ...,
-    summarize_context_keep_recent: int | None = ...,
+    track_costs: bool | None = ...,
+    **model_kwargs: Any,
 ) -> AsyncIterator[StreamingChunk[Any]]: ...
 
 
 async def stream_complete(
     user_message: str,
+    # -- Core --
     model: str | None = None,
     system_prompt: str | None = None,
     tools: list[Callable] | None = None,
-    execute_tools: bool = True,
-    max_tool_iterations: int | None = None,
-    correlation_id: str | None = None,
     guardrails: GuardrailsConfig | None = None,
     response_format: type[T] | None = None,
-    on_status: OnStatusCallback = None,
-    request_timeout: float | None = None,
-    connect_timeout: float | None = None,
+    # -- Model generation --
     max_tokens: int | None = None,
+    # -- Tools --
     condense_tool_messages: bool | None = None,
-    tool_mode: ToolMode | None = None,
+    execute_tools: bool = True,
+    max_tool_iterations: int | None = None,
     tool_execution_order: ToolExecutionOrder | None = None,
+    tool_mode: ToolMode | None = None,
     tool_route_model: str | None = None,
-    retry_enabled: bool | None = None,
-    retry_config: RetryConfig | None = None,
-    rate_limit_algorithm: RateLimitAlgorithm | str | None = None,
+    # -- Timeouts --
+    connect_timeout: float | None = None,
+    request_timeout: float | None = None,
+    # -- Resilience --
     rate_limit_config: RateLimitConfig | None = None,
-    track_costs: bool | None = None,
+    retry_config: RetryConfig | None = None,
+    retry_enabled: bool | None = None,
+    # -- Context management --
+    summarize_context: SummarizeContextConfig | bool | None = None,
+    # -- Observability / behavior --
+    correlation_id: str | None = None,
     enable_eval_recording: bool | None = None,
+    on_status: OnStatusCallback = None,
     sinks: list[Sink] | None = None,
-    summarize_context: bool = False,
-    summarize_context_threshold: int | None = None,
-    summarize_context_model: str | None = None,
-    summarize_context_keep_recent: int | None = None,
+    track_costs: bool | None = None,
+    **model_kwargs: Any,
 ) -> AsyncIterator[StreamingChunk[Any]]:
     """Stream completion with automatic tool execution.
 
@@ -4923,10 +5195,11 @@ async def stream_complete(
         tool_route_model: Fast model for dynamic tool routing when tool_mode="dynamic" (defaults to settings.tool_route_model).
         retry_enabled: If False, disables retries for this call.
         retry_config: Optional retry configuration (set retry_config.callback for custom retry logic).
-        rate_limit_algorithm: Per-call rate limit algorithm override (e.g. "leaking_bucket").
-        rate_limit_config: Per-call rate limit configuration override.
+        rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
         track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this).
+        summarize_context: ``True``/``False``, or ``SummarizeContextConfig`` for summarization defaults.
+        **model_kwargs: Extra params for acompletion (e.g. temperature, top_p), same as ``complete``.
 
     Yields:
         StreamingChunk objects with content and metadata (and optional structured_output on the final chunk)
@@ -4942,38 +5215,40 @@ async def stream_complete(
     client = GlueLLM(
         model=model,
         system_prompt=system_prompt,
-        tools=tools,
-        max_tool_iterations=max_tool_iterations,
-        guardrails=guardrails,
         max_tokens=max_tokens,
+        model_kwargs=model_kwargs if model_kwargs else None,
         condense_tool_messages=condense_tool_messages,
-        tool_mode=effective_tool_mode,
+        max_tool_iterations=max_tool_iterations,
         tool_execution_order=effective_tool_execution_order,
+        tool_mode=effective_tool_mode,
         tool_route_model=tool_route_model,
-        retry_config=retry_config,
+        tools=tools,
         rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
         summarize_context=summarize_context,
-        summarize_context_threshold=summarize_context_threshold,
-        summarize_context_model=summarize_context_model,
-        summarize_context_keep_recent=summarize_context_keep_recent,
+        guardrails=guardrails,
     )
     async for chunk in client.stream_complete(
         user_message,
-        execute_tools=execute_tools,
+        model=model,
+        guardrails=guardrails,
         response_format=response_format,
+        max_tokens=max_tokens,
+        condense_tool_messages=condense_tool_messages,
+        execute_tools=execute_tools,
+        tool_execution_order=tool_execution_order,
+        tool_mode=tool_mode,
+        connect_timeout=connect_timeout,
+        request_timeout=request_timeout,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
+        retry_enabled=retry_enabled,
+        summarize_context=summarize_context,
+        correlation_id=correlation_id,
+        enable_eval_recording=enable_eval_recording,
         on_status=on_status,
         sinks=sinks,
-        correlation_id=correlation_id,
-        request_timeout=request_timeout,
-        connect_timeout=connect_timeout,
-        tool_mode=tool_mode,
-        tool_execution_order=tool_execution_order,
-        max_tokens=max_tokens,
-        retry_enabled=retry_enabled,
-        retry_config=retry_config,
-        rate_limit_algorithm=rate_limit_algorithm,
-        rate_limit_config=rate_limit_config,
         track_costs=track_costs,
-        enable_eval_recording=enable_eval_recording,
+        **model_kwargs,
     ):
         yield chunk

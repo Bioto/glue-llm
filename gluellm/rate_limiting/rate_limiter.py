@@ -99,7 +99,7 @@ def get_rate_limiter(
     # Cache and return
     _rate_limiters[cache_key] = rate_limiter
     logger.debug(
-        f"Created rate limiter: key={key}, requests_per_minute={requests_per_minute}, backend={backend}, algorithm={algorithm_str}"
+        f"Created rate limiter: key={key}, requests_per_minute={requests_per_minute}, backend={backend}, algorithm={algorithm_str}"  # codeql[py/clear-text-logging-sensitive-data]
     )
 
     return rate_limiter
@@ -150,10 +150,10 @@ async def acquire_rate_limit(
                 retry_after = (
                     result.state.retry_after / 1000.0 if result.state and result.state.retry_after else 1.0
                 )  # Convert ms to seconds
-                logger.debug(f"Rate limit hit for key={key}, waiting {retry_after:.2f}s")
+                logger.debug(f"Rate limit hit for key={key}, waiting {retry_after:.2f}s")  # codeql[py/clear-text-logging-sensitive-data]
                 await asyncio.sleep(retry_after)
                 continue
-            logger.debug(f"Rate limit permit acquired: key={key}")
+            logger.debug(f"Rate limit permit acquired: key={key}")  # codeql[py/clear-text-logging-sensitive-data]
             return
         except LimitedError as e:
             # Extract retry_after from the exception
@@ -162,7 +162,7 @@ async def acquire_rate_limit(
                 retry_after = (
                     e.rate_limit_result.state.retry_after / 1000.0 if e.rate_limit_result.state.retry_after else 1.0
                 )
-            logger.debug(f"Rate limit hit for key={key}, waiting {retry_after:.2f}s")
+            logger.debug(f"Rate limit hit for key={key}, waiting {retry_after:.2f}s")  # codeql[py/clear-text-logging-sensitive-data]
             await asyncio.sleep(retry_after)
 
 

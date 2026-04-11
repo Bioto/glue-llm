@@ -18,7 +18,7 @@ class TestConfigurationLoading:
         # which may override values like log_level in local developer environments.
         with patch.dict(os.environ, {}, clear=True):
             config = GlueLLMSettings(_env_file="")
-            assert config.default_model == "openai:gpt-4o-mini"
+            assert config.default_model == "openai:gpt-5.4-nano"
             assert config.default_system_prompt == "You are a helpful assistant."
             assert config.max_tool_iterations == 10
             assert config.retry_max_attempts == 3
@@ -56,7 +56,7 @@ class TestConfigurationLoading:
         # Set env var without prefix - should not be loaded
         with patch.dict(os.environ, {"DEFAULT_MODEL": "should-not-load"}, clear=False):
             config = GlueLLMSettings()
-            assert config.default_model == "openai:gpt-4o-mini"  # Still default
+            assert config.default_model == "openai:gpt-5.4-nano"  # Still default
 
     def test_case_insensitive_env_vars(self):
         """Test that environment variables are case-insensitive."""

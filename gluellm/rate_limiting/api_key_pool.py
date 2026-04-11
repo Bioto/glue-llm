@@ -4,13 +4,13 @@ This module provides functionality to manage multiple API keys per provider,
 automatically rotating keys when rate limits are hit and tracking usage per key.
 """
 
-import hashlib
 import os
 from collections import defaultdict
 
 from gluellm.config import settings
 from gluellm.models.batch import APIKeyConfig as BatchAPIKeyConfig
 from gluellm.observability.logging_config import get_logger
+from gluellm.rate_limiting.key_fingerprint import api_key_hmac_fingerprint
 from gluellm.rate_limiting.rate_limiter import acquire_rate_limit, get_rate_limiter
 
 logger = get_logger(__name__)
@@ -58,7 +58,7 @@ class APIKeyConfig:
         provider: Provider name (e.g., "openai", "anthropic")
         requests_per_minute: Optional per-key rate limit override
         burst: Optional per-key burst capacity override
-        key_hash: Hash of the key for identification
+        key_hash: HMAC-BLAKE2s fingerprint for logs/rate keys (not a password hash)
     """
 
     def __init__(
@@ -80,8 +80,7 @@ class APIKeyConfig:
         self.provider = provider.lower()
         self.requests_per_minute = requests_per_minute
         self.burst = burst
-        # Create a hash for the key (for logging/identification without exposing the key)
-        self.key_hash = hashlib.sha256(key.encode()).hexdigest()[:8]
+        self.key_hash = api_key_hmac_fingerprint(key)
 
     @classmethod
     def from_batch_config(cls, batch_config: BatchAPIKeyConfig) -> "APIKeyConfig":
@@ -160,7 +159,7 @@ class APIKeyPool:
             key_config: API key configuration
         """
         self._keys_by_provider[key_config.provider].append(key_config)
-        logger.info(f"Added API key to pool: provider={key_config.provider}, key_hash={key_config.key_hash}")
+        logger.info(f"Added API key to pool: provider={key_config.provider}, key_hash={key_config.key_hash}")  # codeql[py/clear-text-logging-sensitive-data]
 
     def get_key(self, provider: str, model: str | None = None) -> str | None:
         """Get an API key for a provider (non-blocking, for synchronous use).
