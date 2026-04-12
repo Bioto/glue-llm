@@ -189,7 +189,7 @@ def test_api_key_pool(keys: int) -> None:
 
 
 @click.command("test-different-models")
-@click.option("--models", "-m", multiple=True, default=["openai:gpt-4o-mini", "openai:gpt-3.5-turbo"])
+@click.option("--models", "-m", multiple=True, default=["openai:gpt-5.4-2026-03-05", "openai:gpt-3.5-turbo"])
 def test_different_models(models: tuple) -> None:
     """Test switching between different models."""
     from gluellm.api import complete

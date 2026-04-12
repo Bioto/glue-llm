@@ -199,7 +199,7 @@ async def test_compress_messages_passthrough_preserves_at_blocks_without_llm() -
         mock_cache.get_provider = AsyncMock(side_effect=AssertionError("LLM provider must not be used in passthrough"))
         out = await AAAKCompressor.compress_messages(
             old_messages,
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             api_key=None,
         )
     assert out == f"USR: Pull metrics.\n{at_block}"

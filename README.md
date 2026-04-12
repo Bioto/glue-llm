@@ -483,7 +483,7 @@ export XAI_API_KEY=xai-...
 
 Models use `provider:model` strings:
 
-- `openai:gpt-4o-mini`
+- `openai:gpt-5.4-2026-03-05`
 - `anthropic:claude-3-5-sonnet-20241022`
 
 Key GlueLLM-specific env vars:

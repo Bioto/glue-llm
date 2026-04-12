@@ -36,7 +36,7 @@ async def test_mlflow_integration():
     # Test 1: Direct metrics logging
     print("\n2. Testing direct metrics logging...")
     log_llm_metrics(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         latency=1.234,
         tokens_used={"prompt": 100, "completion": 50, "total": 150},
         finish_reason="stop",
@@ -60,7 +60,7 @@ async def test_mlflow_integration():
     # Test 3: Error metrics
     print("\n4. Testing error metrics logging...")
     log_llm_metrics(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         latency=0.5,
         tokens_used=None,
         finish_reason=None,

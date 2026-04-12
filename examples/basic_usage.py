@@ -123,7 +123,7 @@ async def example_conversation_with_tools():
 
     # Create a client to maintain conversation state
     client = GlueLLM(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         system_prompt="You are a helpful math assistant. Use the calculate tool for any math operations.",
         tools=[calculate],
     )

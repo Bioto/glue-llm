@@ -41,7 +41,7 @@ class RequestConfig(BaseModel):
         ...     answer: str
         ...
         >>> config = RequestConfig(
-        ...     model="openai:gpt-4o-mini",
+        ...     model="openai:gpt-5.4-2026-03-05",
         ...     system_prompt=SystemPrompt(content="You are helpful."),
         ...     response_format=OutputFormat,
         ...     tools=[]

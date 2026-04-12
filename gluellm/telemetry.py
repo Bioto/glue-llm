@@ -166,7 +166,7 @@ def trace_llm_call(
     - Correlation ID (if provided)
 
     Args:
-        model: Model identifier (e.g., "openai:gpt-4o-mini")
+        model: Model identifier (e.g., "openai:gpt-5.4-2026-03-05")
         messages: List of message dictionaries
         tools: Optional list of tools available for the call
         correlation_id: Optional correlation ID for request tracking
@@ -176,7 +176,7 @@ def trace_llm_call(
         Span: The active span object for adding custom attributes
 
     Example:
-        >>> with trace_llm_call("openai:gpt-4o-mini", messages, correlation_id="req-123") as span:
+        >>> with trace_llm_call("openai:gpt-5.4-2026-03-05", messages, correlation_id="req-123") as span:
         ...     response = await llm_call(messages)
         ...     span.set_attribute("response.tokens", response.usage.total_tokens)
     """
@@ -319,7 +319,7 @@ def log_llm_metrics(
     and analysis. Metrics include latency, token usage, and call metadata.
 
     Args:
-        model: Model identifier (e.g., "openai:gpt-4o-mini")
+        model: Model identifier (e.g., "openai:gpt-5.4-2026-03-05")
         latency: Call latency in seconds
         tokens_used: Dictionary with token counts (prompt, completion, total)
         finish_reason: Reason the completion finished

@@ -21,7 +21,7 @@ Only a lightweight router tool is exposed on the first turn. A fast model decide
 client = GlueLLM(
     tools=[get_weather, search_db, send_email, get_time],
     tool_mode="dynamic",
-    tool_route_model="openai:gpt-4o-mini",  # Fast model for routing
+    tool_route_model="openai:gpt-5.4-2026-03-05",  # Fast model for routing
 )
 # First: router selects tools; then: only selected tools in context
 ```

@@ -207,7 +207,7 @@ class TestBasicToolCalling:
             {"role": "user", "content": "What's the weather in Tokyo?"},
         ]
 
-        response, final_messages = execute_tool_loop(messages=messages, model="openai:gpt-4o-mini", tools=[get_weather])
+        response, final_messages = execute_tool_loop(messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[get_weather])
 
         assert response is not None
         assert len(final_messages) > 2  # Original + tool call + tool result
@@ -222,7 +222,7 @@ class TestBasicToolCalling:
             {"role": "user", "content": "Calculate 45 multiplied by 23"},
         ]
 
-        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-4o-mini", tools=[simple_calculator])
+        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[simple_calculator])
 
         assert response is not None
         content = response.choices[0].message.content
@@ -241,7 +241,7 @@ class TestMultipleToolCalls:
         ]
 
         response, final_messages = execute_tool_loop(
-            messages=messages, model="openai:gpt-4o-mini", tools=[get_weather, simple_calculator]
+            messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[get_weather, simple_calculator]
         )
 
         assert response is not None
@@ -258,7 +258,7 @@ class TestMultipleToolCalls:
         ]
 
         response, final_messages = execute_tool_loop(
-            messages=messages, model="openai:gpt-4o-mini", tools=[multi_step_tool], max_iterations=10
+            messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[multi_step_tool], max_iterations=10
         )
 
         assert response is not None
@@ -277,7 +277,7 @@ class TestToolParameterEdgeCases:
             {"role": "user", "content": "Get weather for London"},
         ]
 
-        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-4o-mini", tools=[get_weather])
+        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[get_weather])
 
         assert response is not None
         assert "celsius" in response.choices[0].message.content.lower()
@@ -290,7 +290,7 @@ class TestToolParameterEdgeCases:
             {"role": "user", "content": "Get weather for London in fahrenheit"},
         ]
 
-        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-4o-mini", tools=[get_weather])
+        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[get_weather])
 
         assert response is not None
         content_lower = response.choices[0].message.content.lower()
@@ -305,7 +305,7 @@ class TestToolParameterEdgeCases:
             {"role": "user", "content": "Use complex_tool with required_param='test' and optional_string='hello'"},
         ]
 
-        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-4o-mini", tools=[complex_tool])
+        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[complex_tool])
 
         assert response is not None
         c = response.choices[0].message.content or ""
@@ -318,7 +318,7 @@ class TestToolParameterEdgeCases:
             {"role": "user", "content": "Search for 'python tutorials' with limit 10 and filter by recent"},
         ]
 
-        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-4o-mini", tools=[search_database])
+        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[search_database])
 
         assert response is not None
         c = response.choices[0].message.content or ""
@@ -336,7 +336,7 @@ class TestConfusingPrompts:
         ]
 
         response, final_messages = execute_tool_loop(
-            messages=messages, model="openai:gpt-4o-mini", tools=[get_user_info, get_weather]
+            messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[get_user_info, get_weather]
         )
 
         assert response is not None
@@ -351,7 +351,7 @@ class TestConfusingPrompts:
         ]
 
         response, _ = execute_tool_loop(
-            messages=messages, model="openai:gpt-4o-mini", tools=[get_weather], max_iterations=3
+            messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[get_weather], max_iterations=3
         )
 
         # Should handle contradiction somehow
@@ -366,7 +366,7 @@ class TestConfusingPrompts:
         ]
 
         response, _ = execute_tool_loop(
-            messages=messages, model="openai:gpt-4o-mini", tools=[simple_calculator], max_iterations=3
+            messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[simple_calculator], max_iterations=3
         )
 
         # Should either ask for clarification or make reasonable assumptions
@@ -381,7 +381,7 @@ class TestConfusingPrompts:
         ]
 
         response = completion(
-            messages=messages, model="openai:gpt-4o-mini", tools=[get_weather, simple_calculator, search_database]
+            messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[get_weather, simple_calculator, search_database]
         )
 
         # Should respond directly without using tools
@@ -400,7 +400,7 @@ class TestParameterCombinations:
             {"role": "user", "content": "What's the weather in Berlin?"},
         ]
 
-        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-4o-mini", tools=[get_weather])
+        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[get_weather])
 
         assert response is not None
         print(f"✓ High temperature: {response.choices[0].message.content[:80]}")
@@ -412,7 +412,7 @@ class TestParameterCombinations:
             {"role": "user", "content": "Calculate 10 + 5"},
         ]
 
-        response = completion(messages=messages, model="openai:gpt-4o-mini", tools=[simple_calculator], temperature=0.1)
+        response = completion(messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[simple_calculator], temperature=0.1)
 
         assert response is not None
         print("✓ Low temperature: Response generated")
@@ -424,7 +424,7 @@ class TestParameterCombinations:
             {"role": "user", "content": "Get weather for Tokyo and explain it in detail"},
         ]
 
-        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-4o-mini", tools=[get_weather])
+        response, _ = execute_tool_loop(messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[get_weather])
 
         # Should still complete but be more concise
         assert response is not None
@@ -437,7 +437,7 @@ class TestParameterCombinations:
             {"role": "user", "content": "Analyze this: 'Python is a great language'"},
         ]
 
-        response = completion(messages=messages, model="openai:gpt-4o-mini", response_format=StructuredAnalysis)
+        response = completion(messages=messages, model="openai:gpt-5.4-2026-03-05", response_format=StructuredAnalysis)
 
         assert response is not None
         # Parse the structured response - could be dict or model
@@ -468,7 +468,7 @@ class TestStressScenarios:
         ]
 
         response, _ = execute_tool_loop(
-            messages=messages, model="openai:gpt-4o-mini", tools=[search_database], max_iterations=3
+            messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[search_database], max_iterations=3
         )
 
         assert response is not None or response is None  # May timeout
@@ -486,7 +486,7 @@ class TestStressScenarios:
 
         response, final_messages = execute_tool_loop(
             messages=messages,
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             tools=[get_weather, simple_calculator, search_database],
             max_iterations=10,
         )
@@ -502,7 +502,7 @@ class TestStressScenarios:
         ]
 
         response, final_messages = execute_tool_loop(
-            messages=messages, model="openai:gpt-4o-mini", tools=[get_user_info, search_database], max_iterations=10
+            messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[get_user_info, search_database], max_iterations=10
         )
 
         assert response is not None or response is None
@@ -517,7 +517,7 @@ class TestStressScenarios:
 
         response, final_messages = execute_tool_loop(
             messages=messages,
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             tools=[multi_step_tool],
             max_iterations=2,  # Intentionally low
         )
@@ -538,7 +538,7 @@ class TestErrorHandling:
 
         try:
             response, _ = execute_tool_loop(
-                messages=messages, model="openai:gpt-4o-mini", tools=[search_database], max_iterations=3
+                messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[search_database], max_iterations=3
             )
             print("✓ Invalid parameters: Handled gracefully")
         except Exception as e:
@@ -557,7 +557,7 @@ class TestErrorHandling:
 
         try:
             response, _ = execute_tool_loop(
-                messages=messages, model="openai:gpt-4o-mini", tools=[undocumented_tool], max_iterations=3
+                messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[undocumented_tool], max_iterations=3
             )
             print("✓ Undocumented tool: Handled")
         except Exception as e:
@@ -579,7 +579,7 @@ class TestRealisticScenarios:
 
         response, final_messages = execute_tool_loop(
             messages=messages,
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             tools=[get_user_info, get_weather, search_database],
             max_iterations=10,
         )
@@ -597,7 +597,7 @@ class TestRealisticScenarios:
 
         response, final_messages = execute_tool_loop(
             messages=messages,
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             tools=[search_database, simple_calculator],
             max_iterations=15,
         )
@@ -614,14 +614,14 @@ class TestRealisticScenarios:
         ]
 
         response1, messages = execute_tool_loop(
-            messages=messages, model="openai:gpt-4o-mini", tools=[get_weather, simple_calculator]
+            messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[get_weather, simple_calculator]
         )
 
         # Add follow-up
         messages.append({"role": "user", "content": "Now calculate 25 + 17"})
 
         response2, messages = execute_tool_loop(
-            messages=messages, model="openai:gpt-4o-mini", tools=[get_weather, simple_calculator], max_iterations=5
+            messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[get_weather, simple_calculator], max_iterations=5
         )
 
         assert response1 is not None

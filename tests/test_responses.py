@@ -24,7 +24,7 @@ class TestResponsesBasic:
         mock_resp = SimpleNamespace(
             output_text="4",
             output=[],
-            model="gpt-4o-mini",
+            model="gpt-5.4-2026-03-05",
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
         )
 
@@ -33,7 +33,7 @@ class TestResponsesBasic:
 
         assert isinstance(result, ResponseResult)
         assert result.output == "4"
-        assert result.model == "gpt-4o-mini"
+        assert result.model == "gpt-5.4-2026-03-05"
         assert result.usage is not None
         assert result.raw_response == mock_resp
 
@@ -42,7 +42,7 @@ class TestResponsesBasic:
         mock_resp = SimpleNamespace(
             output_text="Latest news: ...",
             output=[],
-            model="gpt-4o-mini",
+            model="gpt-5.4-2026-03-05",
             usage=SimpleNamespace(prompt_tokens=20, completion_tokens=30, total_tokens=50),
         )
 
@@ -75,7 +75,7 @@ class TestResponseResultExtraction:
         mock_resp = SimpleNamespace(
             output_text="Hello world",
             output=[],
-            model="gpt-4o-mini",
+            model="gpt-5.4-2026-03-05",
             usage=None,
         )
 
@@ -89,7 +89,7 @@ class TestResponseResultExtraction:
         mock_resp = SimpleNamespace(
             output_text=None,
             output=[],
-            model="gpt-4o-mini",
+            model="gpt-5.4-2026-03-05",
             usage=None,
         )
 

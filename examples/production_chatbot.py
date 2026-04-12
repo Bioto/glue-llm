@@ -99,7 +99,7 @@ async def chatbot_example():
 
     # Create chatbot client with tools
     chatbot = GlueLLM(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         system_prompt="""You are a helpful customer support agent.
         You can:
         - Look up customer information using get_customer_info
@@ -137,7 +137,7 @@ async def chatbot_example():
     print("=" * 60)
 
     ticket_client = GlueLLM(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         system_prompt="Extract support ticket information from user messages. Be thorough and accurate.",
     )
 

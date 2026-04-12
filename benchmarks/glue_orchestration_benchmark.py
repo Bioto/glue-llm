@@ -7,7 +7,7 @@ Requires OPENAI_API_KEY or another configured provider for the chosen model.
 
 Run:
   uv run python benchmarks/glue_orchestration_benchmark.py
-  uv run python benchmarks/glue_orchestration_benchmark.py --model openai:gpt-4o-mini --skip-structured
+  uv run python benchmarks/glue_orchestration_benchmark.py --model openai:gpt-5.4-2026-03-05 --skip-structured
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from gluellm.api import GlueLLM, complete, structured_complete
 
-DEFAULT_MODEL = "openai:gpt-4o-mini"
+DEFAULT_MODEL = "openai:gpt-5.4-2026-03-05"
 
 
 class _TinyFact(BaseModel):

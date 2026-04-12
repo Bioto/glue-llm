@@ -14,7 +14,7 @@ agent = Agent(
     system_prompt=SystemPrompt(content="You are a research assistant."),
     tools=[search_web, read_file],
     max_tool_iterations=5,
-    model="openai:gpt-4o-mini",
+    model="openai:gpt-5.4-2026-03-05",
     max_tokens=4096,
 )
 ```

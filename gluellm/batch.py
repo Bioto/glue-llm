@@ -39,7 +39,7 @@ class BatchProcessor:
 
     Example:
         >>> processor = BatchProcessor(
-        ...     model="openai:gpt-4o-mini",
+        ...     model="openai:gpt-5.4-2026-03-05",
         ...     config=BatchConfig(max_concurrent=3)
         ... )
         >>> requests = [
@@ -214,7 +214,7 @@ class BatchProcessor:
                     # Get API key from pool if available
                     api_key = None
                     if self.key_pool:
-                        model_to_use = self.model or "openai:gpt-4o-mini"  # Default fallback
+                        model_to_use = self.model or "openai:gpt-5.4-2026-03-05"  # Default fallback
                         provider = extract_provider_from_model(model_to_use)
                         api_key = await self.key_pool.acquire_key(provider=provider, model=model_to_use)
                         if api_key:

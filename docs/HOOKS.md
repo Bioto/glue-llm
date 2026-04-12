@@ -374,7 +374,7 @@ registry.add_hook(HookStage.POST_BATCH_ITEM,
                   HookConfig(handler=log_batch_item, name="post_item"))
 
 processor = BatchProcessor(
-    model="openai:gpt-4o-mini",
+    model="openai:gpt-5.4-2026-03-05",
     hook_registry=registry,
     config=BatchConfig(max_concurrent=3),
 )

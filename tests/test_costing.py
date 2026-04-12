@@ -30,7 +30,7 @@ class TestModelPricing:
     """Tests for pricing data lookups."""
 
     def test_openai_model_exact_match(self):
-        pricing = get_model_pricing("openai", "gpt-4o-mini")
+        pricing = get_model_pricing("openai", "gpt-5.4-2026-03-05")
         assert pricing is not None
         assert pricing.input_price_per_million == 0.15
         assert pricing.output_price_per_million == 0.60
@@ -56,7 +56,7 @@ class TestModelPricing:
         assert pricing is not None
 
     def test_case_insensitive_provider(self):
-        pricing = get_model_pricing("OpenAI", "gpt-4o-mini")
+        pricing = get_model_pricing("OpenAI", "gpt-5.4-2026-03-05")
         assert pricing is not None
 
     def test_cached_input_pricing(self):
@@ -84,12 +84,12 @@ class TestCalculateCost:
     """Tests for cost calculation."""
 
     def test_basic_cost_calculation(self):
-        cost = calculate_cost("openai", "gpt-4o-mini", input_tokens=1_000_000, output_tokens=1_000_000)
+        cost = calculate_cost("openai", "gpt-5.4-2026-03-05", input_tokens=1_000_000, output_tokens=1_000_000)
         assert cost is not None
         assert cost == pytest.approx(0.15 + 0.60)
 
     def test_zero_tokens_returns_zero(self):
-        cost = calculate_cost("openai", "gpt-4o-mini", input_tokens=0, output_tokens=0)
+        cost = calculate_cost("openai", "gpt-5.4-2026-03-05", input_tokens=0, output_tokens=0)
         assert cost == 0.0
 
     def test_unknown_model_returns_none(self):
@@ -156,24 +156,24 @@ class TestCostTracker:
 
     def test_record_usage(self):
         tracker = CostTracker()
-        record = tracker.record_usage("openai:gpt-4o-mini", input_tokens=100, output_tokens=50)
+        record = tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=100, output_tokens=50)
         assert isinstance(record, UsageRecord)
-        assert record.model == "openai:gpt-4o-mini"
+        assert record.model == "openai:gpt-5.4-2026-03-05"
         assert record.input_tokens == 100
         assert record.output_tokens == 50
         assert record.cost_usd is not None
 
     def test_daily_cost_accumulates(self):
         tracker = CostTracker()
-        tracker.record_usage("openai:gpt-4o-mini", input_tokens=1000, output_tokens=500)
-        tracker.record_usage("openai:gpt-4o-mini", input_tokens=1000, output_tokens=500)
+        tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=1000, output_tokens=500)
+        tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=1000, output_tokens=500)
         assert tracker.get_daily_cost() > 0
 
     def test_session_cost_accumulates(self):
         tracker = CostTracker()
-        tracker.record_usage("openai:gpt-4o-mini", input_tokens=1000, output_tokens=500)
+        tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=1000, output_tokens=500)
         cost1 = tracker.get_session_cost()
-        tracker.record_usage("openai:gpt-4o-mini", input_tokens=1000, output_tokens=500)
+        tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=1000, output_tokens=500)
         cost2 = tracker.get_session_cost()
         assert cost2 == pytest.approx(cost1 * 2)
 
@@ -194,41 +194,41 @@ class TestCostTracker:
 
     def test_get_summary(self):
         tracker = CostTracker()
-        tracker.record_usage("openai:gpt-4o-mini", input_tokens=100, output_tokens=50)
+        tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=100, output_tokens=50)
         tracker.record_usage("anthropic:claude-3-5-sonnet-20241022", input_tokens=200, output_tokens=100)
         summary = tracker.get_summary()
         assert isinstance(summary, CostSummary)
         assert summary.request_count == 2
         assert summary.total_input_tokens == 300
         assert summary.total_output_tokens == 150
-        assert "openai:gpt-4o-mini" in summary.cost_by_model
+        assert "openai:gpt-5.4-2026-03-05" in summary.cost_by_model
         assert "openai" in summary.cost_by_provider
 
     def test_get_records_filter_by_model(self):
         tracker = CostTracker()
-        tracker.record_usage("openai:gpt-4o-mini", input_tokens=100, output_tokens=50)
+        tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=100, output_tokens=50)
         tracker.record_usage("openai:gpt-4o", input_tokens=100, output_tokens=50)
-        records = tracker.get_records(model="openai:gpt-4o-mini")
+        records = tracker.get_records(model="openai:gpt-5.4-2026-03-05")
         assert len(records) == 1
-        assert records[0].model == "openai:gpt-4o-mini"
+        assert records[0].model == "openai:gpt-5.4-2026-03-05"
 
     def test_get_records_filter_by_user_id(self):
         tracker = CostTracker()
-        tracker.record_usage("openai:gpt-4o-mini", input_tokens=100, output_tokens=50, user_id="user-1")
-        tracker.record_usage("openai:gpt-4o-mini", input_tokens=100, output_tokens=50, user_id="user-2")
+        tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=100, output_tokens=50, user_id="user-1")
+        tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=100, output_tokens=50, user_id="user-2")
         records = tracker.get_records(user_id="user-1")
         assert len(records) == 1
 
     def test_get_records_with_limit(self):
         tracker = CostTracker()
         for _ in range(5):
-            tracker.record_usage("openai:gpt-4o-mini", input_tokens=100, output_tokens=50)
+            tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=100, output_tokens=50)
         records = tracker.get_records(limit=3)
         assert len(records) == 3
 
     def test_reset_session(self):
         tracker = CostTracker()
-        tracker.record_usage("openai:gpt-4o-mini", input_tokens=100, output_tokens=50)
+        tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=100, output_tokens=50)
         summary = tracker.reset_session()
         assert isinstance(summary, CostSummary)
         assert summary.request_count == 1
@@ -237,7 +237,7 @@ class TestCostTracker:
 
     def test_export_records_dict(self):
         tracker = CostTracker()
-        tracker.record_usage("openai:gpt-4o-mini", input_tokens=100, output_tokens=50)
+        tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=100, output_tokens=50)
         exported = tracker.export_records("dict")
         assert isinstance(exported, list)
         assert len(exported) == 1
@@ -246,7 +246,7 @@ class TestCostTracker:
 
     def test_export_records_json(self):
         tracker = CostTracker()
-        tracker.record_usage("openai:gpt-4o-mini", input_tokens=100, output_tokens=50)
+        tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=100, output_tokens=50)
         exported = tracker.export_records("json")
         assert isinstance(exported, str)
         parsed = json.loads(exported)
@@ -254,7 +254,7 @@ class TestCostTracker:
 
     def test_export_records_csv(self):
         tracker = CostTracker()
-        tracker.record_usage("openai:gpt-4o-mini", input_tokens=100, output_tokens=50)
+        tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=100, output_tokens=50)
         exported = tracker.export_records("csv")
         assert isinstance(exported, str)
         lines = exported.strip().split("\n")
@@ -268,7 +268,7 @@ class TestCostTracker:
     def test_record_with_metadata(self):
         tracker = CostTracker()
         record = tracker.record_usage(
-            "openai:gpt-4o-mini",
+            "openai:gpt-5.4-2026-03-05",
             input_tokens=100,
             output_tokens=50,
             request_id="req-123",
@@ -320,7 +320,7 @@ class TestEstimateCost:
     """Tests for the estimate_cost helper."""
 
     def test_estimate_known_model(self):
-        cost = estimate_cost("openai:gpt-4o-mini", input_tokens=1000, output_tokens=500)
+        cost = estimate_cost("openai:gpt-5.4-2026-03-05", input_tokens=1000, output_tokens=500)
         assert cost is not None
         assert cost > 0
 

@@ -706,7 +706,7 @@ class TestListModelsCommand:
 
         async def fake_list_models(**kwargs):
             return [
-                SimpleNamespace(id="gpt-4o-mini", created=1234567890, owned_by="openai"),
+                SimpleNamespace(id="gpt-5.4-2026-03-05", created=1234567890, owned_by="openai"),
                 SimpleNamespace(id="gpt-4o", created=1234567891, owned_by="openai"),
             ]
 
@@ -715,7 +715,7 @@ class TestListModelsCommand:
             result = runner.invoke(cli, ["list-models", "--provider", "openai"])
 
         assert result.exit_code == 0
-        assert "gpt-4o-mini" in result.output or "Models" in result.output
+        assert "gpt-5.4-2026-03-05" in result.output or "Models" in result.output
 
 
 class TestTestResponsesCommand:
@@ -730,7 +730,7 @@ class TestTestResponsesCommand:
         mock_resp = SimpleNamespace(
             output_text="4",
             output=[],
-            model="gpt-4o-mini",
+            model="gpt-5.4-2026-03-05",
             usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
         )
 

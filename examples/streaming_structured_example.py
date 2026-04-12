@@ -62,7 +62,7 @@ async def example_stream_with_summary():
     async for chunk in stream_complete(
         user_message=f"Summarise this article as JSON matching the requested schema:\n{article}",
         response_format=ArticleSummary,
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         system_prompt="You are a summarisation assistant. Always reply with valid JSON matching the requested schema.",
     ):
         print(chunk.content, end="", flush=True)
@@ -102,7 +102,7 @@ async def example_stream_with_code_review():
     async for chunk in stream_complete(
         user_message=f"Review this Python function and reply with JSON matching the requested schema:\n```python{code}```",
         response_format=CodeReview,
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         system_prompt="You are a senior Python engineer. Always reply with valid JSON matching the requested schema.",
     ):
         print(chunk.content, end="", flush=True)
@@ -137,7 +137,7 @@ async def example_stream_without_format():
     # Without response_format, stream_complete infers AsyncIterator[StreamingChunk[Any]]
     async for chunk in stream_complete(
         user_message="In one sentence, what is Python?",
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
     ):
         print(chunk.content, end="", flush=True)
         if chunk.done:
@@ -154,7 +154,7 @@ async def example_stream_with_eval_recording():
     out_path = Path("./eval_data/streaming_records.jsonl")
     store = JSONLFileStore(str(out_path))
     client = GlueLLM(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         system_prompt="You are a helpful assistant. Keep answers brief.",
         tools=[],
         eval_store=store,

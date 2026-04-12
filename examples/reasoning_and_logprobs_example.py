@@ -19,10 +19,10 @@ async def example_reasoning_effort():
     print("=" * 70)
 
     # reasoning_effort: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto"
-    # Supported by o1, o3, o4-mini only. With gpt-4o-mini it is auto-omitted.
+    # Supported by o1, o3, o4-mini only. With gpt-5.4-2026-03-05 it is auto-omitted.
     result = await complete(
         user_message="What is the next number in: 2, 4, 8, 16, ?",
-        model="openai:gpt-4o-mini",  # Use "openai:o4-mini" for reasoning_effort
+        model="openai:gpt-5.4-2026-03-05",  # Use "openai:o4-mini" for reasoning_effort
         reasoning_effort="high",
         system_prompt="You are a logic puzzle assistant. Think step by step.",
     )
@@ -41,7 +41,7 @@ async def example_reasoning_effort_on_client():
     from gluellm.api import GlueLLM
 
     client = GlueLLM(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         reasoning_effort="medium",
         system_prompt="You are a helpful assistant.",
     )

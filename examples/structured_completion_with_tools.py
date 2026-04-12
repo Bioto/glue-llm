@@ -84,7 +84,7 @@ async def example_weather_with_tool():
         user_message="What's the weather like in San Francisco? Use the weather tool and give me a structured report.",
         response_format=WeatherReport,
         tools=[get_weather],
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
     )
 
     if result.structured_output is None:
@@ -111,7 +111,7 @@ async def example_calculation_with_tool():
         user_message="Calculate (15 + 25) * 3 using the calculator tool and explain the steps.",
         response_format=CalculationResult,
         tools=[calculate],
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
     )
 
     if result.structured_output is None:
@@ -133,7 +133,7 @@ async def example_without_tools():
     result = await structured_complete(
         user_message="What is 2 + 2? Just give me the answer.",
         response_format=CalculationResult,
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
     )
 
     if result.structured_output is None:
@@ -164,7 +164,7 @@ async def example_multiple_cities():
         user_message="Compare the weather in San Francisco, New York, and London. Which city is warmest?",
         response_format=WeatherComparison,
         tools=[get_weather],
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
     )
 
     if result.structured_output is None:

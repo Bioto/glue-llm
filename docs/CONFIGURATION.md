@@ -33,7 +33,7 @@ gluellm.configure(
 
 | Setting | Env Var | Default | Description |
 |---------|---------|---------|-------------|
-| `default_model` | `GLUELLM_DEFAULT_MODEL` | `openai:gpt-4o-mini` | Default completion model |
+| `default_model` | `GLUELLM_DEFAULT_MODEL` | `openai:gpt-5.4-2026-03-05` | Default completion model |
 | `default_embedding_model` | `GLUELLM_DEFAULT_EMBEDDING_MODEL` | `openai/text-embedding-3-small` | Default embedding model |
 | `default_embedding_dimensions` | `GLUELLM_DEFAULT_EMBEDDING_DIMENSIONS` | `None` | Embedding dimensions (e.g., 512) |
 | `default_system_prompt` | `GLUELLM_DEFAULT_SYSTEM_PROMPT` | `You are a helpful assistant.` | Default system prompt |
@@ -48,7 +48,7 @@ gluellm.configure(
 | `max_tool_iterations` | `GLUELLM_MAX_TOOL_ITERATIONS` | `10` | Max tool call rounds |
 | `default_tool_mode` | `GLUELLM_DEFAULT_TOOL_MODE` | `standard` | `standard` or `dynamic` |
 | `default_tool_execution_order` | `GLUELLM_DEFAULT_TOOL_EXECUTION_ORDER` | `sequential` | `sequential` or `parallel` |
-| `tool_route_model` | `GLUELLM_TOOL_ROUTE_MODEL` | `openai:gpt-4o-mini` | Model for dynamic tool routing |
+| `tool_route_model` | `GLUELLM_TOOL_ROUTE_MODEL` | `openai:gpt-5.4-2026-03-05` | Model for dynamic tool routing |
 | `default_condense_tool_messages` | `GLUELLM_DEFAULT_CONDENSE_TOOL_MESSAGES` | `False` | Condense tool rounds in context |
 
 ### Retry Settings
@@ -146,7 +146,7 @@ Reloads settings from environment and `.env`. Returns new instance and updates g
 
 Use `provider:model_name` or `provider/model_name`:
 
-- `openai:gpt-4o-mini`
+- `openai:gpt-5.4-2026-03-05`
 - `anthropic:claude-3-5-sonnet-20241022`
 - `xai:grok-2`
 

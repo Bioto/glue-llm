@@ -43,7 +43,7 @@ async def example_basic_summarization():
     print("=" * 70)
 
     client = GlueLLM(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         system_prompt="You are a helpful assistant. Keep answers brief.",
         summarize_context=SummarizeContextConfig(
             enabled=True,
@@ -83,7 +83,7 @@ async def example_per_call_override():
 
     # Client has summarization off by default …
     client = GlueLLM(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         system_prompt="You are a helpful assistant.",
     )
 
@@ -113,7 +113,7 @@ async def example_custom_summarization_model():
         summarize_context=SummarizeContextConfig(
             enabled=True,
             threshold=6,
-            model="openai:gpt-4o-mini",  # cheap summarizer
+            model="openai:gpt-5.4-2026-03-05",  # cheap summarizer
         ),
     )
 
@@ -129,7 +129,7 @@ async def example_custom_summarization_model():
         print(f"Assistant: {result.final_response}\n")
 
     print(
-        "Note: the summarization LLM call used gpt-4o-mini while the main\n"
+        "Note: the summarization LLM call used gpt-5.4-2026-03-05 while the main\n"
         "conversation ran on gpt-4o, keeping summarization costs low.\n"
     )
 
@@ -142,7 +142,7 @@ async def example_summarization_with_tools():
     print("=" * 70)
 
     client = GlueLLM(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         system_prompt="You are a math assistant. Use tools for all calculations.",
         tools=[add, multiply],
         summarize_context=SummarizeContextConfig(

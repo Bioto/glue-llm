@@ -424,12 +424,12 @@ class TestRateLimitingIntegration:
         mock_provider = MagicMock()
         mock_provider.acompletion = AsyncMock(return_value=mock_response)
         with (
-            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
+            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-5.4-2026-03-05")),
             patch("gluellm.api.acquire_rate_limit") as mock_rate_limit,
         ):
             await _safe_llm_call(
                 messages=[{"role": "user", "content": "Hello"}],
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
             )
             # Should have called rate limiting
             assert mock_rate_limit.called
@@ -448,12 +448,12 @@ class TestRateLimitingIntegration:
         mock_provider = MagicMock()
         mock_provider.acompletion = AsyncMock(return_value=mock_response)
         with (
-            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
+            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-5.4-2026-03-05")),
             patch("gluellm.api.acquire_rate_limit") as mock_rate_limit,
         ):
             await _safe_llm_call(
                 messages=[{"role": "user", "content": "Hello"}],
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 api_key="test-api-key",
             )
             # Should have called rate limiting
@@ -476,12 +476,12 @@ class TestRateLimitingIntegration:
         mock_provider = MagicMock()
         mock_provider.acompletion = AsyncMock(return_value=mock_response)
         with (
-            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
+            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-5.4-2026-03-05")),
             patch("gluellm.api.acquire_rate_limit") as mock_rate_limit,
         ):
             await _safe_llm_call(
                 messages=[{"role": "user", "content": "Hello"}],
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 rate_limit_config=RateLimitConfig(algorithm="leaking_bucket"),
             )
             assert mock_rate_limit.called
@@ -502,7 +502,7 @@ class TestRateLimitingIntegration:
         mock_provider = MagicMock()
         mock_provider.acompletion = AsyncMock(return_value=mock_response)
         with (
-            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
+            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-5.4-2026-03-05")),
             patch("gluellm.api.acquire_rate_limit") as mock_rate_limit,
         ):
             client = GlueLLM()
@@ -525,7 +525,7 @@ class TestRateLimitingIntegration:
         mock_provider = MagicMock()
         mock_provider.acompletion = AsyncMock(return_value=mock_response)
         with (
-            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
+            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-5.4-2026-03-05")),
             patch("gluellm.api.acquire_rate_limit") as mock_rate_limit,
         ):
             # Client-level default
@@ -551,12 +551,12 @@ class TestRateLimitingIntegration:
         mock_provider = MagicMock()
         mock_provider.acompletion = AsyncMock(return_value=mock_response)
         with (
-            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-4o-mini")),
+            patch("gluellm.api._provider_cache.get_provider", return_value=(mock_provider, "gpt-5.4-2026-03-05")),
             patch("gluellm.api.acquire_rate_limit") as mock_rate_limit,
         ):
             await _safe_llm_call(
                 messages=[{"role": "user", "content": "Hello"}],
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
             )
             assert mock_rate_limit.called
             call_kwargs = mock_rate_limit.call_args.kwargs

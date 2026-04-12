@@ -94,7 +94,7 @@ class TestRetryDisabled:
     @patch("gluellm.api._safe_llm_call")
     async def test_instance_retry_disabled_no_retries_on_rate_limit(self, mock):
         mock.side_effect = RateLimitError("429")
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(retry_enabled=False))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(retry_enabled=False))
         with pytest.raises(RateLimitError):
             await client.complete("Test")
         assert mock.call_count == 1
@@ -102,7 +102,7 @@ class TestRetryDisabled:
     @patch("gluellm.api._safe_llm_call")
     async def test_instance_retry_disabled_no_retries_on_connection_error(self, mock):
         mock.side_effect = APIConnectionError("network fail")
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(retry_enabled=False))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(retry_enabled=False))
         with pytest.raises(APIConnectionError):
             await client.complete("Test")
         assert mock.call_count == 1
@@ -112,7 +112,7 @@ class TestRetryDisabled:
         """Per-call retry_enabled=False beats instance config that has retries on."""
         mock.side_effect = RateLimitError("429")
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             retry_config=RetryConfig(retry_enabled=True, max_attempts=5),
         )
         with pytest.raises(RateLimitError):
@@ -149,7 +149,7 @@ class TestRetryDisabled:
 
         mock.side_effect = RateLimitError("429")
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             retry_config=RetryConfig(callback=cb),
         )
         with pytest.raises(RateLimitError):
@@ -169,7 +169,7 @@ class TestRetryOn:
         """Retries when error matches a type in retry_on."""
         mock.side_effect = [RateLimitError("429"), _make_response()]
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             retry_config=RetryConfig(min_wait=0, retry_on=[RateLimitError]),
         )
         result = await client.complete("Test")
@@ -181,7 +181,7 @@ class TestRetryOn:
         """Does not retry when error is not in retry_on, even if it would be retried by default."""
         mock.side_effect = APIConnectionError("network fail")
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             retry_config=RetryConfig(min_wait=0, retry_on=[RateLimitError]),  # connection errors excluded
         )
         with pytest.raises(APIConnectionError):
@@ -193,7 +193,7 @@ class TestRetryOn:
         """Retries on any listed type."""
         mock.side_effect = [APIConnectionError("net"), RateLimitError("429"), _make_response()]
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             retry_config=RetryConfig(min_wait=0, max_attempts=3, retry_on=[RateLimitError, APIConnectionError]),
         )
         result = await client.complete("Test")
@@ -205,7 +205,7 @@ class TestRetryOn:
         """TokenLimitError is not retried even if retry_on=[RateLimitError]."""
         mock.side_effect = TokenLimitError("too long")
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             retry_config=RetryConfig(min_wait=0, retry_on=[RateLimitError]),
         )
         with pytest.raises(TokenLimitError):
@@ -223,7 +223,7 @@ class TestRetryOn:
             return True, None
 
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             retry_config=RetryConfig(
                 min_wait=0,
                 retry_on=[TokenLimitError],  # would block RateLimitError
@@ -239,7 +239,7 @@ class TestRetryOn:
         """retry_on works with isinstance, so subclasses match parent types."""
         mock.side_effect = [APITimeoutError("timeout"), _make_response()]
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             retry_config=RetryConfig(min_wait=0, retry_on=[APIConnectionError]),  # APITimeoutError is a subclass
         )
         result = await client.complete("Test")
@@ -253,7 +253,7 @@ class TestDefaultRetryBehavior:
     @patch("gluellm.api._safe_llm_call")
     async def test_retries_on_rate_limit(self, mock):
         mock.side_effect = [RateLimitError("429"), RateLimitError("429"), _make_response()]
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0, max_attempts=3))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0, max_attempts=3))
         result = await client.complete("Test")
         assert mock.call_count == 3
         assert result.final_response == "OK"
@@ -261,7 +261,7 @@ class TestDefaultRetryBehavior:
     @patch("gluellm.api._safe_llm_call")
     async def test_retries_on_connection_error(self, mock):
         mock.side_effect = [APIConnectionError("net"), _make_response()]
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0, max_attempts=3))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0, max_attempts=3))
         result = await client.complete("Test")
         assert mock.call_count == 2
         assert result.final_response == "OK"
@@ -269,7 +269,7 @@ class TestDefaultRetryBehavior:
     @patch("gluellm.api._safe_llm_call")
     async def test_does_not_retry_token_limit(self, mock):
         mock.side_effect = TokenLimitError("too long")
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0))
         with pytest.raises(TokenLimitError):
             await client.complete("Test")
         assert mock.call_count == 1
@@ -277,7 +277,7 @@ class TestDefaultRetryBehavior:
     @patch("gluellm.api._safe_llm_call")
     async def test_does_not_retry_auth_error(self, mock):
         mock.side_effect = AuthenticationError("bad key")
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0))
         with pytest.raises(AuthenticationError):
             await client.complete("Test")
         assert mock.call_count == 1
@@ -285,7 +285,7 @@ class TestDefaultRetryBehavior:
     @patch("gluellm.api._safe_llm_call")
     async def test_does_not_retry_invalid_request(self, mock):
         mock.side_effect = InvalidRequestError("bad params")
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0))
         with pytest.raises(InvalidRequestError):
             await client.complete("Test")
         assert mock.call_count == 1
@@ -293,7 +293,7 @@ class TestDefaultRetryBehavior:
     @patch("gluellm.api._safe_llm_call")
     async def test_max_attempts_respected(self, mock):
         mock.side_effect = RateLimitError("429")
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0, max_attempts=2))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0, max_attempts=2))
         with pytest.raises(RateLimitError):
             await client.complete("Test")
         assert mock.call_count == 2
@@ -301,7 +301,7 @@ class TestDefaultRetryBehavior:
     @patch("gluellm.api._safe_llm_call")
     async def test_raises_after_all_attempts_exhausted(self, mock):
         mock.side_effect = APIConnectionError("network")
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0, max_attempts=4))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0, max_attempts=4))
         with pytest.raises(APIConnectionError):
             await client.complete("Test")
         assert mock.call_count == 4
@@ -320,7 +320,7 @@ class TestRetryCallback:
         def cb(exc, attempt):
             return isinstance(exc, RateLimitError), None
 
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0, callback=cb))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0, callback=cb))
         result = await client.complete("Test")
         assert mock.call_count == 2
         assert result.final_response == "OK"
@@ -333,7 +333,7 @@ class TestRetryCallback:
         def cb(exc, attempt):
             return isinstance(exc, RateLimitError), None  # only retry rate limits
 
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0, callback=cb))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0, callback=cb))
         with pytest.raises(TokenLimitError):
             await client.complete("Test")
         assert mock.call_count == 1
@@ -346,7 +346,7 @@ class TestRetryCallback:
         def cb(exc, attempt):
             return False, None
 
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0, max_attempts=5, callback=cb))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0, max_attempts=5, callback=cb))
         with pytest.raises(RateLimitError):
             await client.complete("Test")
         assert mock.call_count == 1
@@ -358,7 +358,7 @@ class TestRetryCallback:
         def cb(exc, attempt):
             return True, {"temperature": 0.0}
 
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0, callback=cb))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0, callback=cb))
         await client.complete("Test")
 
         assert mock.call_count == 2
@@ -374,7 +374,7 @@ class TestRetryCallback:
             return True, {"temperature": temps[attempt - 1]}
 
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             retry_config=RetryConfig(min_wait=0, max_attempts=3, callback=cb),
         )
         await client.complete("Test")
@@ -393,7 +393,7 @@ class TestRetryCallback:
             return True, None
 
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             retry_config=RetryConfig(min_wait=0, max_attempts=3, callback=cb),
         )
         await client.complete("Test")
@@ -409,7 +409,7 @@ class TestRetryCallback:
             received_exc.append(exc)
             return True, None
 
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0, callback=cb))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0, callback=cb))
         await client.complete("Test")
         assert len(received_exc) == 1
         assert isinstance(received_exc[0], RateLimitError)
@@ -424,7 +424,7 @@ class TestRetryCallback:
             await asyncio.sleep(0)  # yield control
             return True, {"temperature": 0.5}
 
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0, callback=cb))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0, callback=cb))
         result = await client.complete("Test")
         assert result.final_response == "OK"
         assert mock.call_args_list[1][1].get("temperature") == 0.5
@@ -439,7 +439,7 @@ class TestRetryCallback:
             invocations.append(attempt)
             return True, None
 
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0, callback=cb))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0, callback=cb))
         await client.complete("Test")
         assert mock.call_count == 1
         assert len(invocations) == 0
@@ -460,7 +460,7 @@ class TestRetryCallback:
 
         mock.side_effect = [RateLimitError("429"), _make_response()]
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             retry_config=RetryConfig(min_wait=0, callback=instance_cb),
         )
         await client.complete("Test", retry_config=RetryConfig(min_wait=0, callback=per_call_cb))
@@ -478,7 +478,7 @@ class TestModelKwargs:
     @patch("gluellm.api._safe_llm_call")
     async def test_instance_model_kwargs_forwarded(self, mock):
         mock.return_value = _make_response()
-        client = GlueLLM(model="openai:gpt-4o-mini", model_kwargs={"temperature": 0.5, "top_p": 0.9})
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", model_kwargs={"temperature": 0.5, "top_p": 0.9})
         await client.complete("Test")
         kw = mock.call_args[1]
         assert kw["temperature"] == 0.5
@@ -487,7 +487,7 @@ class TestModelKwargs:
     @patch("gluellm.api._safe_llm_call")
     async def test_per_call_kwargs_override_instance_kwargs(self, mock):
         mock.return_value = _make_response()
-        client = GlueLLM(model="openai:gpt-4o-mini", model_kwargs={"temperature": 0.3})
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", model_kwargs={"temperature": 0.3})
         await client.complete("Test", temperature=0.9)
         assert mock.call_args[1]["temperature"] == 0.9
 
@@ -495,7 +495,7 @@ class TestModelKwargs:
     async def test_instance_kwargs_merged_with_per_call(self, mock):
         """Instance kwargs that are not overridden remain in the final call."""
         mock.return_value = _make_response()
-        client = GlueLLM(model="openai:gpt-4o-mini", model_kwargs={"temperature": 0.3, "top_p": 0.8})
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", model_kwargs={"temperature": 0.3, "top_p": 0.8})
         await client.complete("Test", temperature=0.9)
         kw = mock.call_args[1]
         assert kw["temperature"] == 0.9  # overridden
@@ -504,7 +504,7 @@ class TestModelKwargs:
     @patch("gluellm.api._safe_llm_call")
     async def test_no_model_kwargs_by_default(self, mock):
         mock.return_value = _make_response()
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         await client.complete("Test")
         kw = mock.call_args[1]
         assert "temperature" not in kw
@@ -526,7 +526,7 @@ class TestModelKwargs:
         def cb(exc, attempt):
             return True, {"temperature": 0.0, "top_p": 0.5}
 
-        client = GlueLLM(model="openai:gpt-4o-mini", retry_config=RetryConfig(min_wait=0, callback=cb))
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", retry_config=RetryConfig(min_wait=0, callback=cb))
         await client.complete("Test")
 
         retry_kw = mock.call_args_list[1][1]
@@ -567,7 +567,7 @@ class TestCustomRetryIntegration:
     async def test_complete_with_retry_config_instance(self):
         """RetryConfig on GlueLLM instance works normally on successful calls."""
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             system_prompt="You are a bot. Reply with only the exact word asked, no punctuation.",
             retry_config=RetryConfig(retry_enabled=True, max_attempts=3, min_wait=0.1, max_wait=1.0),
         )
@@ -577,7 +577,7 @@ class TestCustomRetryIntegration:
     async def test_retry_config_disabled_via_per_call_flag(self):
         """Per-call retry_enabled=False overrides instance RetryConfig."""
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             system_prompt="You are a bot. Reply with only the exact word asked, no punctuation.",
             retry_config=RetryConfig(retry_enabled=True, max_attempts=5),
         )
@@ -602,7 +602,7 @@ class TestCustomRetryIntegration:
 
     async def test_model_kwargs_on_instance(self):
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             system_prompt="You are a precise assistant. Reply with only the value asked for, no other text.",
             model_kwargs={"temperature": 0.0},
         )
@@ -612,7 +612,7 @@ class TestCustomRetryIntegration:
     async def test_per_call_model_kwargs_override_instance(self):
         """Per-call temperature=0.0 overrides instance temperature=1.5."""
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             system_prompt="You are a precise assistant. Reply with only the value asked for, no other text.",
             model_kwargs={"temperature": 1.5},
         )
@@ -635,7 +635,7 @@ class TestCustomRetryIntegration:
             return False, None
 
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             system_prompt="You are a precise assistant. Reply with only the value asked for, no other text.",
             retry_config=RetryConfig(callback=cb),
         )
@@ -662,7 +662,7 @@ class TestCustomRetryIntegration:
         api_module._safe_llm_call = capturing
         try:
             client = GlueLLM(
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 system_prompt="You are a precise assistant. Reply with only the value asked for.",
                 model_kwargs={"temperature": 0.9},
                 retry_config=RetryConfig(callback=cb),
@@ -696,7 +696,7 @@ class TestCustomRetryIntegration:
         api_module._safe_llm_call = capturing
         try:
             client = GlueLLM(
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 retry_config=RetryConfig(callback=cb),
             )
             result = await client.complete("Say hello briefly.")
@@ -729,7 +729,7 @@ class TestCustomRetryIntegration:
         api_module._safe_llm_call = capturing
         try:
             client = GlueLLM(
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 system_prompt="You are a precise assistant. Reply with only the value asked for.",
                 model_kwargs={"temperature": 0.9},
                 retry_config=RetryConfig(max_attempts=4, callback=cb),
@@ -763,7 +763,7 @@ class TestCustomRetryIntegration:
         api_module._safe_llm_call = always_fail
         try:
             client = GlueLLM(
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 retry_config=RetryConfig(max_attempts=5, callback=cb),
             )
             with pytest.raises(RateLimitError):

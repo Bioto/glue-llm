@@ -23,8 +23,8 @@ async def example_estimate_cost():
     print("Example 1: Estimate Cost")
     print("=" * 60)
 
-    cost = estimate_cost("openai:gpt-4o-mini", input_tokens=1000, output_tokens=500)
-    print(f"Estimated cost for 1000 in + 500 out tokens (gpt-4o-mini): ${cost:.6f}")
+    cost = estimate_cost("openai:gpt-5.4-2026-03-05", input_tokens=1000, output_tokens=500)
+    print(f"Estimated cost for 1000 in + 500 out tokens (gpt-5.4-2026-03-05): ${cost:.6f}")
 
     cost2 = estimate_cost("anthropic:claude-3-5-sonnet-20241022", input_tokens=5000, output_tokens=1000)
     print(f"Estimated cost for 5000 in + 1000 out tokens (claude-3-5-sonnet): ${cost2:.6f}")
@@ -41,8 +41,8 @@ async def example_cost_tracker_basic():
     print("=" * 60)
 
     tracker = CostTracker()
-    tracker.record_usage("openai:gpt-4o-mini", input_tokens=100, output_tokens=50)
-    tracker.record_usage("openai:gpt-4o-mini", input_tokens=200, output_tokens=100)
+    tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=100, output_tokens=50)
+    tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=200, output_tokens=100)
 
     print(f"Daily cost: ${tracker.get_daily_cost():.6f}")
     print(f"Session cost: ${tracker.get_session_cost():.6f}")
@@ -59,7 +59,7 @@ async def example_budget_limits():
     print("=" * 60)
 
     tracker = CostTracker(daily_limit=10.0, session_limit=1.0)
-    tracker.record_usage("openai:gpt-4o-mini", input_tokens=500, output_tokens=200)
+    tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=500, output_tokens=200)
 
     remaining = tracker.get_remaining_daily_budget()
     print(f"Session cost: ${tracker.get_session_cost():.6f}")
@@ -102,7 +102,7 @@ async def example_export_records():
     print("=" * 60)
 
     tracker = CostTracker()
-    tracker.record_usage("openai:gpt-4o-mini", input_tokens=50, output_tokens=20, request_id="req-1")
+    tracker.record_usage("openai:gpt-5.4-2026-03-05", input_tokens=50, output_tokens=20, request_id="req-1")
     tracker.record_usage("anthropic:claude-3-5-haiku-20241022", input_tokens=80, output_tokens=30)
 
     exported_dict = tracker.export_records("dict")

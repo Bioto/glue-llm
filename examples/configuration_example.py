@@ -127,7 +127,7 @@ Best Practices:
 
 Example .env file:
 ```
-GLUELLM_DEFAULT_MODEL=openai:gpt-4o-mini
+GLUELLM_DEFAULT_MODEL=openai:gpt-5.4-2026-03-05
 GLUELLM_MAX_TOOL_ITERATIONS=10
 OPENAI_API_KEY=your-api-key-here
 ```

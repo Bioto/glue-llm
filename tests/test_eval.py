@@ -50,7 +50,7 @@ def sample_eval_record():
     return EvalRecord(
         user_message="Test message",
         system_prompt="Test prompt",
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         final_response="Test response",
         tool_calls_made=0,
     )
@@ -1080,7 +1080,7 @@ class TestAgentDataRecording:
             description="A test agent for evaluation",
             system_prompt=SystemPrompt(content="You are a helpful test agent."),
             tools=[],
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             max_tool_iterations=5,
         )
 
@@ -1107,7 +1107,7 @@ class TestAgentDataRecording:
 
             assert data["agent_name"] == "Test Agent"
             assert data["agent_description"] == "A test agent for evaluation"
-            assert data["agent_model"] == "openai:gpt-4o-mini"
+            assert data["agent_model"] == "openai:gpt-5.4-2026-03-05"
             assert data["agent_system_prompt"] == "You are a helpful test agent."
             assert data["agent_tools"] == []
             assert data["agent_max_tool_iterations"] == 5
@@ -1125,7 +1125,7 @@ class TestAgentDataRecording:
             description="An agent with tools",
             system_prompt=SystemPrompt(content="You have tools."),
             tools=[test_tool],
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             max_tool_iterations=3,
         )
 
@@ -1192,7 +1192,7 @@ class TestAgentDataRecording:
             description="An agent for structured output",
             system_prompt=SystemPrompt(content="You provide structured answers."),
             tools=[],
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             max_tool_iterations=10,
         )
 
@@ -1219,7 +1219,7 @@ class TestAgentDataRecording:
 
             assert data["agent_name"] == "Structured Agent"
             assert data["agent_description"] == "An agent for structured output"
-            assert data["agent_model"] == "openai:gpt-4o-mini"
+            assert data["agent_model"] == "openai:gpt-5.4-2026-03-05"
             assert data["agent_max_tool_iterations"] == 10
 
     async def test_agent_context_isolation(self, temp_jsonl_file):
@@ -1232,7 +1232,7 @@ class TestAgentDataRecording:
             description="First agent",
             system_prompt=SystemPrompt(content="Agent 1 prompt"),
             tools=[],
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             max_tool_iterations=1,
         )
 
@@ -1241,7 +1241,7 @@ class TestAgentDataRecording:
             description="Second agent",
             system_prompt=SystemPrompt(content="Agent 2 prompt"),
             tools=[],
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             max_tool_iterations=2,
         )
 
@@ -1291,7 +1291,7 @@ class TestAgentDataRecording:
             description="Agent without system prompt",
             system_prompt=None,
             tools=[],
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             max_tool_iterations=5,
         )
 

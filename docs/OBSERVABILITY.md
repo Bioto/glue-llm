@@ -74,7 +74,7 @@ Context manager for manual spans:
 ```python
 from gluellm.telemetry import trace_llm_call
 
-with trace_llm_call("my_llm_call", model="openai:gpt-4o-mini"):
+with trace_llm_call("my_llm_call", model="openai:gpt-5.4-2026-03-05"):
     result = await complete("Hello")
 ```
 

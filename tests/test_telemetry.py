@@ -33,14 +33,14 @@ class TestTraceLlmCallNoOp:
     """When tracing is disabled, trace_llm_call yields a no-op span."""
 
     def test_yields_noop_span(self):
-        with trace_llm_call("openai:gpt-4o-mini", [{"role": "user", "content": "hi"}]) as span:
+        with trace_llm_call("openai:gpt-5.4-2026-03-05", [{"role": "user", "content": "hi"}]) as span:
             span.set_attribute("key", "value")
             span.set_status("ok")
             span.record_exception(Exception("test"))
 
     def test_noop_span_with_tools(self):
         tools = [lambda x: x]
-        with trace_llm_call("openai:gpt-4o-mini", [], tools=tools, correlation_id="c1") as span:
+        with trace_llm_call("openai:gpt-5.4-2026-03-05", [], tools=tools, correlation_id="c1") as span:
             assert span is not None
 
 

@@ -75,7 +75,7 @@ class TestBasicCompletion:
     async def test_client_completion(self):
         """Test completion using GlueLLM client."""
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             system_prompt="You are a helpful assistant.",
         )
 
@@ -89,7 +89,7 @@ class TestBasicCompletion:
         """Test completion with custom model."""
         result = await complete(
             user_message="Hello",
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
         )
 
         assert isinstance(result, ExecutionResult)
@@ -152,7 +152,7 @@ class TestStructuredOutput:
             hex_code: Annotated[str, Field(description="Hex color code")]
 
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             system_prompt="You extract color information.",
         )
 
@@ -302,7 +302,7 @@ class TestConversationState:
     async def test_conversation_persists(self):
         """Test that conversation history persists across calls."""
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             system_prompt="You are a helpful assistant. Remember previous messages.",
         )
 
@@ -319,7 +319,7 @@ class TestConversationState:
     async def test_conversation_reset(self):
         """Test conversation reset functionality."""
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             system_prompt="You are a helpful assistant.",
         )
 
@@ -335,7 +335,7 @@ class TestConversationState:
     async def test_tool_calls_persist_in_conversation(self):
         """Test that tool calls are part of conversation history."""
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             system_prompt="You are a math assistant.",
             tools=[math_tool],
         )
@@ -684,7 +684,7 @@ class TestStructuredCompleteValidationRetry:
             make_response(valid_content),
         ]
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         result = await client.structured_complete("Test", TestModel)
 
         assert mock_safe_call.call_count == 2
@@ -715,7 +715,7 @@ class TestStructuredCompleteValidationRetry:
 
         mock_safe_call.return_value = make_response()
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         with pytest.raises(ValidationError):
             await client.structured_complete("Test", TestModel, max_validation_retries=2)
 
@@ -742,7 +742,7 @@ class TestStructuredCompleteValidationRetry:
 
         mock_safe_call.return_value = make_response()
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         result = await client.structured_complete("Test", TestModel)
 
         assert mock_safe_call.call_count == 1
@@ -775,7 +775,7 @@ class TestSinkSystem:
 
         mock_safe_call.return_value = make_response()
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         await client.complete("Hi", sinks=[ListSink()])
 
         assert len(events_received) >= 2
@@ -811,7 +811,7 @@ class TestSinkSystem:
 
         mock_safe_call.return_value = make_response()
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         await client.complete("Hi", sinks=[Sink1(), Sink2()])
 
         assert len(events_1) == len(events_2) >= 2
@@ -840,7 +840,7 @@ class TestSinkSystem:
         mock_safe_call.return_value = make_response()
 
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
         )
         await client.complete(
             "Hi",
@@ -869,7 +869,7 @@ class TestSinkSystem:
 
         mock_safe_call.return_value = make_response()
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         await client.complete("Hi", sinks=[JsonFileSink(trace_file)])
 
         assert trace_file.exists()
@@ -897,7 +897,7 @@ class TestSinkSystem:
 
         mock_safe_call.return_value = make_response()
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         await client.complete("Hi", sinks=[ConsoleSink()])
 
         captured = capsys.readouterr()
@@ -1390,7 +1390,7 @@ class TestExecutionResultSerialization:
             raw_response=raw,
             tokens_used={"prompt": 10, "completion": 20, "total": 30},
             estimated_cost_usd=0.001,
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             structured_output=user_model,
         )
 
@@ -1458,7 +1458,7 @@ class TestAnyLlmParsedSerializationFix:
                         }
                     ],
                     "created": 123,
-                    "model": "gpt-4o-mini",
+                    "model": "gpt-5.4-2026-03-05",
                     "object": "chat.completion",
                 }
 
@@ -1510,7 +1510,7 @@ class TestAnyLlmParsedSerializationFix:
                         }
                     ],
                     "created": 123,
-                    "model": "gpt-4o-mini",
+                    "model": "gpt-5.4-2026-03-05",
                     "object": "chat.completion",
                 }
 
@@ -1538,14 +1538,14 @@ class TestProviderCache:
         fake_provider = MagicMock()
 
         with patch("gluellm.api.AnyLLM.create", return_value=fake_provider) as mock_create:
-            p1, m1 = cache.get_provider("openai:gpt-4o-mini", "sk-test")
-            p2, m2 = cache.get_provider("openai:gpt-4o-mini", "sk-test")
+            p1, m1 = cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-test")
+            p2, m2 = cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-test")
 
         # AnyLLM.create must be called exactly once; second call must hit the cache
         mock_create.assert_called_once()
         assert p1 is p2
-        assert m1 == "gpt-4o-mini"
-        assert m2 == "gpt-4o-mini"
+        assert m1 == "gpt-5.4-2026-03-05"
+        assert m2 == "gpt-5.4-2026-03-05"
 
     async def test_provider_cache_creates_separate_instance_for_different_api_keys(self):
         """Different API keys must each get their own provider instance."""
@@ -1558,8 +1558,8 @@ class TestProviderCache:
         provider_b = MagicMock()
 
         with patch("gluellm.api.AnyLLM.create", side_effect=[provider_a, provider_b]):
-            p1, _ = cache.get_provider("openai:gpt-4o-mini", "sk-key-a")
-            p2, _ = cache.get_provider("openai:gpt-4o-mini", "sk-key-b")
+            p1, _ = cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-key-a")
+            p2, _ = cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-key-b")
 
         assert p1 is provider_a
         assert p2 is provider_b
@@ -1596,7 +1596,7 @@ class TestProviderCache:
         fake_provider.client = mock_client
 
         with patch("gluellm.api.AnyLLM.create", return_value=fake_provider):
-            cache.get_provider("openai:gpt-4o-mini", "sk-test")
+            cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-test")
 
         await cache.close_all()
 
@@ -1614,7 +1614,7 @@ class TestProviderCache:
         fake_provider = MagicMock(spec=[])  # no 'client' attribute
 
         with patch("gluellm.api.AnyLLM.create", return_value=fake_provider):
-            cache.get_provider("openai:gpt-4o-mini", "sk-test")
+            cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-test")
 
         # Must not raise even when the provider has no .client
         await cache.close_all()
@@ -1638,7 +1638,7 @@ class TestProviderCache:
         fake_provider.client = mock_client
 
         with patch("gluellm.api.AnyLLM.create", return_value=fake_provider):
-            cache.get_provider("openai:gpt-4o-mini", "sk-test")
+            cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-test")
 
         await cache.close_all()
 
@@ -1659,7 +1659,7 @@ class TestProviderCache:
         fake_provider.client = mock_client
 
         with patch("gluellm.api.AnyLLM.create", return_value=fake_provider):
-            cache.get_provider("openai:gpt-4o-mini", "sk-test")
+            cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-test")
 
         await cache.close_all()
 
@@ -1690,7 +1690,7 @@ class TestProviderCache:
             id="chatcmpl-x",
             choices=[choice],
             created=int(time.time()),
-            model="gpt-4o-mini",
+            model="gpt-5.4-2026-03-05",
             object="chat.completion",
             usage=usage,
         )
@@ -1701,16 +1701,16 @@ class TestProviderCache:
 
         def fake_get_provider(model, api_key):
             get_provider_calls.append((model, api_key))
-            return mock_provider, "gpt-4o-mini"
+            return mock_provider, "gpt-5.4-2026-03-05"
 
         with patch("gluellm.api._provider_cache.get_provider", side_effect=fake_get_provider):
             await _safe_llm_call(
                 messages=[{"role": "user", "content": "hi"}],
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
             )
             await _safe_llm_call(
                 messages=[{"role": "user", "content": "hi again"}],
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
             )
 
         # Both calls must have gone through the cache lookup
@@ -1980,7 +1980,7 @@ def _make_tool_response(content: str, finish_reason: str = "stop") -> SimpleName
             )
         ],
         usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
     )
 
 
@@ -2004,7 +2004,7 @@ def _make_tool_call_response(tool_name: str, arguments: str, call_id: str = "cal
             )
         ],
         usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
     )
 
 
@@ -2032,7 +2032,7 @@ def _make_multi_tool_call_response(
             )
         ],
         usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
     )
 
 
@@ -2518,7 +2518,7 @@ class TestDualTimeoutParameters:
         return ChatCompletion(
             id="test",
             choices=[choice],
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             created=0,
             object="chat.completion",
         )
@@ -2573,13 +2573,13 @@ class TestDualTimeoutParameters:
         mock_provider.acompletion = AsyncMock(side_effect=capture_and_return)
 
         with patch("gluellm.api._provider_cache") as mock_cache:
-            mock_cache.get_provider = lambda model, api_key: (mock_provider, "gpt-4o-mini")
+            mock_cache.get_provider = lambda model, api_key: (mock_provider, "gpt-5.4-2026-03-05")
 
             from gluellm.api import _safe_llm_call
 
             await _safe_llm_call(
                 messages=[{"role": "user", "content": "hi"}],
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 request_timeout=30.0,
                 connect_timeout=5.0,
             )
@@ -2640,13 +2640,13 @@ class TestDualTimeoutParameters:
             mock_settings.default_connect_timeout = 10.0
             mock_settings.default_request_timeout = 60.0
             mock_settings.max_request_timeout = 300.0
-            mock_cache.get_provider = lambda model, api_key: (mock_provider, "gpt-4o-mini")
+            mock_cache.get_provider = lambda model, api_key: (mock_provider, "gpt-5.4-2026-03-05")
 
             from gluellm.api import _safe_llm_call
 
             await _safe_llm_call(
                 messages=[{"role": "user", "content": "hi"}],
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 connect_timeout=999.0,  # Exceeds mocked max of 30
             )
 
@@ -2822,10 +2822,10 @@ class TestPerCallConfigGaps:
         with patch("gluellm.api.settings") as mock_settings:
             mock_settings.default_condense_tool_messages = True
             mock_settings.default_tool_mode = "standard"
-            mock_settings.default_model = "openai:gpt-4o-mini"
+            mock_settings.default_model = "openai:gpt-5.4-2026-03-05"
             mock_settings.default_system_prompt = "You are helpful."
             mock_settings.max_tool_iterations = 10
-            mock_settings.tool_route_model = "openai:gpt-4o-mini"
+            mock_settings.tool_route_model = "openai:gpt-5.4-2026-03-05"
 
             client = GlueLLM()  # no condense_tool_messages passed
             assert client.condense_tool_messages is True
@@ -2985,7 +2985,7 @@ class TestPerCallConfigGaps:
 
         eval_store = AsyncMock()
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             system_prompt="You are a test assistant.",
             tools=[],
             eval_store=eval_store,
@@ -3020,7 +3020,7 @@ class TestPerCallConfigGaps:
 
         eval_store = AsyncMock()
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             system_prompt="You are a test assistant.",
             tools=[],
             eval_store=eval_store,
@@ -3142,7 +3142,7 @@ class TestNewParameters:
             return _make_tool_response("Done")
 
         with patch("gluellm.api._llm_call_with_retry", side_effect=fake_llm):
-            client = GlueLLM(model="openai:gpt-4o-mini", reasoning_effort="low")
+            client = GlueLLM(model="openai:gpt-5.4-2026-03-05", reasoning_effort="low")
             await client.complete("Hi", reasoning_effort="high")
 
         assert captured_kwargs.get("reasoning_effort") == "high"
@@ -3168,7 +3168,7 @@ class TestSummarizeOldMessages:
         from gluellm.api import _summarize_old_messages
 
         messages = [{"role": "system", "content": "You are helpful."}]
-        result = await _summarize_old_messages(messages, keep_recent=4, model="openai:gpt-4o-mini")
+        result = await _summarize_old_messages(messages, keep_recent=4, model="openai:gpt-5.4-2026-03-05")
         assert result is messages
 
     async def test_returns_original_when_not_enough_messages_to_summarize(self):
@@ -3180,7 +3180,7 @@ class TestSummarizeOldMessages:
             {"role": "user", "content": "Hi"},
             {"role": "assistant", "content": "Hello"},
         ]
-        result = await _summarize_old_messages(messages, keep_recent=4, model="openai:gpt-4o-mini")
+        result = await _summarize_old_messages(messages, keep_recent=4, model="openai:gpt-5.4-2026-03-05")
         assert result is messages
 
     async def test_summarizes_old_messages_and_keeps_recent(self):
@@ -3203,8 +3203,8 @@ class TestSummarizeOldMessages:
         mock_provider.acompletion = AsyncMock(return_value=_make_summarize_response("Summary of old turns."))
 
         with patch("gluellm.api._ProviderCache") as MockCache:
-            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-4o-mini")
-            result = await _summarize_old_messages(messages, keep_recent=2, model="openai:gpt-4o-mini")
+            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-5.4-2026-03-05")
+            result = await _summarize_old_messages(messages, keep_recent=2, model="openai:gpt-5.4-2026-03-05")
 
         assert result[0] == {"role": "system", "content": "You are helpful."}
         assert "[Conversation Summary]" in result[1]["content"]
@@ -3229,8 +3229,8 @@ class TestSummarizeOldMessages:
         mock_provider.acompletion = AsyncMock(return_value=_make_summarize_response("Summary."))
 
         with patch("gluellm.api._ProviderCache") as MockCache:
-            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-4o-mini")
-            result = await _summarize_old_messages(messages, keep_recent=1, model="openai:gpt-4o-mini")
+            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-5.4-2026-03-05")
+            result = await _summarize_old_messages(messages, keep_recent=1, model="openai:gpt-5.4-2026-03-05")
 
         assert result[1]["role"] == "user"
 
@@ -3250,8 +3250,8 @@ class TestSummarizeOldMessages:
         mock_provider.acompletion = AsyncMock(side_effect=RuntimeError("LLM down"))
 
         with patch("gluellm.api._ProviderCache") as MockCache:
-            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-4o-mini")
-            result = await _summarize_old_messages(messages, keep_recent=1, model="openai:gpt-4o-mini")
+            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-5.4-2026-03-05")
+            result = await _summarize_old_messages(messages, keep_recent=1, model="openai:gpt-5.4-2026-03-05")
 
         assert result is messages
 
@@ -3283,8 +3283,8 @@ class TestSummarizeOldMessages:
         mock_provider.acompletion = capture_acompletion
 
         with patch("gluellm.api._ProviderCache") as MockCache:
-            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-4o-mini")
-            await _summarize_old_messages(messages, keep_recent=1, model="openai:gpt-4o-mini")
+            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-5.4-2026-03-05")
+            await _summarize_old_messages(messages, keep_recent=1, model="openai:gpt-5.4-2026-03-05")
 
         transcript_content = captured_messages[1]["content"]
         assert "Look at this image:" in transcript_content
@@ -3311,7 +3311,7 @@ class TestSummarizeOldMessages:
             result = await _summarize_old_messages(
                 messages,
                 keep_recent=1,
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 use_aaak=True,
             )
 
@@ -3342,7 +3342,7 @@ class TestSummarizeOldMessages:
             result = await _summarize_old_messages(
                 messages,
                 keep_recent=1,
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 use_aaak=True,
             )
 
@@ -3367,7 +3367,7 @@ class TestSummarizeOldMessages:
             result = await _summarize_old_messages(
                 messages,
                 keep_recent=1,
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 use_aaak=True,
             )
 
@@ -3390,7 +3390,7 @@ class TestSummarizeOldMessages:
             await _summarize_old_messages(
                 messages,
                 keep_recent=1,
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 use_aaak=True,
                 aaak_model="openai:gpt-4o-nano",
             )
@@ -3415,11 +3415,11 @@ class TestSummarizeOldMessages:
         mock_provider.acompletion = AsyncMock(return_value=_make_summarize_response("Prose summary."))
 
         with patch("gluellm.api._ProviderCache") as MockCache:
-            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-4o-mini")
+            MockCache.return_value.get_provider.return_value = (mock_provider, "gpt-5.4-2026-03-05")
             result = await _summarize_old_messages(
                 messages,
                 keep_recent=1,
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 use_aaak=False,
             )
 
@@ -3476,26 +3476,26 @@ class TestSummarizeContextIntegration:
 
     async def test_summarize_context_disabled_by_default(self):
         """GlueLLM.summarize_context defaults to False."""
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         assert client.summarize_context is False
 
     async def test_summarize_context_can_be_enabled_on_client(self):
         """summarize_context=True is stored on the client instance."""
-        client = GlueLLM(model="openai:gpt-4o-mini", summarize_context=True)
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05", summarize_context=True)
         assert client.summarize_context is True
 
     async def test_summarize_context_threshold_defaults_from_settings(self):
         """summarize_context_threshold defaults to settings.default_summarize_context_threshold."""
         from gluellm.config import settings
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         assert client.summarize_context_threshold == settings.default_summarize_context_threshold
 
     async def test_summarize_context_keep_recent_defaults_from_settings(self):
         """summarize_context_keep_recent defaults to settings.default_summarize_context_keep_recent."""
         from gluellm.config import settings
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         assert client.summarize_context_keep_recent == settings.default_summarize_context_keep_recent
 
     async def test_summarize_context_threshold_can_be_overridden(self):
@@ -3503,7 +3503,7 @@ class TestSummarizeContextIntegration:
         from gluellm import SummarizeContextConfig
 
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             summarize_context=SummarizeContextConfig(threshold=10),
         )
         assert client.summarize_context_threshold == 10
@@ -3513,7 +3513,7 @@ class TestSummarizeContextIntegration:
         from gluellm import SummarizeContextConfig
 
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             summarize_context=SummarizeContextConfig(keep_recent=3),
         )
         assert client.summarize_context_keep_recent == 3
@@ -3544,7 +3544,7 @@ class TestSummarizeContextIntegration:
             from gluellm import SummarizeContextConfig
 
             client = GlueLLM(
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 summarize_context=SummarizeContextConfig(enabled=True, threshold=4),
             )
             # Pre-seed conversation: 4 messages → messages list before complete("new")
@@ -3578,7 +3578,7 @@ class TestSummarizeContextIntegration:
             from gluellm import SummarizeContextConfig
 
             client = GlueLLM(
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 model_kwargs={"temperature": 0.2},
                 summarize_context=SummarizeContextConfig(enabled=True, threshold=4),
             )
@@ -3604,7 +3604,7 @@ class TestSummarizeContextIntegration:
             from gluellm import SummarizeContextConfig
 
             client = GlueLLM(
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
                 summarize_context=SummarizeContextConfig(enabled=True, threshold=20),
             )
             await client.complete("Hi")
@@ -3621,7 +3621,7 @@ class TestSummarizeContextIntegration:
             patch("gluellm.api._summarize_old_messages", AsyncMock()) as mock_sum,
             patch("gluellm.api._llm_call_with_retry", AsyncMock(return_value=mock_response)),
         ):
-            client = GlueLLM(model="openai:gpt-4o-mini")
+            client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
             await client.complete("Hi")
 
         assert not mock_sum.called

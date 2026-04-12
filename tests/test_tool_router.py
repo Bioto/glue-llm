@@ -110,7 +110,7 @@ class TestResolveToolRoute:
 
         with patch("gluellm.tool_router.any_llm_acompletion", side_effect=fake_llm):
             tools = [dummy_tool, get_weather, calculate]
-            matched = await resolve_tool_route("weather and dummy", tools, model="openai:gpt-4o-mini")
+            matched = await resolve_tool_route("weather and dummy", tools, model="openai:gpt-5.4-2026-03-05")
             assert len(matched) == 2
             names = [t.__name__ for t in matched]
             assert "get_weather" in names
@@ -123,7 +123,7 @@ class TestResolveToolRoute:
 
         with patch("gluellm.tool_router.any_llm_acompletion", side_effect=failing_llm):
             tools = [dummy_tool, get_weather]
-            matched = await resolve_tool_route("weather", tools, model="openai:gpt-4o-mini")
+            matched = await resolve_tool_route("weather", tools, model="openai:gpt-5.4-2026-03-05")
             assert matched == tools
 
     @pytest.mark.asyncio
@@ -141,12 +141,12 @@ class TestResolveToolRoute:
 
         with patch("gluellm.tool_router.any_llm_acompletion", side_effect=bad_json_llm):
             tools = [dummy_tool, get_weather]
-            matched = await resolve_tool_route("weather", tools, model="openai:gpt-4o-mini")
+            matched = await resolve_tool_route("weather", tools, model="openai:gpt-5.4-2026-03-05")
             assert matched == tools
 
     @pytest.mark.asyncio
     async def test_empty_tools_returns_empty(self):
-        matched = await resolve_tool_route("anything", [], model="openai:gpt-4o-mini")
+        matched = await resolve_tool_route("anything", [], model="openai:gpt-5.4-2026-03-05")
         assert matched == []
 
 
@@ -177,7 +177,7 @@ def make_tool_call_response(tool_name: str, arguments: str, call_id: str) -> Sim
             )
         ],
         usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
     )
 
 
@@ -191,7 +191,7 @@ def make_text_response(content: str) -> SimpleNamespace:
             )
         ],
         usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
     )
 
 

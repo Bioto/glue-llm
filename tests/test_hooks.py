@@ -456,7 +456,7 @@ def _llm_response(content: str = "Done", tool_calls=None):
     resp.choices[0].message.tool_calls = tool_calls
     resp.choices[0].finish_reason = "stop" if not tool_calls else "tool_calls"
     resp.usage = None
-    resp.model = "openai:gpt-4o-mini"
+    resp.model = "openai:gpt-5.4-2026-03-05"
     return resp
 
 
@@ -1086,7 +1086,7 @@ class TestBatchHooks:
         registry.add_hook(HookStage.POST_BATCH_ITEM, HookConfig(handler=post_hook, name="post"))
 
         processor = BatchProcessor(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             hook_registry=registry,
             config=BatchConfig(max_concurrent=1),
         )
@@ -1129,7 +1129,7 @@ class TestBatchHooks:
         registry.add_hook(HookStage.POST_BATCH_ITEM, HookConfig(handler=post_hook, name="post"))
 
         processor = BatchProcessor(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             hook_registry=registry,
             config=BatchConfig(max_concurrent=1, retry_failed=False),
         )
@@ -1179,7 +1179,7 @@ class TestPreEvalRecordHook:
             eval_store=FakeEvalStore(),
             user_message="My email is alice@example.com please help",
             system_prompt="You are helpful",
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             messages_snapshot=[],
             start_time=0.0,
             on_eval_record_hooks=hooks,
@@ -1205,7 +1205,7 @@ class TestPreEvalRecordHook:
             eval_store=FakeEvalStore(),
             user_message="original message",
             system_prompt="",
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             messages_snapshot=[],
             start_time=0.0,
         )

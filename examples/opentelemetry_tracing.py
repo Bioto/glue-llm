@@ -89,7 +89,7 @@ async def simple_completion_example():
     print("Example 1: Simple Completion with Tracing")
     print("=" * 70)
 
-    result = await complete("What is the capital of France?", model="openai:gpt-4o-mini")
+    result = await complete("What is the capital of France?", model="openai:gpt-5.4-2026-03-05")
 
     print(f"\nResponse: {result.final_response}")
     print(f"Tool calls made: {result.tool_calls_made}")
@@ -102,7 +102,7 @@ async def tool_execution_example():
     print("=" * 70)
 
     client = GlueLLM(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         tools=[get_current_time, calculate_sum, get_weather],
         system_prompt="You are a helpful assistant with access to various tools.",
     )
@@ -133,7 +133,7 @@ async def structured_output_example():
     print("Example 3: Structured Output with Tracing")
     print("=" * 70)
 
-    client = GlueLLM(model="openai:gpt-4o-mini")
+    client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
 
     result = await client.structured_complete("Calculate 15 * 8 and explain the result", response_format=MathResult)
 
@@ -152,7 +152,7 @@ async def multi_turn_conversation_example():
     print("=" * 70)
 
     client = GlueLLM(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         tools=[calculate_sum],
         system_prompt="You are a math tutor. Help the student learn step by step.",
     )
@@ -180,7 +180,7 @@ async def error_handling_example():
         raise ValueError("This tool intentionally fails for demonstration")
 
     client = GlueLLM(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         tools=[failing_tool],
     )
 

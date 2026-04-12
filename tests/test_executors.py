@@ -20,7 +20,7 @@ def _fake_llm_response(content: str = "Hello"):
     resp.choices[0].message.tool_calls = None
     resp.choices[0].finish_reason = "stop"
     resp.usage = None
-    resp.model = "openai:gpt-4o-mini"
+    resp.model = "openai:gpt-5.4-2026-03-05"
     return resp
 
 

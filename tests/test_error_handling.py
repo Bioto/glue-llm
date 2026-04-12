@@ -203,7 +203,7 @@ class TestRetryLogic:
             mock_response,
         ]
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         result = await client.complete("Test message")
 
         # Should have retried and eventually succeeded
@@ -226,7 +226,7 @@ class TestRetryLogic:
             mock_response,
         ]
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         result = await client.complete("Test message")
 
         assert mock_safe_call.call_count == 2
@@ -237,7 +237,7 @@ class TestRetryLogic:
         """Test that token limit errors do NOT trigger retries."""
         mock_safe_call.side_effect = TokenLimitError("Context length exceeded")
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
 
         with pytest.raises(TokenLimitError):
             await client.complete("Test message with too many tokens")
@@ -250,7 +250,7 @@ class TestRetryLogic:
         """Test that authentication errors do NOT trigger retries."""
         mock_safe_call.side_effect = AuthenticationError("Invalid API key")
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
 
         with pytest.raises(AuthenticationError):
             await client.complete("Test message")
@@ -264,7 +264,7 @@ class TestRetryLogic:
         # Always raise RateLimitError - test the actual retry decorator
         mock_safe_call.side_effect = RateLimitError("Rate limit exceeded")
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
 
         with pytest.raises(RateLimitError):
             await client.complete("Test message")
@@ -313,7 +313,7 @@ class TestToolExecutionErrorHandling:
         mock_safe_call.side_effect = [tool_call_response, final_response]
 
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             tools=[error_tool],
         )
         result = await client.complete("Use error_tool")
@@ -358,7 +358,7 @@ class TestToolExecutionErrorHandling:
         mock_safe_call.side_effect = [tool_call_response, final_response]
 
         client = GlueLLM(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             tools=[dummy_tool],
         )
         result = await client.complete("Test")
@@ -402,7 +402,7 @@ class TestStructuredCompleteErrorHandling:
             mock_response,
         ]
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         result = await client.structured_complete("Test", TestModel)
 
         # Verify retry happened (2 calls total)
@@ -441,7 +441,7 @@ class TestRetryBackoffTiming:
             mock_response,
         ]
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         await client.complete("Test message")
 
         # Verify sleep was called (exponential backoff waits)
@@ -480,7 +480,7 @@ class TestRetryBackoffTiming:
                 mock_response,
             ]
 
-            client = GlueLLM(model="openai:gpt-4o-mini")
+            client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
             await client.complete("Test message")
 
             # Verify all sleep times are <= max_wait
@@ -517,7 +517,7 @@ class TestRetryBackoffTiming:
                 mock_response,
             ]
 
-            client = GlueLLM(model="openai:gpt-4o-mini")
+            client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
             await client.complete("Test message")
 
             # Verify sleep time is >= min_wait
@@ -547,7 +547,7 @@ class TestRetryBackoffTiming:
             mock_response,
         ]
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
 
         # Measure actual time taken
         start_time = time.time()
@@ -582,7 +582,7 @@ class TestRetryBackoffTiming:
             mock_response,
         ]
 
-        client = GlueLLM(model="openai:gpt-4o-mini")
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
         await client.complete("Test message")
 
         # Verify exponential pattern: each wait should be roughly 2x the previous

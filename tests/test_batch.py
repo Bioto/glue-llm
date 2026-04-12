@@ -659,7 +659,7 @@ class TestBatchStructuredIntegration:
                 "Extract city info: Tokyo is in Japan",
             ],
             response_format=CityInfo,
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             system_prompt="Extract the city name and country from the text.",
             config=BatchConfig(max_concurrent=2),
         )
@@ -688,7 +688,7 @@ class TestBatchStructuredIntegration:
             pytest.skip("OPENAI_API_KEY not set")
 
         processor = BatchProcessor(
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
             config=BatchConfig(max_concurrent=2),
         )
 

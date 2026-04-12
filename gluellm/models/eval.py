@@ -24,7 +24,7 @@ class EvalRecord(BaseModel):
         timestamp: When the request was made
         user_message: The user's input message
         system_prompt: System prompt used for this request
-        model: Model identifier (e.g., "openai:gpt-4o-mini")
+        model: Model identifier (e.g., "openai:gpt-5.4-2026-03-05")
         messages_snapshot: Full conversation state at time of request
         final_response: The final text response from the model
         structured_output: Serialized structured output (if applicable)

@@ -73,7 +73,7 @@ from gluellm import GlueLLM
 
 # These are passed per-call — there are no instance-level defaults on GlueLLM.
 # Pass them to each method you call on the client.
-client = GlueLLM(model="openai:gpt-4o-mini")
+client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
 
 result = await client.complete(
     "Hello",

@@ -773,7 +773,7 @@ def _calculate_and_record_cost(
     """Calculate cost from token usage and record to session tracker.
 
     Args:
-        model: Model identifier (e.g., "openai:gpt-4o-mini")
+        model: Model identifier (e.g., "openai:gpt-5.4-2026-03-05")
         tokens_used: Token usage dictionary with 'prompt', 'completion', 'total'
         correlation_id: Optional correlation ID for logging
         track_costs: If False, skip recording and return None. If None, use settings.track_costs.
@@ -4702,6 +4702,9 @@ async def complete(
     retry_enabled: bool | None = None,
     # -- Context management --
     summarize_context: SummarizeContextConfig | bool | None = None,
+    aaak_compression_enabled: bool | None = None,
+    aaak_compression_model: str | None = None,
+    aaak_tool_condensing: bool | None = None,
     # -- Observability / behavior --
     correlation_id: str | None = None,
     enable_eval_recording: bool | None = None,
@@ -4739,6 +4742,9 @@ async def complete(
         enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
         hook_registry: Optional hook registry for pre/post tool and iteration hooks.
         summarize_context: ``True``/``False``, or ``SummarizeContextConfig`` for summarization defaults.
+        aaak_compression_enabled: When context summarization runs, use AAAK compression (defaults to settings).
+        aaak_compression_model: Model for AAAK compression when enabled (defaults to settings).
+        aaak_tool_condensing: Encode condensed tool rounds as AAAK ``[AT]`` blocks (defaults to settings).
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
     Returns:
@@ -4764,6 +4770,9 @@ async def complete(
         rate_limit_config=rate_limit_config,
         retry_config=retry_config,
         summarize_context=summarize_context,
+        aaak_compression_enabled=aaak_compression_enabled,
+        aaak_compression_model=aaak_compression_model,
+        aaak_tool_condensing=aaak_tool_condensing,
         guardrails=guardrails,
         hook_registry=hook_registry,
         session_label=session_label,
@@ -4826,6 +4835,9 @@ async def structured_complete(
     retry_enabled: bool | None = None,
     # -- Context management --
     summarize_context: SummarizeContextConfig | bool | None = None,
+    aaak_compression_enabled: bool | None = None,
+    aaak_compression_model: str | None = None,
+    aaak_tool_condensing: bool | None = None,
     # -- Observability / behavior --
     correlation_id: str | None = None,
     enable_eval_recording: bool | None = None,
@@ -4869,6 +4881,9 @@ async def structured_complete(
         enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
         max_validation_retries: Max retries when Pydantic validation fails (default 3).
         summarize_context: ``True``/``False``, or ``SummarizeContextConfig`` for summarization defaults.
+        aaak_compression_enabled: When context summarization runs, use AAAK compression (defaults to settings).
+        aaak_compression_model: Model for AAAK compression when enabled (defaults to settings).
+        aaak_tool_condensing: Encode condensed tool rounds as AAAK ``[AT]`` blocks (defaults to settings).
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p).
 
     Returns:
@@ -4928,6 +4943,9 @@ async def structured_complete(
         rate_limit_config=rate_limit_config,
         retry_config=retry_config,
         summarize_context=summarize_context,
+        aaak_compression_enabled=aaak_compression_enabled,
+        aaak_compression_model=aaak_compression_model,
+        aaak_tool_condensing=aaak_tool_condensing,
         guardrails=guardrails,
         hook_registry=hook_registry,
         session_label=session_label,
@@ -5154,6 +5172,9 @@ async def stream_complete(
     retry_enabled: bool | None = None,
     # -- Context management --
     summarize_context: SummarizeContextConfig | bool | None = None,
+    aaak_compression_enabled: bool | None = None,
+    aaak_compression_model: str | None = None,
+    aaak_tool_condensing: bool | None = None,
     # -- Observability / behavior --
     correlation_id: str | None = None,
     enable_eval_recording: bool | None = None,
@@ -5199,6 +5220,9 @@ async def stream_complete(
         track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
         max_tokens: Optional maximum completion tokens per LLM call (None = provider default; not all models support this).
         summarize_context: ``True``/``False``, or ``SummarizeContextConfig`` for summarization defaults.
+        aaak_compression_enabled: When context summarization runs, use AAAK compression (defaults to settings).
+        aaak_compression_model: Model for AAAK compression when enabled (defaults to settings).
+        aaak_tool_condensing: Encode condensed tool rounds as AAAK ``[AT]`` blocks (defaults to settings).
         **model_kwargs: Extra params for acompletion (e.g. temperature, top_p), same as ``complete``.
 
     Yields:
@@ -5226,6 +5250,9 @@ async def stream_complete(
         rate_limit_config=rate_limit_config,
         retry_config=retry_config,
         summarize_context=summarize_context,
+        aaak_compression_enabled=aaak_compression_enabled,
+        aaak_compression_model=aaak_compression_model,
+        aaak_tool_condensing=aaak_tool_condensing,
         guardrails=guardrails,
     )
     async for chunk in client.stream_complete(

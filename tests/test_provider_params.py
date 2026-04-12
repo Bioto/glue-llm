@@ -79,7 +79,7 @@ class TestNormalizeModelParams:
                 None,
             ),
             (
-                "openai:gpt-4o-mini",
+                "openai:gpt-5.4-2026-03-05",
                 None,
                 {},
                 None,
@@ -127,9 +127,9 @@ class TestNormalizeModelParams:
         assert result_max == ANTHROPIC_DEFAULT_MAX_TOKENS
 
     async def test_reasoning_effort_stripped_for_unsupported_models(self):
-        """reasoning_effort is removed when model does not support it (e.g. gpt-4o-mini)."""
+        """reasoning_effort is removed when model does not support it (e.g. gpt-5.4-2026-03-05)."""
         _, kwargs = normalize_model_params(
-            "openai:gpt-4o-mini", None, {"reasoning_effort": "high"}
+            "openai:gpt-5.4-2026-03-05", None, {"reasoning_effort": "high"}
         )
         assert "reasoning_effort" not in kwargs
 

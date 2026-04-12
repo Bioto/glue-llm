@@ -118,7 +118,7 @@ from gluellm import GlueLLM
 client = GlueLLM(
     tools=[...],
     tool_mode="dynamic",
-    tool_route_model="openai:gpt-4o-mini",  # optional: fast cheap model for the router
+    tool_route_model="openai:gpt-5.4-2026-03-05",  # optional: fast cheap model for the router
 )
 result = await client.complete("Check the weather and search flights...")
 ```
@@ -221,7 +221,7 @@ The summarization call is cheap and doesn't need the full capability of your pri
 client = GlueLLM(
     model="openai:gpt-4o",
     summarize_context=True,
-    summarize_context_model="openai:gpt-4o-mini",  # cheaper summarizer
+    summarize_context_model="openai:gpt-5.4-2026-03-05",  # cheaper summarizer
 )
 ```
 

@@ -18,7 +18,7 @@ Example:
     >>>
     >>> # Track a call
     >>> tracker.record_usage(
-    ...     model="openai:gpt-4o-mini",
+    ...     model="openai:gpt-5.4-2026-03-05",
     ...     input_tokens=1000,
     ...     output_tokens=500,
     ... )
@@ -131,7 +131,7 @@ class CostTracker:
         """Record a usage event.
 
         Args:
-            model: Model identifier (e.g., "openai:gpt-4o-mini")
+            model: Model identifier (e.g., "openai:gpt-5.4-2026-03-05")
             input_tokens: Number of input tokens
             output_tokens: Number of output tokens
             cached_input_tokens: Number of cached input tokens
@@ -474,7 +474,7 @@ def estimate_cost(
     """Estimate the cost of an LLM call without recording it.
 
     Args:
-        model: Model identifier (e.g., "openai:gpt-4o-mini")
+        model: Model identifier (e.g., "openai:gpt-5.4-2026-03-05")
         input_tokens: Number of input tokens
         output_tokens: Number of output tokens
         cached_input_tokens: Number of cached input tokens

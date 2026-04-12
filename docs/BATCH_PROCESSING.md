@@ -257,7 +257,7 @@ For advanced use cases, use `BatchProcessor` directly:
 from gluellm import BatchProcessor, BatchConfig
 
 processor = BatchProcessor(
-    model="openai:gpt-4o-mini",
+    model="openai:gpt-5.4-2026-03-05",
     system_prompt="You are a helpful assistant.",
     tools=[my_tool],
     max_tool_iterations=5,

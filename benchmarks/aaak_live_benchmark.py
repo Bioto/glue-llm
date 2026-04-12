@@ -81,7 +81,7 @@ RecallQuestion = dict[str, str | list[str]]
 _ENC = tiktoken.encoding_for_model("gpt-4o")
 
 MODEL = "openai:gpt-5.4-nano"
-JUDGE_MODEL = "openai:gpt-4o-mini"
+JUDGE_MODEL = "openai:gpt-5.4-2026-03-05"
 
 # Benchmark-only: merged into provider.acompletion for judge, recall answers, prose summarize,
 # and AAAK compress. Overridable via --no-deterministic-sampling.
@@ -2158,7 +2158,7 @@ def main() -> None:
         "--judge-model",
         type=str,
         default=None,
-        help="Model for LLM judge (default: openai:gpt-4o-mini). Pass same value as MODEL to use one model for everything.",
+        help="Model for LLM judge (default: openai:gpt-5.4-2026-03-05). Pass same value as MODEL to use one model for everything.",
     )
     args = parser.parse_args()
     asyncio.run(main_async(args))

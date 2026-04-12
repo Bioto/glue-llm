@@ -25,7 +25,7 @@ async def example_basic_error_handling():
     try:
         result = await complete(
             user_message="What is the capital of France?",
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
         )
         print(f"Success: {result.final_response}")
 
@@ -60,7 +60,7 @@ async def example_tool_error_handling():
         return f"Processed value: {value}"
 
     client = GlueLLM(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         tools=[risky_tool],
     )
 
@@ -94,7 +94,7 @@ async def example_with_retry_visibility():
     try:
         result = await complete(
             user_message="Tell me a short joke",
-            model="openai:gpt-4o-mini",
+            model="openai:gpt-5.4-2026-03-05",
         )
         print(f"✅ Success: {result.final_response}")
         print("\n💡 If rate limits were hit, you'd see retry attempts in the logs above")
@@ -115,7 +115,7 @@ async def example_catching_specific_errors():
         try:
             result = await complete(
                 user_message=prompt,
-                model="openai:gpt-4o-mini",
+                model="openai:gpt-5.4-2026-03-05",
             )
             return result.final_response
 
@@ -160,7 +160,7 @@ async def example_checking_error_details():
         return x / y  # Could raise ZeroDivisionError
 
     client = GlueLLM(
-        model="openai:gpt-4o-mini",
+        model="openai:gpt-5.4-2026-03-05",
         tools=[buggy_tool],
     )
 

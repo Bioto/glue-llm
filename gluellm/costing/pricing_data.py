@@ -30,7 +30,7 @@ class ModelPricing:
 OPENAI_PRICING: dict[str, ModelPricing] = {
     # GPT-4o models
     "gpt-4o": ModelPricing(2.50, 10.00, cached_input_price_per_million=1.25),
-    "gpt-4o-mini": ModelPricing(0.15, 0.60, cached_input_price_per_million=0.075),
+    "gpt-5.4-2026-03-05": ModelPricing(0.15, 0.60, cached_input_price_per_million=0.075),
     "gpt-4o-2024-11-20": ModelPricing(2.50, 10.00, cached_input_price_per_million=1.25),
     "gpt-4o-2024-08-06": ModelPricing(2.50, 10.00, cached_input_price_per_million=1.25),
     "gpt-4o-2024-05-13": ModelPricing(5.00, 15.00),
@@ -112,7 +112,7 @@ def get_model_pricing(provider: str, model_name: str) -> ModelPricing | None:
         ModelPricing if found, None otherwise
 
     Example:
-        >>> pricing = get_model_pricing("openai", "gpt-4o-mini")
+        >>> pricing = get_model_pricing("openai", "gpt-5.4-2026-03-05")
         >>> if pricing:
         ...     print(f"Input: ${pricing.input_price_per_million}/1M tokens")
     """
@@ -152,7 +152,7 @@ def calculate_cost(
         Cost in USD, or None if pricing is not available
 
     Example:
-        >>> cost = calculate_cost("openai", "gpt-4o-mini", 1000, 500)
+        >>> cost = calculate_cost("openai", "gpt-5.4-2026-03-05", 1000, 500)
         >>> print(f"Cost: ${cost:.6f}")
     """
     pricing = get_model_pricing(provider, model_name)
@@ -183,7 +183,7 @@ def list_available_models(provider: str | None = None) -> list[str]:
     Example:
         >>> models = list_available_models("openai")
         >>> print(models[:3])
-        ['openai:gpt-4o', 'openai:gpt-4o-mini', ...]
+        ['openai:gpt-4o', 'openai:gpt-5.4-2026-03-05', ...]
     """
     if provider:
         provider_pricing = PRICING_BY_PROVIDER.get(provider.lower(), {})

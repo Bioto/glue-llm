@@ -34,7 +34,7 @@ GlueLLM reuses HTTP clients via the provider cache. Call `close_providers()` onl
 
 ## Model Selection
 
-- **Lighter models**: Use `gpt-4o-mini` or similar for routing, summarization, simple tasks
+- **Lighter models**: Use `gpt-5.4-2026-03-05` or similar for routing, summarization, simple tasks
 - **tool_route_model**: In dynamic mode, use a fast model for routing to reduce latency
 - **Embeddings**: Use smaller embedding models when dimensions allow
 
