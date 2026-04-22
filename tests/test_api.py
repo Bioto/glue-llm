@@ -3148,6 +3148,27 @@ class TestNewParameters:
         assert captured_kwargs.get("reasoning_effort") == "high"
 
 
+class TestReasoningEffortOpenAIIntegration:
+    """Live OpenAI: unsupported models must surface provider errors for reasoning_effort."""
+
+    @pytest.mark.integration
+    async def test_complete_raises_llm_error_when_openai_model_does_not_support_reasoning_effort(
+        self,
+    ):
+        import os
+
+        key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if not key or key == "sk-test":
+            pytest.skip("OPENAI_API_KEY not set or placeholder")
+
+        with pytest.raises(LLMError):
+            await complete(
+                user_message="Reply with the single word: hi",
+                model="openai:gpt-4o-mini",
+                reasoning_effort="high",
+            )
+
+
 # ---------------------------------------------------------------------------
 # Conversation summarization
 # ---------------------------------------------------------------------------

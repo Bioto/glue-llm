@@ -19,10 +19,10 @@ async def example_reasoning_effort():
     print("=" * 70)
 
     # reasoning_effort: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto"
-    # Supported by o1, o3, o4-mini only. With gpt-5.4-2026-03-05 it is auto-omitted.
+    # Use a model that supports it (e.g. o4-mini); unsupported models error at the provider.
     result = await complete(
         user_message="What is the next number in: 2, 4, 8, 16, ?",
-        model="openai:gpt-5.4-2026-03-05",  # Use "openai:o4-mini" for reasoning_effort
+        model="openai:o4-mini",
         reasoning_effort="high",
         system_prompt="You are a logic puzzle assistant. Think step by step.",
     )
