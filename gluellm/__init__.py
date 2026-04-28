@@ -52,7 +52,8 @@ Quick Start:
 Main Components:
     - GlueLLM: Main client class for LLM interactions
     - complete: Quick completion function
-    - structured_complete: Quick structured output function
+    - structured_complete: Quick structured output via Chat Completions
+    - structured_response: Quick structured output via the OpenAI Responses API
     - Conversation: Conversation history manager
     - Message: Individual message model
     - Role: Message role enumeration
@@ -97,6 +98,7 @@ from gluellm.api import (
     reset_session_tracker,
     stream_complete,
     structured_complete,
+    structured_response,
 )
 from gluellm.batch import (
     BatchProcessor,
@@ -205,6 +207,7 @@ __all__ = [
     "embed",
     "stream_complete",
     "structured_complete",
+    "structured_response",
     "ExecutionResult",
     "EmbeddingResult",
     "StreamingChunk",

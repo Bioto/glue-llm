@@ -7,7 +7,8 @@ handling with automatic retries.
 Core Components:
     - GlueLLM: Main client class for LLM interactions
     - complete: Quick completion function with tool execution
-    - structured_complete: Quick structured output function
+    - structured_complete: Quick structured output via Chat Completions
+    - structured_response: Quick structured output via the OpenAI Responses API
     - ToolExecutionResult: Result container for tool execution
 
 Exception Hierarchy:
@@ -1807,6 +1808,767 @@ async def _safe_llm_call(
         raise classified_error from e
 
 
+# ============================================================================
+# OpenAI Responses API helpers
+# ============================================================================
+#
+# The Responses API uses a different protocol than Chat Completions:
+#   - ``input`` items (string OR list of typed dicts) instead of ``messages``
+#   - ``instructions`` parameter instead of a system role message
+#   - Tools are flat dicts (``{"type": "function", "name": ..., ...}``) rather
+#     than the nested chat-completions shape (``{"type": "function", "function": {...}}``)
+#   - Tool calls come back as ``function_call`` output items with ``call_id``
+#     instead of ``message.tool_calls``; tool results are sent back as
+#     ``function_call_output`` input items.
+#   - Structured output is requested via ``text={"format": {"type": "json_schema",
+#     "name": ..., "strict": True, "schema": ...}}`` rather than ``response_format``.
+#   - Token usage uses ``input_tokens``/``output_tokens`` rather than
+#     ``prompt_tokens``/``completion_tokens``.
+#
+# To preserve full feature parity with the chat-completions code path
+# (summarisation, AAAK condensing, eval recording, hooks, validation retries,
+# tool loop, ...) we keep the **internal** representation in chat-completions
+# message/tool-call shape and translate at the API boundary in both directions.
+
+# Chat-completions/GlueLLM kwargs that must not be forwarded to ``aresponses``:
+# ``logprobs``/``top_logprobs`` are not supported, ``response_format`` is
+# replaced by ``text``, and ``session_label`` is OpenAI-platform specific.
+_PROVIDER_ARESPONSES_SKIP_KEYS = frozenset(
+    {
+        "max_tool_iterations",
+        "execute_tools",
+        "rate_limit_algorithm",
+        "logprobs",
+        "top_logprobs",
+        "response_format",
+        "session_label",
+        "n",
+        "stop",
+    }
+)
+
+
+def _callable_to_responses_tool(fn: Callable) -> dict[str, Any]:
+    """Convert a Python callable to the Responses API flat tool format.
+
+    The Responses API expects ``{"type": "function", "name": ..., "description":
+    ..., "parameters": ...}`` whereas chat completions uses the nested
+    ``{"type": "function", "function": {...}}`` shape. We reuse any_llm's
+    schema generation and then flatten.
+    """
+    from any_llm.tools import callable_to_tool
+
+    chat_tool = callable_to_tool(fn)
+    function = chat_tool.get("function") or {}
+    return {
+        "type": "function",
+        "name": function.get("name", ""),
+        "description": function.get("description"),
+        "parameters": function.get("parameters") or {},
+    }
+
+
+def _responses_tools_format(
+    tools: list[Callable | dict[str, Any]] | None,
+) -> list[dict[str, Any]] | None:
+    """Convert mixed callables / pre-formatted dicts into Responses tool format.
+
+    Pre-formatted dicts may already be flat (built-in tools like
+    ``{"type": "web_search_preview"}``) or in chat-completions nested form;
+    we flatten the nested form and pass everything else through.
+    """
+    if not tools:
+        return None
+
+    out: list[dict[str, Any]] = []
+    for tool in tools:
+        if callable(tool):
+            out.append(_callable_to_responses_tool(tool))
+            continue
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+            fn = tool["function"]
+            out.append(
+                {
+                    "type": "function",
+                    "name": fn.get("name", ""),
+                    "description": fn.get("description"),
+                    "parameters": fn.get("parameters") or {},
+                }
+            )
+        else:
+            out.append(tool)
+    return out
+
+
+def _messages_to_response_input(
+    messages: list[dict[str, Any]],
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """Translate chat-completions messages into (instructions, input_items).
+
+    The Responses API accepts a single optional ``instructions`` string and a
+    list of typed input items. We collapse all ``role: system`` messages into
+    one ``instructions`` string (joined by blank lines) and convert the rest:
+
+    - ``user`` / ``assistant`` (with content) → message item with role+content
+    - ``assistant`` with ``tool_calls`` → one ``function_call`` item per tool call
+    - ``tool`` → ``function_call_output`` item using ``tool_call_id`` as ``call_id``
+
+    Empty assistant messages (pure tool-call rounds) are not emitted as
+    standalone messages; only their tool calls show up.
+    """
+    instructions_parts: list[str] = []
+    input_items: list[dict[str, Any]] = []
+
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+
+        if role == "system":
+            if isinstance(content, str) and content.strip():
+                instructions_parts.append(content)
+            continue
+
+        if role == "tool":
+            input_items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": msg.get("tool_call_id", ""),
+                    "output": content if isinstance(content, str) else json.dumps(content),
+                }
+            )
+            continue
+
+        if role == "assistant":
+            if isinstance(content, str) and content.strip():
+                input_items.append({"role": "assistant", "content": content})
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                if isinstance(fn, dict):
+                    name = fn.get("name", "")
+                    arguments = fn.get("arguments", "")
+                else:
+                    name = getattr(fn, "name", "")
+                    arguments = getattr(fn, "arguments", "")
+                input_items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": tc.get("id", ""),
+                        "name": name,
+                        "arguments": arguments or "",
+                    }
+                )
+            continue
+
+        if role == "user":
+            if isinstance(content, list):
+                input_items.append({"role": "user", "content": content})
+            else:
+                input_items.append({"role": "user", "content": str(content or "")})
+            continue
+
+        # Unknown role: pass through as a user message containing JSON
+        input_items.append({"role": "user", "content": json.dumps(msg)})
+
+    instructions = "\n\n".join(instructions_parts) if instructions_parts else None
+    return instructions, input_items
+
+
+def _stringify_response_input_for_log(input_param: list[dict[str, Any]]) -> str:
+    """Best-effort plain-text rendering of Responses input items for logs/eval.
+
+    Concatenates any text content found across messages and tool outputs so
+    callers (eval store, conversation tracking) get something meaningful when
+    a user submits a structured ``ResponseInputParam`` rather than a string.
+    """
+    parts: list[str] = []
+    for item in input_param:
+        if not isinstance(item, dict):
+            parts.append(str(item))
+            continue
+        item_type = item.get("type")
+        if item_type == "function_call_output":
+            parts.append(f"[tool_result:{item.get('call_id', '')}] {item.get('output', '')}")
+            continue
+        if item_type == "function_call":
+            parts.append(f"[tool_call:{item.get('name', '')}] {item.get('arguments', '')}")
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text") or part.get("input_text") or ""
+                    if text:
+                        parts.append(text)
+                else:
+                    parts.append(str(part))
+        else:
+            parts.append(json.dumps(item, default=str))
+    return "\n".join(p for p in parts if p)
+
+
+def _coerce_response_input_to_messages(input_param: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Best-effort conversion of Responses input items into chat-completions messages.
+
+    Used so a list ``user_input`` can flow through the same internal
+    ``messages`` plumbing (summarisation, conversation tracking, eval) as a
+    string. Multimodal content lists are preserved verbatim on user/assistant
+    messages so they round-trip back through ``_messages_to_response_input``.
+    """
+    out: list[dict[str, Any]] = []
+    for item in input_param:
+        if not isinstance(item, dict):
+            out.append({"role": "user", "content": str(item)})
+            continue
+
+        item_type = item.get("type")
+
+        if item_type == "function_call":
+            out.append(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": item.get("call_id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": item.get("name", ""),
+                                "arguments": item.get("arguments", ""),
+                            },
+                        }
+                    ],
+                }
+            )
+            continue
+
+        if item_type == "function_call_output":
+            output = item.get("output", "")
+            out.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": item.get("call_id", ""),
+                    "content": output if isinstance(output, str) else json.dumps(output),
+                }
+            )
+            continue
+
+        # Message-shaped item (with role/content). 'developer' role maps to system.
+        role = item.get("role")
+        if role:
+            mapped_role = "system" if role == "developer" else role
+            out.append({"role": mapped_role, "content": item.get("content", "")})
+            continue
+
+        # Fallback: stringify unknown items as a user message
+        out.append({"role": "user", "content": json.dumps(item)})
+
+    return out
+
+
+def _adapt_response_function_call(rfc: Any) -> SimpleNamespace:
+    """Wrap a ``ResponseFunctionToolCall`` in the chat-completions tool_call shape.
+
+    This lets ``_execute_tool_calls_round`` consume responses-API tool calls
+    without modification. The synthetic ``id`` field stores the responses
+    ``call_id`` so the resulting ``{"role": "tool", "tool_call_id": ...}``
+    message round-trips back through ``_messages_to_response_input`` into a
+    matching ``function_call_output`` item.
+    """
+    return SimpleNamespace(
+        id=getattr(rfc, "call_id", "") or "",
+        type="function",
+        function=SimpleNamespace(
+            name=getattr(rfc, "name", "") or "",
+            arguments=getattr(rfc, "arguments", "") or "",
+        ),
+    )
+
+
+def _extract_response_function_calls(resp: Any) -> list[SimpleNamespace]:
+    """Return adapted function-call objects from a Responses API output.
+
+    Skips built-in tool calls (web_search, code_interpreter, ...) - those run
+    server-side and don't need local execution.
+    """
+    output = getattr(resp, "output", None) or []
+    calls: list[SimpleNamespace] = []
+    for item in output:
+        item_type = getattr(item, "type", None) if not isinstance(item, dict) else item.get("type")
+        if item_type != "function_call":
+            continue
+        if isinstance(item, dict):
+            calls.append(
+                _adapt_response_function_call(
+                    SimpleNamespace(
+                        call_id=item.get("call_id", ""),
+                        name=item.get("name", ""),
+                        arguments=item.get("arguments", ""),
+                    )
+                )
+            )
+        else:
+            calls.append(_adapt_response_function_call(item))
+    return calls
+
+
+def _extract_response_text(resp: Any) -> str:
+    """Extract concatenated assistant text from a Responses API response.
+
+    Prefers the convenience ``output_text`` field when present, then falls
+    back to walking ``output`` items collecting ``output_text`` parts.
+    """
+    text = getattr(resp, "output_text", None)
+    if isinstance(text, str) and text:
+        return text
+
+    output = getattr(resp, "output", None) or []
+    parts: list[str] = []
+    for item in output:
+        if isinstance(item, dict):
+            if item.get("type") == "message":
+                for c in item.get("content", []) or []:
+                    if isinstance(c, dict) and c.get("type") == "output_text":
+                        parts.append(c.get("text", ""))
+            continue
+        for c in getattr(item, "content", []) or []:
+            if getattr(c, "type", None) == "output_text":
+                parts.append(getattr(c, "text", "") or "")
+            elif isinstance(c, dict) and c.get("type") == "output_text":
+                parts.append(c.get("text", ""))
+    return "".join(parts)
+
+
+def _extract_response_token_usage(resp: Any) -> dict[str, int] | None:
+    """Extract token usage from a Response, mapped onto the chat-completions schema.
+
+    Returns ``{"prompt": int, "completion": int, "total": int}`` so existing
+    cost tracking and ``_track_usage`` aggregation work without modification.
+    """
+    usage = getattr(resp, "usage", None)
+    if not usage:
+        return None
+
+    if isinstance(usage, dict):
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0))
+        output_tokens = usage.get("output_tokens", usage.get("completion_tokens", 0))
+        total_tokens = usage.get("total_tokens", 0)
+    else:
+        input_tokens = (
+            getattr(usage, "input_tokens", None)
+            or getattr(usage, "prompt_tokens", None)
+            or 0
+        )
+        output_tokens = (
+            getattr(usage, "output_tokens", None)
+            or getattr(usage, "completion_tokens", None)
+            or 0
+        )
+        total_tokens = getattr(usage, "total_tokens", 0)
+
+    return {
+        "prompt": int(input_tokens) if isinstance(input_tokens, (int, float)) else 0,
+        "completion": int(output_tokens) if isinstance(output_tokens, (int, float)) else 0,
+        "total": int(total_tokens) if isinstance(total_tokens, (int, float)) else 0,
+    }
+
+
+def _extract_response_parsed(resp: Any, response_format: type[BaseModel]) -> Any:
+    """Best-effort extraction of an already-parsed structured output from a Response.
+
+    Returns either an instance of ``response_format``, a dict, or None.
+    The OpenAI Responses SDK exposes parsed structured output through
+    ``output_parsed`` when ``text.format`` is a json_schema, but the field
+    is not always populated; callers fall back to JSON-decoding the text.
+    """
+    parsed = getattr(resp, "output_parsed", None)
+    if parsed is not None:
+        return parsed
+
+    output = getattr(resp, "output", None) or []
+    for item in output:
+        contents = getattr(item, "content", None) if not isinstance(item, dict) else item.get("content")
+        for c in contents or []:
+            parsed_part = getattr(c, "parsed", None) if not isinstance(c, dict) else c.get("parsed")
+            if parsed_part is not None:
+                return parsed_part
+    return None
+
+
+def _serialize_response_to_dict(response: Any) -> dict[str, Any]:
+    """Serialize a Responses API ``Response`` to a plain dict for eval recording.
+
+    Mirrors ``_serialize_chat_completion_to_dict`` in spirit: we extract only
+    the safe, schema-stable fields and avoid invoking ``model_dump`` on the
+    full object so that user-defined parsed structures do not produce
+    ``PydanticSerializationUnexpectedValue`` warnings.
+    """
+    usage = getattr(response, "usage", None)
+    output_items: list[dict[str, Any]] = []
+    for item in getattr(response, "output", None) or []:
+        item_type = getattr(item, "type", None) if not isinstance(item, dict) else item.get("type")
+        if item_type == "function_call":
+            if isinstance(item, dict):
+                output_items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": item.get("call_id"),
+                        "name": item.get("name"),
+                        "arguments": item.get("arguments"),
+                    }
+                )
+            else:
+                output_items.append(
+                    {
+                        "type": "function_call",
+                        "call_id": getattr(item, "call_id", None),
+                        "name": getattr(item, "name", None),
+                        "arguments": getattr(item, "arguments", None),
+                    }
+                )
+        elif item_type == "message":
+            content_out: list[dict[str, Any]] = []
+            contents = getattr(item, "content", None) if not isinstance(item, dict) else item.get("content")
+            for c in contents or []:
+                ctype = getattr(c, "type", None) if not isinstance(c, dict) else c.get("type")
+                ctext = getattr(c, "text", None) if not isinstance(c, dict) else c.get("text")
+                content_out.append({"type": ctype, "text": ctext})
+            output_items.append(
+                {
+                    "type": "message",
+                    "role": getattr(item, "role", None) if not isinstance(item, dict) else item.get("role"),
+                    "content": content_out,
+                }
+            )
+        else:
+            output_items.append({"type": item_type})
+
+    return {
+        "id": getattr(response, "id", None),
+        "model": getattr(response, "model", None),
+        "object": getattr(response, "object", None),
+        "output_text": getattr(response, "output_text", None),
+        "output": output_items,
+        "usage": {
+            "input_tokens": getattr(usage, "input_tokens", None) if usage else None,
+            "output_tokens": getattr(usage, "output_tokens", None) if usage else None,
+            "total_tokens": getattr(usage, "total_tokens", None) if usage else None,
+        },
+    }
+
+
+def _build_responses_text_format(response_format: type[BaseModel] | None) -> dict[str, Any] | None:
+    """Construct the ``text.format`` payload for a json_schema-based structured output.
+
+    Uses :func:`create_normalized_model` so the schema is OpenAI-strict-mode
+    compatible (no ``additionalProperties: True``, no unsupported union forms,
+    consistent ``$defs``).
+    """
+    if response_format is None:
+        return None
+
+    try:
+        normalized = create_normalized_model(response_format)
+        schema = normalized.model_json_schema()
+        if schema.get("additionalProperties") is True:
+            logger.warning(
+                f"Schema normalization for {response_format.__name__} left "
+                "additionalProperties=True; falling back to raw schema."
+            )
+            schema = response_format.model_json_schema()
+    except Exception as e:
+        logger.warning(
+            f"Schema normalization failed for {response_format.__name__}: {e}; "
+            "using raw schema",
+            exc_info=True,
+        )
+        schema = response_format.model_json_schema()
+
+    return {
+        "format": {
+            "type": "json_schema",
+            "name": response_format.__name__,
+            "strict": True,
+            "schema": schema,
+        }
+    }
+
+
+async def _safe_responses_call(
+    input_data: str | list[dict[str, Any]],
+    model: str,
+    *,
+    instructions: str | None = None,
+    tools: list[Callable | dict[str, Any]] | None = None,
+    response_format: type[BaseModel] | None = None,
+    request_timeout: float | None = None,
+    connect_timeout: float | None = None,
+    api_key: str | None = None,
+    max_tokens: int | None = None,
+    rate_limit_config: RateLimitConfig | None = None,
+    **model_kwargs: Any,
+) -> Any:
+    """Call ``provider.aresponses`` with error classification and tracing.
+
+    The Responses API analogue of :func:`_safe_llm_call`. Returns the raw
+    provider response (``Response`` or ``ResponseResource``); structured
+    output extraction and tool-call adaptation happen in higher layers.
+
+    Notes on parameter translation:
+
+    * ``max_tokens`` is forwarded as ``max_output_tokens`` (the Responses
+      equivalent), unless the caller already passed ``max_output_tokens``.
+    * ``response_format`` is converted to ``text={"format": json_schema}``
+      via :func:`_build_responses_text_format`.
+    * ``reasoning_effort`` (chat-completions style) is wrapped into
+      ``reasoning={"effort": ...}`` because the Responses API expects a dict.
+    * ``parallel_tool_calls`` is coerced to ``int`` to match the
+      ``aresponses`` signature.
+    """
+    correlation_id = get_correlation_id()
+    request_timeout = request_timeout or settings.default_request_timeout
+    request_timeout = min(request_timeout, settings.max_request_timeout)
+    connect_timeout = connect_timeout or settings.default_connect_timeout
+    connect_timeout = min(connect_timeout, settings.max_connect_timeout)
+    _patch_any_llm_openai_converter()
+
+    # Filter and translate kwargs for the Responses surface
+    kwargs = {
+        k: v
+        for k, v in model_kwargs.items()
+        if k not in _PROVIDER_ARESPONSES_SKIP_KEYS
+    }
+
+    # max_tokens -> max_output_tokens (caller-provided max_output_tokens wins)
+    max_output_tokens = kwargs.pop("max_output_tokens", None) or max_tokens
+    if max_output_tokens is not None:
+        kwargs["max_output_tokens"] = max_output_tokens
+
+    # reasoning_effort: str -> reasoning: {"effort": str}
+    reasoning_effort = kwargs.pop("reasoning_effort", None)
+    if reasoning_effort is not None and "reasoning" not in kwargs:
+        if reasoning_effort != "auto" and reasoning_effort is not None:
+            kwargs["reasoning"] = {"effort": reasoning_effort}
+    if isinstance(kwargs.get("reasoning"), str):
+        kwargs["reasoning"] = {"effort": kwargs["reasoning"]}
+
+    # parallel_tool_calls: aresponses signature is int | None
+    if "parallel_tool_calls" in kwargs and kwargs["parallel_tool_calls"] is not None:
+        kwargs["parallel_tool_calls"] = int(bool(kwargs["parallel_tool_calls"]))
+
+    # Inject httpx.Timeout if caller hasn't set one
+    if "timeout" not in kwargs:
+        kwargs["timeout"] = httpx.Timeout(
+            connect=connect_timeout,
+            read=request_timeout,
+            write=request_timeout,
+            pool=connect_timeout,
+        )
+
+    # Tools: convert callables/nested dicts into Responses flat format
+    prepared_tools = _responses_tools_format(tools) if tools else None
+
+    # Structured output via text.format
+    text_param = _build_responses_text_format(response_format)
+    if text_param is not None:
+        kwargs.setdefault("text", text_param)
+
+    if instructions is not None:
+        kwargs.setdefault("instructions", instructions)
+
+    # Rate limiting
+    provider_name = extract_provider_from_model(model)
+    rate_limit_key = (
+        f"global:{provider_name}"
+        if not api_key
+        else f"api_key:{api_key_hmac_fingerprint(api_key)}"
+    )
+    rate_limit_algorithm = rate_limit_config.algorithm if rate_limit_config else None
+    await acquire_rate_limit(rate_limit_key, algorithm=rate_limit_algorithm)
+
+    start_time = time.time()
+    logger.debug(
+        f"Making Responses API call: model={model}, has_tools={bool(prepared_tools)}, "
+        f"has_text_format={text_param is not None}, "
+        f"has_input_list={isinstance(input_data, list)}, "
+        f"request_timeout={request_timeout}s, correlation_id={correlation_id}"
+    )
+
+    try:
+        with trace_llm_call(
+            model=model,
+            messages=input_data if isinstance(input_data, list) else [{"role": "user", "content": input_data}],
+            tools=prepared_tools,
+            stream=False,
+            response_format=response_format.__name__ if response_format else None,
+            correlation_id=correlation_id,
+        ) as span:
+            if correlation_id:
+                set_span_attributes(span, correlation_id=correlation_id)
+
+            provider, model_id = _provider_cache.get_provider(model, api_key)
+
+            response = await asyncio.wait_for(
+                provider.aresponses(
+                    model=model_id,
+                    input_data=input_data,
+                    tools=prepared_tools if prepared_tools else None,
+                    **kwargs,
+                ),
+                timeout=request_timeout,
+            )
+
+            elapsed_time = time.time() - start_time
+            tokens_used = _extract_response_token_usage(response)
+            if tokens_used:
+                model_name = model.split(":", 1)[1] if ":" in model else model
+                call_cost = calculate_cost(
+                    provider=provider_name,
+                    model_name=model_name,
+                    input_tokens=tokens_used.get("prompt", 0),
+                    output_tokens=tokens_used.get("completion", 0),
+                )
+                record_token_usage(span, tokens_used, cost_usd=call_cost)
+                cost_str = f", cost=${call_cost:.6f}" if call_cost else ""
+                logger.info(
+                    f"Responses API call completed: model={model}, latency={elapsed_time:.3f}s, "
+                    f"tokens={tokens_used['total']} (input={tokens_used['prompt']}, "
+                    f"output={tokens_used['completion']}){cost_str}, correlation_id={correlation_id}"
+                )
+
+            has_tool_calls = bool(_extract_response_function_calls(response))
+            set_span_attributes(
+                span,
+                **{
+                    "llm.response.has_tool_calls": has_tool_calls,
+                    "llm.response.kind": "responses",
+                },
+            )
+
+            log_llm_metrics(
+                model=model,
+                latency=elapsed_time,
+                tokens_used=tokens_used,
+                finish_reason=getattr(response, "status", None),
+                has_tool_calls=has_tool_calls,
+                error=False,
+            )
+
+            return response
+
+    except TimeoutError:
+        elapsed_time = time.time() - start_time
+        logger.error(
+            f"Responses API call timed out after {elapsed_time:.3f}s "
+            f"(request_timeout={request_timeout}s): model={model}, correlation_id={correlation_id}",
+            exc_info=True,
+        )
+        log_llm_metrics(
+            model=model,
+            latency=elapsed_time,
+            tokens_used=None,
+            finish_reason=None,
+            has_tool_calls=False,
+            error=True,
+            error_type="TimeoutError",
+        )
+        raise
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        classified_error = classify_llm_error(e)
+        error_type = type(classified_error).__name__
+        cause_chain = _build_cause_chain(e)
+        logger.error(
+            f"Responses API call failed after {elapsed_time:.3f}s: model={model}, "
+            f"error={classified_error}, error_type={error_type}, "
+            f"cause_chain={cause_chain}, correlation_id={correlation_id}",
+            exc_info=True,
+        )
+        log_llm_metrics(
+            model=model,
+            latency=elapsed_time,
+            tokens_used=None,
+            finish_reason=None,
+            has_tool_calls=False,
+            error=True,
+            error_type=error_type,
+        )
+        raise classified_error from e
+
+
+async def _responses_call_with_retry(
+    input_data: str | list[dict[str, Any]],
+    model: str,
+    *,
+    instructions: str | None = None,
+    tools: list[Callable | dict[str, Any]] | None = None,
+    response_format: type[BaseModel] | None = None,
+    request_timeout: float | None = None,
+    connect_timeout: float | None = None,
+    api_key: str | None = None,
+    max_tokens: int | None = None,
+    retry_config: RetryConfig | None = None,
+    rate_limit_config: RateLimitConfig | None = None,
+    **model_kwargs: Any,
+) -> Any:
+    """Make a Responses API call with retry semantics matching :func:`_llm_call_with_retry`."""
+    cfg = retry_config or RetryConfig(
+        retry_enabled=True,
+        max_attempts=settings.retry_max_attempts,
+        min_wait=float(settings.retry_min_wait),
+        max_wait=float(settings.retry_max_wait),
+        multiplier=float(settings.retry_multiplier),
+    )
+    effective_max = 1 if not cfg.retry_enabled else cfg.max_attempts
+    kwargs = dict(model_kwargs)
+
+    for attempt in range(effective_max):
+        try:
+            final_max_tokens = kwargs.pop("max_tokens", None) or max_tokens
+            return await _safe_responses_call(
+                input_data=input_data,
+                model=model,
+                instructions=instructions,
+                tools=tools,
+                response_format=response_format,
+                request_timeout=request_timeout,
+                connect_timeout=connect_timeout,
+                api_key=api_key,
+                max_tokens=final_max_tokens,
+                rate_limit_config=rate_limit_config,
+                **kwargs,
+            )
+        except Exception as e:
+            if attempt + 1 >= effective_max:
+                raise
+
+            if cfg.callback is not None:
+                if asyncio.iscoroutinefunction(cfg.callback):
+                    should_retry, next_params = await cfg.callback(e, attempt + 1)
+                else:
+                    should_retry, next_params = cfg.callback(e, attempt + 1)
+                if not should_retry:
+                    raise
+                if next_params:
+                    kwargs.update(next_params)
+            elif cfg.retry_on is not None:
+                if not isinstance(e, tuple(cfg.retry_on)):
+                    raise
+            else:
+                if not should_retry_error(e):
+                    raise
+
+            wait_time = min(cfg.max_wait, cfg.min_wait * (cfg.multiplier ** attempt))
+            logger.warning(
+                f"Responses API call failed (attempt {attempt + 1}/{effective_max}), "
+                f"retrying in {wait_time:.2f}s: {e}"
+            )
+            await asyncio.sleep(wait_time)
+
+
 async def _llm_call_with_retry(
     messages: list[dict],
     model: str,
@@ -1940,15 +2702,18 @@ class ExecutionResult(BaseModel, Generic[T]):
     @field_serializer("raw_response")
     @staticmethod
     def serialize_raw_response(value: Any, _info: Any) -> dict[str, Any] | None:
-        """Serialize raw_response to a plain dict, omitting the provider SDK's `parsed` field.
+        """Serialize raw_response to a plain dict.
 
-        Calling model_dump() on a ParsedChatCompletion triggers a Pydantic
-        PydanticSerializationUnexpectedValue warning because the base schema declares
-        `parsed: None` while the runtime object holds the user's Pydantic model.
+        Dispatches on the response shape so both Chat Completions
+        (``choices``) and Responses API (``output``) objects round-trip
+        without triggering ``PydanticSerializationUnexpectedValue`` warnings
+        from user-defined parsed structures.
         """
         if value is None:
             return None
-        return _serialize_chat_completion_to_dict(value)
+        if hasattr(value, "choices"):
+            return _serialize_chat_completion_to_dict(value)
+        return _serialize_response_to_dict(value)
 
     def __len__(self) -> int:
         """Return the length of the final response or tool execution history."""
@@ -3587,6 +4352,732 @@ class GlueLLM:
             # Clear correlation ID after request completes
             clear_correlation_id()
 
+    async def _llm_responses_call(
+        self,
+        merged_registry: HookRegistry,
+        **kwargs: Any,
+    ) -> Any:
+        """Wrap :func:`_responses_call_with_retry`, firing ON_LLM_RETRY hooks.
+
+        Mirrors :meth:`_llm_call` but for the OpenAI Responses API.
+        """
+        retry_hooks = merged_registry.get_hooks(HookStage.ON_LLM_RETRY)
+
+        if not retry_hooks:
+            return await _responses_call_with_retry(**kwargs)
+
+        original_retry_config: RetryConfig | None = kwargs.pop("retry_config", None)
+        cfg = original_retry_config or RetryConfig(
+            retry_enabled=True,
+            max_attempts=settings.retry_max_attempts,
+            min_wait=float(settings.retry_min_wait),
+            max_wait=float(settings.retry_max_wait),
+            multiplier=float(settings.retry_multiplier),
+        )
+        effective_max = 1 if not cfg.retry_enabled else cfg.max_attempts
+
+        async def hooked_callback(exc: Exception, attempt: int) -> tuple[bool, dict]:
+            wait_time = min(cfg.max_wait, cfg.min_wait * (cfg.multiplier ** (attempt - 1)))
+            await self._hook_manager.execute_hooks(
+                content=str(exc),
+                stage=HookStage.ON_LLM_RETRY,
+                metadata={
+                    "attempt": attempt,
+                    "max_attempts": effective_max,
+                    "wait_seconds": wait_time,
+                    "exception_type": type(exc).__name__,
+                    "endpoint": "responses",
+                },
+                hooks=retry_hooks,
+            )
+            if cfg.callback is not None:
+                if asyncio.iscoroutinefunction(cfg.callback):
+                    return await cfg.callback(exc, attempt)
+                return cfg.callback(exc, attempt)
+            return should_retry_error(exc), {}
+
+        hooked_config = RetryConfig(
+            retry_enabled=cfg.retry_enabled,
+            max_attempts=cfg.max_attempts,
+            min_wait=cfg.min_wait,
+            max_wait=cfg.max_wait,
+            multiplier=cfg.multiplier,
+            callback=hooked_callback,
+        )
+        return await _responses_call_with_retry(retry_config=hooked_config, **kwargs)
+
+    async def structured_response(
+        self,
+        user_input: str | list[dict[str, Any]],
+        response_format: type[T],
+        # -- Core --
+        api_key: str | None = None,
+        model: str | None = None,
+        tools: list[Callable] | None = None,
+        # -- Model generation --
+        max_tokens: int | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        # -- Tools --
+        condense_tool_messages: bool | None = None,
+        execute_tools: bool = True,
+        parallel_tool_calls: bool | None = None,
+        tool_execution_order: ToolExecutionOrder | None = None,
+        tool_mode: ToolMode | None = None,
+        # -- Timeouts --
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
+        # -- Resilience --
+        rate_limit_config: RateLimitConfig | None = None,
+        retry_config: RetryConfig | None = None,
+        retry_enabled: bool | None = None,
+        # -- Context management --
+        summarize_context: SummarizeContextConfig | bool | None = None,
+        # -- Observability / behavior --
+        correlation_id: str | None = None,
+        enable_eval_recording: bool | None = None,
+        guardrails: GuardrailsConfig | None = None,
+        max_validation_retries: int | None = None,
+        on_status: OnStatusCallback = None,
+        sinks: list[Sink] | None = None,
+        track_costs: bool | None = None,
+        **model_kwargs: Any,
+    ) -> ExecutionResult[T]:
+        """Structured completion using the OpenAI Responses API.
+
+        Behavioural twin of :meth:`structured_complete` — supports the same
+        tool-execution loop, dynamic tool routing, guardrails (input + output
+        with retry), validation-aware retries, conversation summarisation,
+        AAAK compression and condensing, hook stages, eval recording, cost
+        tracking, status events and sinks. Differences are confined to the
+        wire protocol:
+
+        * Calls ``provider.aresponses`` instead of ``provider.acompletion``.
+        * ``user_input`` may be a plain string OR a Responses
+          ``ResponseInputParam`` list (multimodal, prefilled tool history,
+          etc.). Lists are coerced into the internal message log so all
+          context-management features still apply.
+        * Structured output is enforced via ``text={"format": json_schema}``.
+        * Tools are flattened to the Responses tool shape; tool calls are
+          adapted to the chat-completions tool_call shape so the existing
+          ``_execute_tool_calls_round`` plumbing is reused unchanged.
+
+        Args:
+            user_input: User prompt as a string, or a list of typed Responses
+                input items for multimodal/prefilled-history use cases.
+            response_format: Pydantic model class for structured output.
+            (all other args mirror :meth:`structured_complete`)
+
+        Returns:
+            ExecutionResult with ``structured_output`` populated.
+
+        Raises:
+            Same exception hierarchy as :meth:`structured_complete`.
+        """
+        if is_shutting_down():
+            raise RuntimeError("Cannot process request: shutdown in progress")
+
+        effective_guardrails = guardrails if guardrails is not None else self.guardrails
+        effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
+        effective_condense = (
+            condense_tool_messages if condense_tool_messages is not None else self.condense_tool_messages
+        )
+        effective_tool_mode: ToolMode = (
+            tool_mode if tool_mode is not None else self.tool_mode
+        )
+        effective_tool_execution_order: ToolExecutionOrder = (
+            tool_execution_order if tool_execution_order is not None else self.tool_execution_order
+        )
+        effective_retry_config = retry_config if retry_config is not None else self.retry_config
+        if retry_enabled is not None and not retry_enabled:
+            cfg = effective_retry_config
+            effective_retry_config = (
+                RetryConfig(retry_enabled=False)
+                if cfg is None
+                else RetryConfig(
+                    **{**cfg.model_dump(exclude={"callback"}), "retry_enabled": False, "callback": cfg.callback}
+                )
+            )
+        effective_rate_limit_config = rate_limit_config if rate_limit_config is not None else self.rate_limit_config
+        effective_eval_store = None if enable_eval_recording is False else self.eval_store
+        call_model_kwargs = dict(model_kwargs)
+        override_max_tool_iterations = call_model_kwargs.pop("max_tool_iterations", None)
+        effective_max_tool_iterations = (
+            override_max_tool_iterations
+            if override_max_tool_iterations is not None
+            else self.max_tool_iterations
+        )
+        effective_model_kwargs = {**self.model_kwargs, **call_model_kwargs}
+        if reasoning_effort is not None:
+            effective_model_kwargs["reasoning_effort"] = reasoning_effort
+        if parallel_tool_calls is not None:
+            effective_model_kwargs["parallel_tool_calls"] = parallel_tool_calls
+        effective_summarize_cfg = _merge_summarize_context_for_call(self._summarize_context_cfg, summarize_context)
+        effective_summarize_context_model = _summarize_model_for_call(effective_summarize_cfg, model or self.model)
+
+        if correlation_id:
+            set_correlation_id(correlation_id)
+        elif not get_correlation_id():
+            set_correlation_id()
+        correlation_id = get_correlation_id()
+
+        # Normalise user_input -> a single textual user_message (for guardrails,
+        # logs, conversation tracking) and a parallel chat-completions message
+        # list (for tool-loop bookkeeping, summarisation, AAAK condensing).
+        if isinstance(user_input, str):
+            user_message_text = user_input
+            extra_input_messages: list[dict[str, Any]] = []
+        else:
+            user_message_text = _stringify_response_input_for_log(user_input)
+            extra_input_messages = _coerce_response_input_to_messages(user_input)
+
+        logger.info(
+            f"Starting structured response: correlation_id={correlation_id}, "
+            f"response_format={response_format.__name__}, "
+            f"input_kind={'string' if isinstance(user_input, str) else 'list'}, "
+            f"message_length={len(user_message_text)}"
+        )
+
+        _sr_merged_registry = self._get_merged_hook_registry()
+        if effective_guardrails:
+            try:
+                user_message_text = await self._run_guardrails(
+                    user_message_text, effective_guardrails, "input", _sr_merged_registry
+                )
+            except GuardrailBlockedError:
+                raise
+
+        start_time = time.time()
+        tools_to_use = tools if tools is not None else self.tools
+        all_tools = tools_to_use
+        static_tools = [t for t in all_tools if is_static_tool(t)]
+        dynamic_tools = [t for t in all_tools if not is_static_tool(t)]
+        router_tool = None
+        if effective_tool_mode == "dynamic" and all_tools:
+            router_tool = build_router_tool(dynamic_tools)
+            active_tools: list[Callable] = [router_tool] + static_tools
+        else:
+            active_tools = all_tools
+        system_prompt_content = self._format_system_prompt(tools=active_tools)
+        messages_snapshot: list[dict] = []
+        result: ExecutionResult | None = None
+        error: Exception | None = None
+
+        try:
+            with ShutdownContext():
+                # The conversation always sees the textual user message so
+                # downstream consumers (eval store, multi-turn replay) can
+                # treat structured_response and structured_complete uniformly.
+                self._conversation.add_message(Role.USER, user_message_text)
+
+                system_message = {"role": "system", "content": system_prompt_content}
+                # Insert any list-form extras AFTER the existing conversation
+                # but BEFORE the auto-added USER message, so the chronological
+                # order matches what the user constructed.
+                if extra_input_messages:
+                    history = self._conversation.messages_dict
+                    base = history[:-1]  # all but the just-added user msg
+                    last_user = history[-1:]
+                    messages = [system_message] + base + extra_input_messages + last_user
+                else:
+                    messages = [system_message] + self._conversation.messages_dict
+                messages_snapshot = messages.copy()
+
+                tool_execution_history: list[dict[str, Any]] = []
+                tool_calls_made = 0
+                total_tokens_used: dict[str, int] | None = None
+                total_cost = 0.0
+
+                def _track_usage(resp: Any) -> None:
+                    nonlocal total_tokens_used, total_cost
+                    iteration_tokens = _extract_response_token_usage(resp)
+                    if iteration_tokens:
+                        if total_tokens_used is None:
+                            total_tokens_used = iteration_tokens.copy()
+                        else:
+                            for key in ("prompt", "completion", "total"):
+                                total_tokens_used[key] = total_tokens_used.get(key, 0) + iteration_tokens.get(key, 0)
+                    iteration_cost = _calculate_and_record_cost(
+                        model=model or self.model,
+                        tokens_used=iteration_tokens,
+                        correlation_id=correlation_id,
+                        track_costs=track_costs,
+                    )
+                    if iteration_cost is not None:
+                        total_cost += iteration_cost
+
+                # PHASE 1: Tool execution loop
+                if active_tools and execute_tools:
+                    logger.debug(
+                        f"Starting Responses tool phase: max_iterations={effective_max_tool_iterations}, "
+                        f"tools_available={len(active_tools)}, tool_mode={effective_tool_mode}"
+                    )
+                    _sr_pre_iter_hooks = _sr_merged_registry.get_hooks(HookStage.PRE_ITERATION)
+                    _sr_post_iter_hooks = _sr_merged_registry.get_hooks(HookStage.POST_ITERATION)
+                    for iteration in range(effective_max_tool_iterations):
+                        logger.debug(
+                            f"Responses tool iteration {iteration + 1}/{effective_max_tool_iterations}"
+                        )
+
+                        try:
+                            _thr_sr = effective_summarize_cfg.threshold
+                            _kr_sr = effective_summarize_cfg.keep_recent
+                            if (
+                                effective_summarize_cfg.enabled
+                                and _thr_sr is not None
+                                and len(messages) > _thr_sr
+                            ):
+                                messages = await _summarize_old_messages(
+                                    messages,
+                                    keep_recent=_kr_sr
+                                    if _kr_sr is not None
+                                    else settings.default_summarize_context_keep_recent,
+                                    model=effective_summarize_context_model,
+                                    use_aaak=self.aaak_compression_enabled,
+                                    aaak_model=self.aaak_compression_model,
+                                    completion_extra=effective_model_kwargs,
+                                )
+
+                            if _sr_pre_iter_hooks:
+                                _last_user_msg = next(
+                                    (
+                                        m.get("content", "") or ""
+                                        for m in reversed(messages)
+                                        if m.get("role") == "user"
+                                    ),
+                                    "",
+                                )
+                                if isinstance(_last_user_msg, list):
+                                    _last_user_msg = ""
+                                await self._hook_manager.execute_hooks(
+                                    content=_last_user_msg,
+                                    stage=HookStage.PRE_ITERATION,
+                                    metadata={
+                                        "iteration": iteration + 1,
+                                        "tool_count": len(active_tools),
+                                        "endpoint": "responses",
+                                    },
+                                    hooks=_sr_pre_iter_hooks,
+                                )
+
+                            instructions, input_items = _messages_to_response_input(messages)
+
+                            await emit_status(
+                                ProcessEvent(
+                                    kind="llm_call_start",
+                                    correlation_id=correlation_id,
+                                    timestamp=time.time(),
+                                    iteration=iteration + 1,
+                                    model=model or self.model,
+                                    message_count=len(messages),
+                                ),
+                                on_status,
+                                sinks=sinks,
+                            )
+                            response = await self._llm_responses_call(
+                                _sr_merged_registry,
+                                input_data=input_items,
+                                model=model or self.model,
+                                instructions=instructions,
+                                tools=active_tools,
+                                # No structured-output schema during the tool phase
+                                request_timeout=request_timeout,
+                                connect_timeout=connect_timeout,
+                                api_key=api_key,
+                                max_tokens=effective_max_tokens,
+                                retry_config=effective_retry_config,
+                                rate_limit_config=effective_rate_limit_config,
+                                **effective_model_kwargs,
+                            )
+                            response_tool_calls = _extract_response_function_calls(response)
+                            _sr_has_tool_calls = bool(response_tool_calls)
+                            await emit_status(
+                                ProcessEvent(
+                                    kind="llm_call_end",
+                                    correlation_id=correlation_id,
+                                    timestamp=time.time(),
+                                    iteration=iteration + 1,
+                                    model=model or self.model,
+                                    has_tool_calls=_sr_has_tool_calls,
+                                    token_usage=_extract_response_token_usage(response),
+                                ),
+                                on_status,
+                                sinks=sinks,
+                            )
+                        except LLMError as e:
+                            cause_chain = _build_cause_chain(e)
+                            logger.error(
+                                f"Responses call failed on iteration {iteration + 1}: {e}, "
+                                f"error_type={type(e).__name__}, cause_chain={cause_chain}"
+                            )
+                            raise type(e)(
+                                f"Failed during tool execution (iteration {iteration + 1}): {e}"
+                            ) from e
+
+                        _track_usage(response)
+
+                        response_text = _extract_response_text(response)
+
+                        if _sr_post_iter_hooks:
+                            await self._hook_manager.execute_hooks(
+                                content=response_text,
+                                stage=HookStage.POST_ITERATION,
+                                metadata={
+                                    "iteration": iteration + 1,
+                                    "has_tool_calls": _sr_has_tool_calls,
+                                    "tool_count": len(active_tools),
+                                    "endpoint": "responses",
+                                },
+                                hooks=_sr_post_iter_hooks,
+                            )
+
+                        if response_tool_calls:
+                            logger.info(
+                                f"Iteration {iteration + 1}: Model requested "
+                                f"{len(response_tool_calls)} tool call(s)"
+                            )
+
+                            # Dynamic routing: resolve tools, do not append, retry
+                            if router_tool is not None and is_router_call(response_tool_calls):
+                                query = json.loads(response_tool_calls[0].function.arguments)["query"]
+                                user_context = next(
+                                    (m.get("content", "") or "" for m in messages if m.get("role") == "user"),
+                                    query,
+                                )
+                                if isinstance(user_context, list):
+                                    user_context = query
+                                matched = await self._route_tools(
+                                    user_context,
+                                    dynamic_tools,
+                                    _sr_merged_registry,
+                                    model=self.tool_route_model,
+                                    api_key=api_key,
+                                    timeout=request_timeout,
+                                )
+                                active_tools = matched + static_tools
+                                logger.debug(
+                                    f"[{correlation_id}] Dynamic routing: matched={len(matched)}, "
+                                    f"static={len(static_tools)}, total_active={len(active_tools)}"
+                                )
+                                await emit_status(
+                                    ProcessEvent(
+                                        kind="tool_route",
+                                        correlation_id=correlation_id,
+                                        timestamp=time.time(),
+                                        route_query=query,
+                                        matched_tools=[t.__name__ for t in matched],
+                                    ),
+                                    on_status,
+                                    sinks=sinks,
+                                )
+                                self._apply_system_prompt_after_tool_route(messages, active_tools)
+                                continue
+
+                            # Append assistant tool-call message in chat shape so
+                            # the next iteration's input rebuild yields proper
+                            # function_call items for the Responses API.
+                            messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": response_text or None,
+                                    "tool_calls": [
+                                        {
+                                            "id": tc.id,
+                                            "type": "function",
+                                            "function": {
+                                                "name": tc.function.name,
+                                                "arguments": tc.function.arguments,
+                                            },
+                                        }
+                                        for tc in response_tool_calls
+                                    ],
+                                }
+                            )
+
+                            round_results = await self._execute_tool_calls_round(
+                                tool_calls=response_tool_calls,
+                                active_tools=active_tools,
+                                parallel=(effective_tool_execution_order == "parallel"),
+                                iteration=iteration + 1,
+                                correlation_id=correlation_id,
+                                on_status=on_status,
+                                sinks=sinks,
+                            )
+                            tool_calls_made += len(round_results)
+                            for r in round_results:
+                                tool_execution_history.append(r["history"])
+                                messages.append(r["message"])
+
+                            if effective_condense:
+                                _condense_tool_round(messages, aaak_tool_condensing=self.aaak_tool_condensing)
+                        else:
+                            logger.debug(f"Model finished tools after {iteration + 1} iteration(s)")
+                            if response_text:
+                                messages.append({"role": "assistant", "content": response_text})
+                            break
+                    else:
+                        logger.debug(
+                            f"Reached max tool iterations ({effective_max_tool_iterations})"
+                        )
+
+                # PHASE 2: Final structured-output call
+                logger.debug(
+                    f"Requesting structured Responses output: response_format={response_format.__name__}"
+                )
+                try:
+                    instructions, input_items = _messages_to_response_input(messages)
+                    await emit_status(
+                        ProcessEvent(
+                            kind="llm_call_start",
+                            correlation_id=correlation_id,
+                            timestamp=time.time(),
+                            iteration=None,
+                            model=model or self.model,
+                            message_count=len(messages),
+                        ),
+                        on_status,
+                        sinks=sinks,
+                    )
+                    response = await self._llm_responses_call(
+                        _sr_merged_registry,
+                        input_data=input_items,
+                        model=model or self.model,
+                        instructions=instructions,
+                        response_format=response_format,
+                        request_timeout=request_timeout,
+                        connect_timeout=connect_timeout,
+                        api_key=api_key,
+                        max_tokens=effective_max_tokens,
+                        retry_config=effective_retry_config,
+                        rate_limit_config=effective_rate_limit_config,
+                        **effective_model_kwargs,
+                    )
+                    await emit_status(
+                        ProcessEvent(
+                            kind="llm_call_end",
+                            correlation_id=correlation_id,
+                            timestamp=time.time(),
+                            model=model or self.model,
+                            has_tool_calls=False,
+                            token_usage=_extract_response_token_usage(response),
+                        ),
+                        on_status,
+                        sinks=sinks,
+                    )
+                except LLMError as e:
+                    logger.error(f"Structured Responses output call failed: {e}")
+                    raise type(e)(f"Failed during structured output request: {e}") from e
+
+                _track_usage(response)
+
+                parsed = _extract_response_parsed(response, response_format)
+                content = _extract_response_text(response)
+                logger.debug(
+                    f"Structured Responses received: parsed_type={type(parsed)}, "
+                    f"content_length={len(content) if content else 0}"
+                )
+
+                # Output guardrails with retry loop (mirrors structured_complete)
+                if effective_guardrails and content:
+                    max_retries = effective_guardrails.max_output_guardrail_retries
+                    output_retry_count = 0
+                    while output_retry_count <= max_retries:
+                        try:
+                            content = await self._run_guardrails(
+                                content,
+                                effective_guardrails,
+                                "output",
+                                _sr_merged_registry,
+                                attempt=output_retry_count,
+                            )
+                            break
+                        except GuardrailRejectedError as e:
+                            output_retry_count += 1
+                            if output_retry_count > max_retries:
+                                logger.warning(
+                                    f"Output guardrails failed after {max_retries} retries: {e.reason}"
+                                )
+                                raise GuardrailBlockedError(
+                                    f"Output guardrails failed after {max_retries} retries: {e.reason}",
+                                    guardrail_name=e.guardrail_name,
+                                ) from e
+
+                            messages.append({"role": "assistant", "content": content})
+                            feedback_message = (
+                                f"Your previous response was rejected: {e.reason}. "
+                                "Please provide a revised structured response that addresses this issue."
+                            )
+                            messages.append({"role": "user", "content": feedback_message})
+                            logger.info(
+                                f"Output guardrail rejected structured response "
+                                f"(attempt {output_retry_count}/{max_retries}): {e.reason}. "
+                                "Requesting revised response."
+                            )
+
+                            try:
+                                instructions, input_items = _messages_to_response_input(messages)
+                                response = await self._llm_responses_call(
+                                    _sr_merged_registry,
+                                    input_data=input_items,
+                                    model=model or self.model,
+                                    instructions=instructions,
+                                    response_format=response_format,
+                                    request_timeout=request_timeout,
+                                    connect_timeout=connect_timeout,
+                                    api_key=api_key,
+                                    max_tokens=effective_max_tokens,
+                                    retry_config=effective_retry_config,
+                                    rate_limit_config=effective_rate_limit_config,
+                                    **effective_model_kwargs,
+                                )
+                            except LLMError as llm_error:
+                                raise GuardrailBlockedError(
+                                    f"Failed to get revised structured response after guardrail rejection: {llm_error}",
+                                    guardrail_name=e.guardrail_name,
+                                ) from llm_error
+
+                            _track_usage(response)
+                            parsed = _extract_response_parsed(response, response_format)
+                            content = _extract_response_text(response)
+                            logger.debug(
+                                f"Received revised structured Responses output "
+                                f"(length={len(content) if content else 0})"
+                            )
+
+                if content:
+                    self._conversation.add_message(Role.ASSISTANT, content)
+
+                # Validation-aware retry loop (mirrors structured_complete)
+                max_val_retries = max_validation_retries if max_validation_retries is not None else 3
+                validation_attempt = 0
+                structured_output: T | None = None
+                while True:
+                    try:
+                        if isinstance(parsed, response_format):
+                            logger.debug(f"Using parsed Pydantic instance: {response_format.__name__}")
+                            structured_output = parsed
+                        elif isinstance(parsed, dict):
+                            logger.debug(f"Instantiating {response_format.__name__} from dict")
+                            structured_output = response_format(**parsed)
+                        elif content:
+                            data = json.loads(content)
+                            logger.debug(
+                                f"Parsed JSON from content, instantiating {response_format.__name__}"
+                            )
+                            structured_output = response_format(**data)
+                        else:
+                            logger.warning(f"Using parsed response as-is (type: {type(parsed)})")
+                            structured_output = parsed
+                        break
+                    except (ValidationError, json.JSONDecodeError, TypeError) as e:
+                        validation_attempt += 1
+                        if validation_attempt > max_val_retries:
+                            raise
+                        messages.append({"role": "assistant", "content": content or ""})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Your response failed validation: {e}\n"
+                                    "Please return a corrected JSON response."
+                                ),
+                            }
+                        )
+                        logger.info(
+                            f"Validation retry {validation_attempt}/{max_val_retries}: {e}"
+                        )
+                        _val_retry_hooks = _sr_merged_registry.get_hooks(HookStage.ON_VALIDATION_RETRY)
+                        if _val_retry_hooks:
+                            await self._hook_manager.execute_hooks(
+                                content=content or "",
+                                stage=HookStage.ON_VALIDATION_RETRY,
+                                metadata={
+                                    "validation_attempt": validation_attempt,
+                                    "max_validation_retries": max_val_retries,
+                                    "error": str(e),
+                                    "response_format_name": response_format.__name__,
+                                    "endpoint": "responses",
+                                },
+                                hooks=_val_retry_hooks,
+                            )
+                        instructions, input_items = _messages_to_response_input(messages)
+                        response = await self._llm_responses_call(
+                            _sr_merged_registry,
+                            input_data=input_items,
+                            model=model or self.model,
+                            instructions=instructions,
+                            response_format=response_format,
+                            request_timeout=request_timeout,
+                            connect_timeout=connect_timeout,
+                            api_key=api_key,
+                            max_tokens=effective_max_tokens,
+                            retry_config=effective_retry_config,
+                            rate_limit_config=effective_rate_limit_config,
+                            **effective_model_kwargs,
+                        )
+                        _track_usage(response)
+                        parsed = _extract_response_parsed(response, response_format)
+                        content = _extract_response_text(response)
+
+                logger.info(
+                    f"Structured response finished: tool_calls={tool_calls_made}, cost=${total_cost:.6f}"
+                )
+
+                await emit_status(
+                    ProcessEvent(
+                        kind="complete",
+                        correlation_id=correlation_id,
+                        timestamp=time.time(),
+                        tool_calls_made=tool_calls_made,
+                        response_length=len(content) if content else 0,
+                    ),
+                    on_status,
+                    sinks=sinks,
+                )
+
+                result = ExecutionResult(
+                    final_response=content or "",
+                    tool_calls_made=tool_calls_made,
+                    tool_execution_history=tool_execution_history,
+                    raw_response=response,
+                    tokens_used=total_tokens_used,
+                    estimated_cost_usd=total_cost if total_cost > 0 else None,
+                    model=model or self.model,
+                    structured_output=structured_output,
+                )
+
+                await _record_eval_data(
+                    eval_store=effective_eval_store,
+                    user_message=user_message_text,
+                    system_prompt=system_prompt_content,
+                    model=model or self.model,
+                    messages_snapshot=messages_snapshot,
+                    start_time=start_time,
+                    result=result,
+                    tools_available=tools_to_use,
+                    on_eval_record_hooks=_sr_merged_registry.get_hooks(HookStage.PRE_EVAL_RECORD),
+                    hook_manager=self._hook_manager,
+                )
+
+                return result
+        except Exception as e:
+            error = e
+            raise
+        finally:
+            if error and not result:
+                await _record_eval_data(
+                    eval_store=effective_eval_store,
+                    user_message=user_message_text,
+                    system_prompt=system_prompt_content,
+                    model=model or self.model,
+                    messages_snapshot=messages_snapshot,
+                    start_time=start_time,
+                    error=error,
+                    tools_available=tools_to_use,
+                    on_eval_record_hooks=_sr_merged_registry.get_hooks(HookStage.PRE_EVAL_RECORD),
+                    hook_manager=self._hook_manager,
+                )
+            clear_correlation_id()
+
     def _format_system_prompt(self, tools: list[Callable] | None = None) -> str:
         """Format system prompt. Tool schemas are sent via the API tools parameter, not here."""
         from gluellm.models.prompt import BASE_SYSTEM_PROMPT
@@ -4976,6 +6467,167 @@ async def structured_complete(
         max_validation_retries=max_validation_retries,
         on_status=on_status,
         session_label=session_label,
+        sinks=sinks,
+        track_costs=track_costs,
+        **model_kwargs,
+    )
+
+
+async def structured_response(
+    user_input: str | list[dict[str, Any]],
+    response_format: type[T],
+    # -- Core --
+    model: str | None = None,
+    system_prompt: str | None = None,
+    tools: list[Callable] | None = None,
+    # -- Model generation --
+    max_tokens: int | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+    # -- Tools --
+    condense_tool_messages: bool | None = None,
+    execute_tools: bool = True,
+    max_tool_iterations: int | None = None,
+    parallel_tool_calls: bool | None = None,
+    tool_execution_order: ToolExecutionOrder | None = None,
+    tool_mode: ToolMode | None = None,
+    tool_route_model: str | None = None,
+    # -- Timeouts --
+    connect_timeout: float | None = None,
+    request_timeout: float | None = None,
+    # -- Resilience --
+    rate_limit_config: RateLimitConfig | None = None,
+    retry_config: RetryConfig | None = None,
+    retry_enabled: bool | None = None,
+    # -- Context management --
+    summarize_context: SummarizeContextConfig | bool | None = None,
+    aaak_compression_enabled: bool | None = None,
+    aaak_compression_model: str | None = None,
+    aaak_tool_condensing: bool | None = None,
+    # -- Observability / behavior --
+    correlation_id: str | None = None,
+    enable_eval_recording: bool | None = None,
+    guardrails: GuardrailsConfig | None = None,
+    max_validation_retries: int | None = None,
+    on_status: OnStatusCallback = None,
+    sinks: list[Sink] | None = None,
+    hook_registry: HookRegistry | None = None,
+    track_costs: bool | None = None,
+    **model_kwargs: Any,
+) -> ExecutionResult[T]:
+    """Quick structured completion via the OpenAI Responses API.
+
+    The Responses-API analogue of :func:`structured_complete`. The LLM may
+    optionally use tools to gather information before returning the final
+    structured output; tools are executed in a loop just like the chat
+    completions path. All context-management features (summarisation, AAAK
+    condensing, validation retries, guardrails, hooks, eval recording, ...)
+    are preserved by translating between the internal chat-completions
+    message log and the Responses API ``input``/``instructions`` shape at
+    the wire boundary.
+
+    Args:
+        user_input: The user's message as a string, or a list of typed
+            Responses ``ResponseInputParam`` items (multimodal, prefilled
+            tool history, ...).
+        response_format: Pydantic model class for structured output.
+        model: Model identifier in ``provider:model_name`` form.
+        system_prompt: System/developer instructions content.
+        tools: Optional list of callables to use as tools.
+        execute_tools: Whether to automatically execute tools and loop.
+        max_tool_iterations: Max iterations of the tool loop.
+        max_tokens: Maximum number of tokens to generate (forwarded as
+            ``max_output_tokens``).
+        reasoning_effort: Wrapped into ``reasoning={"effort": ...}`` for
+            the Responses API.
+        max_validation_retries: Max retries when Pydantic validation fails.
+        (other args mirror :func:`structured_complete`)
+        **model_kwargs: Extra params for ``aresponses`` (e.g. ``temperature``,
+            ``top_p``). Chat-completions-only params (``logprobs``,
+            ``response_format``, ...) are dropped automatically.
+
+    Returns:
+        :class:`ExecutionResult` with ``structured_output`` populated.
+
+    Example:
+        >>> import asyncio
+        >>> from gluellm.api import structured_response
+        >>> from pydantic import BaseModel
+        >>>
+        >>> class Answer(BaseModel):
+        ...     number: int
+        ...     reasoning: str
+        >>>
+        >>> def get_calculator_result(a: int, b: int) -> int:
+        ...     '''Add two numbers together.'''
+        ...     return a + b
+        >>>
+        >>> async def main():
+        ...     # Without tools
+        ...     result = await structured_response(
+        ...         "What is 2+2?",
+        ...         response_format=Answer,
+        ...     )
+        ...     print(result.structured_output.number)
+        ...
+        ...     # With tools
+        ...     result = await structured_response(
+        ...         "Use the calculator to compute 2+2 and explain.",
+        ...         response_format=Answer,
+        ...         tools=[get_calculator_result],
+        ...     )
+        ...     print(result.tool_calls_made)
+        >>>
+        >>> asyncio.run(main())
+    """
+    effective_tool_mode = tool_mode if tool_mode is not None else settings.default_tool_mode
+    effective_tool_execution_order = (
+        tool_execution_order if tool_execution_order is not None else settings.default_tool_execution_order
+    )
+    client = GlueLLM(
+        model=model,
+        system_prompt=system_prompt,
+        max_tokens=max_tokens,
+        model_kwargs=model_kwargs if model_kwargs else None,
+        reasoning_effort=reasoning_effort,
+        condense_tool_messages=condense_tool_messages,
+        max_tool_iterations=max_tool_iterations,
+        parallel_tool_calls=parallel_tool_calls,
+        tool_execution_order=effective_tool_execution_order,
+        tool_mode=effective_tool_mode,
+        tool_route_model=tool_route_model,
+        tools=tools,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
+        summarize_context=summarize_context,
+        aaak_compression_enabled=aaak_compression_enabled,
+        aaak_compression_model=aaak_compression_model,
+        aaak_tool_condensing=aaak_tool_condensing,
+        guardrails=guardrails,
+        hook_registry=hook_registry,
+    )
+    return await client.structured_response(
+        user_input,
+        response_format,
+        model=model,
+        tools=tools,
+        max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
+        condense_tool_messages=condense_tool_messages,
+        execute_tools=execute_tools,
+        parallel_tool_calls=parallel_tool_calls,
+        tool_execution_order=tool_execution_order,
+        tool_mode=tool_mode,
+        connect_timeout=connect_timeout,
+        request_timeout=request_timeout,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
+        retry_enabled=retry_enabled,
+        summarize_context=summarize_context,
+        correlation_id=correlation_id,
+        enable_eval_recording=enable_eval_recording,
+        guardrails=guardrails,
+        max_validation_retries=max_validation_retries,
+        on_status=on_status,
         sinks=sinks,
         track_costs=track_costs,
         **model_kwargs,
