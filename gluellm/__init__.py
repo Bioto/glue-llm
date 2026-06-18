@@ -98,6 +98,7 @@ from gluellm.api import (
     reset_session_tracker,
     response,
     stream_complete,
+    stream_response,
     structured_complete,
     structured_response,
 )
@@ -175,7 +176,9 @@ from gluellm.schema import (
     create_openai_response_format,
     normalize_schema_for_openai,
 )
+from gluellm.resilience.fallback import ModelFallbackConfig
 from gluellm.tool_router import ToolMode, static_tool
+from gluellm.tools import MCPToolSource, ToolRegistry, load_mcp_tools
 
 # Initialize logging on package import
 _setup_logging_called = False
@@ -209,6 +212,7 @@ __all__ = [
     "response",
     "embed",
     "stream_complete",
+    "stream_response",
     "structured_complete",
     "structured_response",
     "ExecutionResult",
@@ -248,6 +252,7 @@ __all__ = [
     "RetryCallback",
     "RateLimitAlgorithm",
     "RateLimitConfig",
+    "ModelFallbackConfig",
     "SummarizeContextConfig",
     # AAAK compression
     "AAAKCompressor",
@@ -281,6 +286,10 @@ __all__ = [
     "ToolMode",
     "static_tool",
     "ToolExecutionOrder",
+    # MCP tools
+    "MCPToolSource",
+    "ToolRegistry",
+    "load_mcp_tools",
     # Configuration
     "GlueLLMSettings",
     "configure",

@@ -291,6 +291,24 @@ Returns token and cost summary for the current session.
 
 Resets session tracking.
 
+### stream_response()
+
+Stream completions via the OpenAI Responses API (mirror of `stream_complete()`):
+
+```python
+async for chunk in client.stream_response("Tell me a joke", execute_tools=False):
+    if chunk.content:
+        print(chunk.content, end="")
+    if chunk.done:
+        print()
+```
+
+### Model fallback and response threading
+
+- **`fallback_models`** / **`fallback_config`**: ordered model degradation — see [RETRY.md](RETRY.md).
+- **`response_threading=True`**: chain calls with `previous_response_id` through tool loops (Responses API only).
+- **`ExecutionResult.response_id`**: final Responses API id when using `response()` / `structured_response()`.
+
 ## See Also
 
 - [CONFIGURATION.md](CONFIGURATION.md) - Configuration system

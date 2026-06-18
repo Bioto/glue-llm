@@ -280,7 +280,8 @@ class TestToolParameterEdgeCases:
         response, _ = execute_tool_loop(messages=messages, model="openai:gpt-5.4-2026-03-05", tools=[get_weather])
 
         assert response is not None
-        assert "celsius" in response.choices[0].message.content.lower()
+        content_lower = response.choices[0].message.content.lower()
+        assert "celsius" in content_lower or "°c" in content_lower
         print(f"✓ Default parameters: {response.choices[0].message.content[:80]}")
 
     def test_optional_parameters_specified(self):

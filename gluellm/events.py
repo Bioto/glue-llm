@@ -25,6 +25,7 @@ ProcessEventKind = Literal[
     "stream_start",
     "stream_chunk",
     "stream_end",
+    "model_fallback",
     "complete",
 ]
 
@@ -48,6 +49,10 @@ class ProcessEvent(BaseModel):
     token_usage: dict[str, int] | None = Field(default=None, description="Token usage dict")
     estimated_cost_usd: float | None = Field(default=None, description="Estimated USD cost for this LLM call")
     error_type: str | None = Field(default=None, description="Exception class name for llm_call_error events")
+
+    # model_fallback
+    from_model: str | None = Field(default=None, description="Model that failed before fallback")
+    to_model: str | None = Field(default=None, description="Next model in fallback chain")
 
     # tool_call_start / tool_call_end
     tool_name: str | None = Field(default=None, description="Name of the tool")

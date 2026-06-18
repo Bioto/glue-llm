@@ -34,6 +34,9 @@ def test_example_runs(example_name):
     if not _openai_key_ok():
         pytest.skip("OPENAI_API_KEY not set; examples require live API access")
 
+    if example_name == "mcp_tools_example.py":
+        pytest.importorskip("mcp")
+
     script_path = _EXAMPLES_DIR / example_name
     result = subprocess.run(
         [sys.executable, str(script_path)],

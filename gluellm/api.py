@@ -81,6 +81,7 @@ from gluellm.tool_router import (
     is_static_tool,
     resolve_tool_route,
 )
+from gluellm.tools import MCPToolSource, ToolRegistry
 from gluellm.costing.pricing_data import calculate_cost
 from gluellm.eval import get_global_eval_store
 from gluellm.eval.store import EvalStore
@@ -115,6 +116,7 @@ from gluellm.telemetry import (
 type OnStatusCallback = Callable[[ProcessEvent], None] | Callable[[ProcessEvent], Awaitable[None]] | None
 
 from gluellm.models.agent import ReasoningEffort
+from gluellm.resilience.fallback import ModelFallbackConfig, call_with_model_fallback, resolve_fallback_chain, successful_call_model
 
 # GlueLLM call-level options that must never be forwarded to provider.acompletion (OpenAI, etc.).
 _PROVIDER_ACOMPLETION_SKIP_KEYS = frozenset({"max_tool_iterations", "execute_tools", "rate_limit_algorithm"})
@@ -1572,16 +1574,20 @@ def should_retry_error(error: Exception) -> bool:
 # ============================================================================
 
 
-def _trim_tool_docstrings(tools: list[Callable]) -> list[Callable]:
+def _trim_tool_docstrings(tools: list[Callable | dict[str, Any]]) -> list[Callable | dict[str, Any]]:
     """Return copies of tools with __doc__ trimmed to the first non-empty line.
 
     This reduces token overhead since any_llm sends the full docstring as the
-    function description in the OpenAI tools schema.
+    function description in the OpenAI tools schema. Pre-formatted dict tools
+    (e.g. from MCP) are passed through unchanged.
     """
     import functools
 
-    trimmed: list[Callable] = []
+    trimmed: list[Callable | dict[str, Any]] = []
     for tool in tools:
+        if not callable(tool):
+            trimmed.append(tool)
+            continue
         doc = (tool.__doc__ or "").strip()
         first_line = next((line.strip() for line in doc.split("\n") if line.strip()), "")
         if first_line == doc:
@@ -1888,6 +1894,7 @@ _PROVIDER_ARESPONSES_SKIP_KEYS = frozenset(
         "session_label",
         "n",
         "stop",
+        "timeout",
     }
 )
 
@@ -2304,6 +2311,45 @@ def _serialize_response_to_dict(response: Any) -> dict[str, Any]:
     }
 
 
+def _extract_response_id(response: Any) -> str | None:
+    """Extract OpenAI Responses ``response.id`` when present."""
+    if response is None:
+        return None
+    resp_id = getattr(response, "id", None)
+    if resp_id:
+        return str(resp_id)
+    if isinstance(response, dict):
+        rid = response.get("id")
+        return str(rid) if rid else None
+    return None
+
+
+def _tool_messages_to_responses_outputs(tool_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert chat-shaped tool result messages to Responses function_call_output items."""
+    outputs: list[dict[str, Any]] = []
+    for msg in tool_messages:
+        if msg.get("role") != "tool":
+            continue
+        outputs.append(
+            {
+                "type": "function_call_output",
+                "call_id": msg.get("tool_call_id"),
+                "output": msg.get("content", ""),
+            }
+        )
+    return outputs
+
+
+def _initial_responses_wire_input(
+    user_input: str | list[dict[str, Any]],
+    user_message_text: str,
+) -> str | list[dict[str, Any]]:
+    """Return wire-format input for the first threaded Responses call."""
+    if isinstance(user_input, list):
+        return user_input
+    return user_message_text
+
+
 def _build_responses_text_format(response_format: type[BaseModel] | None) -> dict[str, Any] | None:
     """Construct the ``text.format`` payload for a json_schema-based structured output.
 
@@ -2348,6 +2394,7 @@ async def _safe_responses_call(
     instructions: str | None = None,
     tools: list[Callable | dict[str, Any]] | None = None,
     response_format: type[BaseModel] | None = None,
+    stream: bool = False,
     request_timeout: float | None = None,
     connect_timeout: float | None = None,
     api_key: str | None = None,
@@ -2409,14 +2456,8 @@ async def _safe_responses_call(
     if "parallel_tool_calls" in kwargs and kwargs["parallel_tool_calls"] is not None:
         kwargs["parallel_tool_calls"] = int(bool(kwargs["parallel_tool_calls"]))
 
-    # Inject httpx.Timeout if caller hasn't set one
-    if "timeout" not in kwargs:
-        kwargs["timeout"] = httpx.Timeout(
-            connect=connect_timeout,
-            read=request_timeout,
-            write=request_timeout,
-            pool=pool_timeout,
-        )
+    # Responses API params reject httpx.Timeout; enforce limits via asyncio.wait_for below.
+    kwargs.pop("timeout", None)
 
     # Tools: convert callables/nested dicts into Responses flat format
     prepared_tools = _responses_tools_format(tools) if tools else None
@@ -2452,7 +2493,7 @@ async def _safe_responses_call(
             model=model,
             messages=input_data if isinstance(input_data, list) else [{"role": "user", "content": input_data}],
             tools=prepared_tools,
-            stream=False,
+            stream=stream,
             response_format=response_format.__name__ if response_format else None,
             correlation_id=correlation_id,
         ) as span:
@@ -2466,10 +2507,18 @@ async def _safe_responses_call(
                     model=model_id,
                     input_data=input_data,
                     tools=prepared_tools if prepared_tools else None,
+                    stream=stream,
                     **kwargs,
                 ),
                 timeout=request_timeout,
             )
+
+            if stream:
+                logger.debug(
+                    f"Responses API streaming started: model={model}, correlation_id={correlation_id}"
+                )
+                set_span_attributes(span, **{"llm.response.kind": "responses_stream"})
+                return response
 
             elapsed_time = time.time() - start_time
             tokens_used = _extract_response_token_usage(response)
@@ -2556,6 +2605,7 @@ async def _responses_call_with_retry(
     instructions: str | None = None,
     tools: list[Callable | dict[str, Any]] | None = None,
     response_format: type[BaseModel] | None = None,
+    stream: bool = False,
     request_timeout: float | None = None,
     connect_timeout: float | None = None,
     api_key: str | None = None,
@@ -2565,6 +2615,22 @@ async def _responses_call_with_retry(
     **model_kwargs: Any,
 ) -> Any:
     """Make a Responses API call with retry semantics matching :func:`_llm_call_with_retry`."""
+    if stream:
+        return await _safe_responses_call(
+            input_data=input_data,
+            model=model,
+            instructions=instructions,
+            tools=tools,
+            response_format=response_format,
+            stream=True,
+            request_timeout=request_timeout,
+            connect_timeout=connect_timeout,
+            api_key=api_key,
+            max_tokens=max_tokens,
+            rate_limit_config=rate_limit_config,
+            **model_kwargs,
+        )
+
     cfg = retry_config or RetryConfig(
         retry_enabled=True,
         max_attempts=settings.retry_max_attempts,
@@ -2741,6 +2807,13 @@ class ExecutionResult(BaseModel, Generic[T]):
             default=None,
         ),
     ]
+    response_id: Annotated[
+        str | None,
+        Field(
+            description="OpenAI Responses API response id when using the Responses path",
+            default=None,
+        ),
+    ]
     structured_output: Annotated[
         T | None,
         Field(
@@ -2837,6 +2910,14 @@ def _coerce_pydantic_value(value: Any, annotation: Any) -> Any:
     return value
 
 
+def _model_used_in_call(requested: str | None, instance_model: str) -> str:
+    """Return the model that actually handled the LLM call (after fallback)."""
+    actual = successful_call_model.get()
+    if actual:
+        return actual
+    return requested or instance_model
+
+
 class GlueLLM:
     """High-level API for LLM interactions with automatic tool execution."""
 
@@ -2860,9 +2941,12 @@ class GlueLLM:
         tool_mode: ToolMode = "standard",
         tool_route_model: str | None = None,
         tools: list[Callable] | None = None,
+        tool_registry: ToolRegistry | None = None,
+        mcp_sources: list[MCPToolSource] | None = None,
         # -- Resilience --
         rate_limit_config: RateLimitConfig | None = None,
         retry_config: RetryConfig | None = None,
+        fallback_config: ModelFallbackConfig | None = None,
         # -- Context management --
         aaak_compression_enabled: bool | None = None,
         aaak_compression_model: str | None = None,
@@ -2874,6 +2958,7 @@ class GlueLLM:
         hook_registry: HookRegistry | None = None,
         session_label: str | None = None,
         status_emitter: StatusEmitter | None = None,
+        response_threading: bool = False,
     ):
         """Initialize GlueLLM client.
 
@@ -2882,6 +2967,8 @@ class GlueLLM:
             embedding_model: Embedding model identifier in format "provider/model_name" (defaults to settings.default_embedding_model)
             system_prompt: System prompt content (defaults to settings.default_system_prompt)
             tools: List of callable functions to use as tools
+            tool_registry: Optional registry merging local callables with remote tool sources
+            mcp_sources: Optional MCP tool sources; builds a ``ToolRegistry`` when ``tool_registry`` is omitted
             max_tool_iterations: Maximum number of tool call iterations (defaults to settings.max_tool_iterations)
             eval_store: Optional evaluation store for recording request/response data (defaults to global store if set)
             guardrails: Optional guardrails configuration for input/output validation
@@ -2915,6 +3002,12 @@ class GlueLLM:
         self.embedding_model = embedding_model or settings.default_embedding_model
         self.system_prompt = system_prompt or settings.default_system_prompt
         self.tools = tools or []
+        if tool_registry is not None:
+            self.tool_registry = tool_registry
+        elif mcp_sources:
+            self.tool_registry = ToolRegistry(sources=list(mcp_sources))
+        else:
+            self.tool_registry = None
         self.max_tool_iterations = max_tool_iterations or settings.max_tool_iterations
         self._conversation = Conversation()
         self.eval_store = eval_store or get_global_eval_store()
@@ -2927,6 +3020,7 @@ class GlueLLM:
         self.tool_execution_order = tool_execution_order if tool_execution_order is not None else settings.default_tool_execution_order
         self.tool_route_model = tool_route_model or settings.tool_route_model
         self.retry_config = retry_config
+        self.fallback_config = fallback_config
         self.rate_limit_config = rate_limit_config
         self.model_kwargs = model_kwargs or {}
         # Merge explicit LLM params (from config when set)
@@ -2957,6 +3051,8 @@ class GlueLLM:
             aaak_tool_condensing if aaak_tool_condensing is not None else settings.aaak_tool_condensing
         )
         self.status_emitter = status_emitter
+        self.response_threading = response_threading
+        self._last_response_id: str | None = None
 
     def _bind_status_observers(
         self,
@@ -2994,6 +3090,10 @@ class GlueLLM:
     async def _llm_call(
         self,
         merged_registry: HookRegistry,
+        fallback_config: ModelFallbackConfig | None = None,
+        fallback_models: list[str] | None = None,
+        status: StatusEmitter | None = None,
+        correlation_id: str | None = None,
         **kwargs: Any,
     ) -> Any:
         """Wrap _llm_call_with_retry, firing ON_LLM_RETRY hooks before each retry sleep.
@@ -3001,50 +3101,69 @@ class GlueLLM:
         ON_LLM_RETRY content is the stringified exception; metadata includes
         attempt, max_attempts, wait_seconds, and exception_type.
         """
-        retry_hooks = merged_registry.get_hooks(HookStage.ON_LLM_RETRY)
 
-        if not retry_hooks:
-            return await _llm_call_with_retry(**kwargs)
+        async def _invoke(**invoke_kwargs: Any) -> Any:
+            retry_hooks = merged_registry.get_hooks(HookStage.ON_LLM_RETRY)
 
-        # Inject a wrapper RetryConfig that fires hooks then delegates to the user's callback.
-        original_retry_config: RetryConfig | None = kwargs.pop("retry_config", None)
-        cfg = original_retry_config or RetryConfig(
-            retry_enabled=True,
-            max_attempts=settings.retry_max_attempts,
-            min_wait=float(settings.retry_min_wait),
-            max_wait=float(settings.retry_max_wait),
-            multiplier=float(settings.retry_multiplier),
-        )
-        effective_max = 1 if not cfg.retry_enabled else cfg.max_attempts
+            if not retry_hooks:
+                return await _llm_call_with_retry(**invoke_kwargs)
 
-        async def hooked_callback(exc: Exception, attempt: int) -> tuple[bool, dict]:
-            wait_time = min(cfg.max_wait, cfg.min_wait * (cfg.multiplier ** (attempt - 1)))
-            await self._hook_manager.execute_hooks(
-                content=str(exc),
-                stage=HookStage.ON_LLM_RETRY,
-                metadata={
-                    "attempt": attempt,
-                    "max_attempts": effective_max,
-                    "wait_seconds": wait_time,
-                    "exception_type": type(exc).__name__,
-                },
-                hooks=retry_hooks,
+            original_retry_config: RetryConfig | None = invoke_kwargs.pop("retry_config", None)
+            cfg = original_retry_config or RetryConfig(
+                retry_enabled=True,
+                max_attempts=settings.retry_max_attempts,
+                min_wait=float(settings.retry_min_wait),
+                max_wait=float(settings.retry_max_wait),
+                multiplier=float(settings.retry_multiplier),
             )
-            if cfg.callback is not None:
-                if asyncio.iscoroutinefunction(cfg.callback):
-                    return await cfg.callback(exc, attempt)
-                return cfg.callback(exc, attempt)
-            return should_retry_error(exc), {}
+            effective_max = 1 if not cfg.retry_enabled else cfg.max_attempts
 
-        hooked_config = RetryConfig(
-            retry_enabled=cfg.retry_enabled,
-            max_attempts=cfg.max_attempts,
-            min_wait=cfg.min_wait,
-            max_wait=cfg.max_wait,
-            multiplier=cfg.multiplier,
-            callback=hooked_callback,
+            async def hooked_callback(exc: Exception, attempt: int) -> tuple[bool, dict]:
+                wait_time = min(cfg.max_wait, cfg.min_wait * (cfg.multiplier ** (attempt - 1)))
+                await self._hook_manager.execute_hooks(
+                    content=str(exc),
+                    stage=HookStage.ON_LLM_RETRY,
+                    metadata={
+                        "attempt": attempt,
+                        "max_attempts": effective_max,
+                        "wait_seconds": wait_time,
+                        "exception_type": type(exc).__name__,
+                    },
+                    hooks=retry_hooks,
+                )
+                if cfg.callback is not None:
+                    if asyncio.iscoroutinefunction(cfg.callback):
+                        return await cfg.callback(exc, attempt)
+                    return cfg.callback(exc, attempt)
+                return should_retry_error(exc), {}
+
+            hooked_config = RetryConfig(
+                retry_enabled=cfg.retry_enabled,
+                max_attempts=cfg.max_attempts,
+                min_wait=cfg.min_wait,
+                max_wait=cfg.max_wait,
+                multiplier=cfg.multiplier,
+                callback=hooked_callback,
+            )
+            return await _llm_call_with_retry(retry_config=hooked_config, **invoke_kwargs)
+
+        effective_fallback_config = (
+            fallback_config if fallback_config is not None else self.fallback_config
         )
-        return await _llm_call_with_retry(retry_config=hooked_config, **kwargs)
+        primary_model = kwargs.get("model") or self.model
+
+        if resolve_fallback_chain(primary_model, effective_fallback_config, fallback_models) is None:
+            return await _invoke(**kwargs)
+
+        return await call_with_model_fallback(
+            _invoke,
+            primary_model=primary_model,
+            fallback_config=effective_fallback_config,
+            fallback_models=fallback_models,
+            status=status,
+            correlation_id=correlation_id,
+            **kwargs,
+        )
 
     async def _run_guardrails(
         self,
@@ -3086,6 +3205,44 @@ class GlueLLM:
             )
 
         return result
+
+    async def _ensure_registry_tools(self) -> None:
+        if self.tool_registry is not None:
+            await self.tool_registry.ensure_loaded()
+
+    def _merge_registry_tools(self, callables: list[Callable]) -> list[Callable | dict[str, Any]]:
+        if self.tool_registry is None:
+            return list(callables)
+        return self.tool_registry.merge_for_llm(callables)
+
+    def _prepare_active_tools(
+        self,
+        base_callables: list[Callable],
+        effective_tool_mode: ToolMode,
+    ) -> tuple[list[Callable | dict[str, Any]], Callable | None, list, list]:
+        all_tools = self._merge_registry_tools(base_callables)
+        callable_tools = [t for t in all_tools if callable(t)]
+        static_tools = [t for t in callable_tools if is_static_tool(t)]
+        dynamic_callables = [t for t in callable_tools if not is_static_tool(t)]
+        if self.tool_registry and effective_tool_mode == "dynamic":
+            dynamic_callables = dynamic_callables + self.tool_registry.routing_stubs()
+
+        router_tool = None
+        if effective_tool_mode == "dynamic" and dynamic_callables:
+            router_tool = build_router_tool(dynamic_callables)
+            active_tools: list[Callable | dict[str, Any]] = [router_tool] + static_tools
+        else:
+            active_tools = all_tools
+        return active_tools, router_tool, static_tools, dynamic_callables
+
+    def _finalize_routed_tools(
+        self,
+        matched: list[Callable],
+        static_tools: list,
+    ) -> list[Callable | dict[str, Any]]:
+        if self.tool_registry:
+            return self.tool_registry.expand_routed(matched) + list(static_tools)
+        return list(matched) + list(static_tools)
 
     async def _route_tools(
         self,
@@ -3169,6 +3326,7 @@ class GlueLLM:
         rate_limit_config: RateLimitConfig | None = None,
         retry_config: RetryConfig | None = None,
         retry_enabled: bool | None = None,
+        fallback_models: list[str] | None = None,
         # -- Context management --
         summarize_context: SummarizeContextConfig | bool | None = None,
         # -- Observability / behavior --
@@ -3278,6 +3436,7 @@ class GlueLLM:
             set_correlation_id()
 
         correlation_id = get_correlation_id()
+        successful_call_model.set(None)
         status = self._bind_status_observers(on_status, sinks)
         logger.info(f"Starting completion request: correlation_id={correlation_id}, message_length={len(user_message)}")
 
@@ -3294,15 +3453,10 @@ class GlueLLM:
         # Capture start time for evaluation recording
         start_time = time.time()
         # Resolve active_tools for dynamic vs standard mode
-        all_tools = self.tools
-        static_tools = [t for t in all_tools if is_static_tool(t)]
-        dynamic_tools = [t for t in all_tools if not is_static_tool(t)]
-        router_tool = None
-        if effective_tool_mode == "dynamic" and all_tools:
-            router_tool = build_router_tool(dynamic_tools)
-            active_tools: list[Callable] = [router_tool] + static_tools
-        else:
-            active_tools = all_tools
+        await self._ensure_registry_tools()
+        active_tools, router_tool, static_tools, dynamic_tools = self._prepare_active_tools(
+            self.tools, effective_tool_mode
+        )
         system_prompt_content = self._format_system_prompt(tools=active_tools)
         messages_snapshot: list[dict] = []
         result: ExecutionResult | None = None
@@ -3377,6 +3531,9 @@ class GlueLLM:
                             ))
                         response = await self._llm_call(
                             _merged_guardrail_registry,
+                            fallback_models=fallback_models,
+                            status=status,
+                            correlation_id=correlation_id,
                             messages=messages,
                             model=model or self.model,
                             tools=active_tools if active_tools else None,
@@ -3465,7 +3622,7 @@ class GlueLLM:
                                 api_key=api_key,
                                 timeout=request_timeout,
                             )
-                            active_tools = matched + static_tools
+                            active_tools = self._finalize_routed_tools(matched, static_tools)
                             logger.debug(
                                 f"[{correlation_id}] Dynamic tool routing complete: "
                                 f"matched={len(matched)}, static={len(static_tools)}, total_active={len(active_tools)}"
@@ -3568,6 +3725,9 @@ class GlueLLM:
                                 try:
                                     response = await self._llm_call(
                                         _merged_guardrail_registry,
+                                        fallback_models=fallback_models,
+                                        status=status,
+                                        correlation_id=correlation_id,
                                         messages=messages,
                                         model=model or self.model,
                                         tools=None,  # No tools on retry
@@ -3631,7 +3791,7 @@ class GlueLLM:
                         raw_response=response,
                         tokens_used=tokens_used,
                         estimated_cost_usd=estimated_cost,
-                        model=self.model,
+                        model=_model_used_in_call(model, self.model),
                     )
 
                     # Record evaluation data
@@ -3746,6 +3906,7 @@ class GlueLLM:
         rate_limit_config: RateLimitConfig | None = None,
         retry_config: RetryConfig | None = None,
         retry_enabled: bool | None = None,
+        fallback_models: list[str] | None = None,
         # -- Context management --
         summarize_context: SummarizeContextConfig | bool | None = None,
         # -- Observability / behavior --
@@ -3864,6 +4025,7 @@ class GlueLLM:
             set_correlation_id()
 
         correlation_id = get_correlation_id()
+        successful_call_model.set(None)
         status = self._bind_status_observers(on_status, sinks)
         logger.info(
             f"Starting structured completion: correlation_id={correlation_id}, "
@@ -3884,16 +4046,10 @@ class GlueLLM:
         start_time = time.time()
         # Determine which tools to use: parameter overrides instance tools
         tools_to_use = tools if tools is not None else self.tools
-        # Resolve active_tools for dynamic vs standard mode
-        all_tools = tools_to_use
-        static_tools = [t for t in all_tools if is_static_tool(t)]
-        dynamic_tools = [t for t in all_tools if not is_static_tool(t)]
-        router_tool = None
-        if effective_tool_mode == "dynamic" and all_tools:
-            router_tool = build_router_tool(dynamic_tools)
-            active_tools: list[Callable] = [router_tool] + static_tools
-        else:
-            active_tools = all_tools
+        await self._ensure_registry_tools()
+        active_tools, router_tool, static_tools, dynamic_tools = self._prepare_active_tools(
+            tools_to_use, effective_tool_mode
+        )
         system_prompt_content = self._format_system_prompt(tools=active_tools)
         messages_snapshot: list[dict] = []
         result: ExecutionResult | None = None
@@ -3996,6 +4152,9 @@ class GlueLLM:
                                 ))
                             response = await self._llm_call(
                                 _sc_merged_registry,
+                                fallback_models=fallback_models,
+                                status=status,
+                                correlation_id=correlation_id,
                                 messages=messages,
                                 model=model or self.model,
                                 tools=active_tools,
@@ -4083,7 +4242,7 @@ class GlueLLM:
                                     api_key=api_key,
                                     timeout=request_timeout,
                                 )
-                                active_tools = matched + static_tools
+                                active_tools = self._finalize_routed_tools(matched, static_tools)
                                 logger.debug(
                                     f"[{correlation_id}] Dynamic tool routing complete: "
                                     f"matched={len(matched)}, static={len(static_tools)}, total_active={len(active_tools)}"
@@ -4151,6 +4310,9 @@ class GlueLLM:
                         ))
                     response = await self._llm_call(
                         _sc_merged_registry,
+                        fallback_models=fallback_models,
+                        status=status,
+                        correlation_id=correlation_id,
                         messages=messages,
                         model=model or self.model,
                         response_format=response_format,
@@ -4241,6 +4403,9 @@ class GlueLLM:
                             try:
                                 response = await self._llm_call(
                                     _sc_merged_registry,
+                                    fallback_models=fallback_models,
+                                    status=status,
+                                    correlation_id=correlation_id,
                                     messages=messages,
                                     model=model or self.model,
                                     response_format=response_format,  # Still request structured output
@@ -4331,6 +4496,9 @@ class GlueLLM:
                             )
                         response = await self._llm_call(
                             _sc_merged_registry,
+                            fallback_models=fallback_models,
+                            status=status,
+                            correlation_id=correlation_id,
                             messages=messages,
                             model=model or self.model,
                             response_format=response_format,
@@ -4411,56 +4579,80 @@ class GlueLLM:
     async def _llm_responses_call(
         self,
         merged_registry: HookRegistry,
+        fallback_config: ModelFallbackConfig | None = None,
+        fallback_models: list[str] | None = None,
+        status: StatusEmitter | None = None,
+        correlation_id: str | None = None,
         **kwargs: Any,
     ) -> Any:
         """Wrap :func:`_responses_call_with_retry`, firing ON_LLM_RETRY hooks.
 
         Mirrors :meth:`_llm_call` but for the OpenAI Responses API.
         """
-        retry_hooks = merged_registry.get_hooks(HookStage.ON_LLM_RETRY)
 
-        if not retry_hooks:
-            return await _responses_call_with_retry(**kwargs)
+        async def _invoke(**invoke_kwargs: Any) -> Any:
+            retry_hooks = merged_registry.get_hooks(HookStage.ON_LLM_RETRY)
 
-        original_retry_config: RetryConfig | None = kwargs.pop("retry_config", None)
-        cfg = original_retry_config or RetryConfig(
-            retry_enabled=True,
-            max_attempts=settings.retry_max_attempts,
-            min_wait=float(settings.retry_min_wait),
-            max_wait=float(settings.retry_max_wait),
-            multiplier=float(settings.retry_multiplier),
-        )
-        effective_max = 1 if not cfg.retry_enabled else cfg.max_attempts
+            if not retry_hooks:
+                return await _responses_call_with_retry(**invoke_kwargs)
 
-        async def hooked_callback(exc: Exception, attempt: int) -> tuple[bool, dict]:
-            wait_time = min(cfg.max_wait, cfg.min_wait * (cfg.multiplier ** (attempt - 1)))
-            await self._hook_manager.execute_hooks(
-                content=str(exc),
-                stage=HookStage.ON_LLM_RETRY,
-                metadata={
-                    "attempt": attempt,
-                    "max_attempts": effective_max,
-                    "wait_seconds": wait_time,
-                    "exception_type": type(exc).__name__,
-                    "endpoint": "responses",
-                },
-                hooks=retry_hooks,
+            original_retry_config: RetryConfig | None = invoke_kwargs.pop("retry_config", None)
+            cfg = original_retry_config or RetryConfig(
+                retry_enabled=True,
+                max_attempts=settings.retry_max_attempts,
+                min_wait=float(settings.retry_min_wait),
+                max_wait=float(settings.retry_max_wait),
+                multiplier=float(settings.retry_multiplier),
             )
-            if cfg.callback is not None:
-                if asyncio.iscoroutinefunction(cfg.callback):
-                    return await cfg.callback(exc, attempt)
-                return cfg.callback(exc, attempt)
-            return should_retry_error(exc), {}
+            effective_max = 1 if not cfg.retry_enabled else cfg.max_attempts
 
-        hooked_config = RetryConfig(
-            retry_enabled=cfg.retry_enabled,
-            max_attempts=cfg.max_attempts,
-            min_wait=cfg.min_wait,
-            max_wait=cfg.max_wait,
-            multiplier=cfg.multiplier,
-            callback=hooked_callback,
+            async def hooked_callback(exc: Exception, attempt: int) -> tuple[bool, dict]:
+                wait_time = min(cfg.max_wait, cfg.min_wait * (cfg.multiplier ** (attempt - 1)))
+                await self._hook_manager.execute_hooks(
+                    content=str(exc),
+                    stage=HookStage.ON_LLM_RETRY,
+                    metadata={
+                        "attempt": attempt,
+                        "max_attempts": effective_max,
+                        "wait_seconds": wait_time,
+                        "exception_type": type(exc).__name__,
+                        "endpoint": "responses",
+                    },
+                    hooks=retry_hooks,
+                )
+                if cfg.callback is not None:
+                    if asyncio.iscoroutinefunction(cfg.callback):
+                        return await cfg.callback(exc, attempt)
+                    return cfg.callback(exc, attempt)
+                return should_retry_error(exc), {}
+
+            hooked_config = RetryConfig(
+                retry_enabled=cfg.retry_enabled,
+                max_attempts=cfg.max_attempts,
+                min_wait=cfg.min_wait,
+                max_wait=cfg.max_wait,
+                multiplier=cfg.multiplier,
+                callback=hooked_callback,
+            )
+            return await _responses_call_with_retry(retry_config=hooked_config, **invoke_kwargs)
+
+        effective_fallback_config = (
+            fallback_config if fallback_config is not None else self.fallback_config
         )
-        return await _responses_call_with_retry(retry_config=hooked_config, **kwargs)
+        primary_model = kwargs.get("model") or self.model
+
+        if resolve_fallback_chain(primary_model, effective_fallback_config, fallback_models) is None:
+            return await _invoke(**kwargs)
+
+        return await call_with_model_fallback(
+            _invoke,
+            primary_model=primary_model,
+            fallback_config=effective_fallback_config,
+            fallback_models=fallback_models,
+            status=status,
+            correlation_id=correlation_id,
+            **kwargs,
+        )
 
     async def _responses_execute(
         self,
@@ -4486,6 +4678,9 @@ class GlueLLM:
         rate_limit_config: RateLimitConfig | None = None,
         retry_config: RetryConfig | None = None,
         retry_enabled: bool | None = None,
+        fallback_models: list[str] | None = None,
+        response_threading: bool | None = None,
+        previous_response_id: str | None = None,
         # -- Context management --
         summarize_context: SummarizeContextConfig | bool | None = None,
         # -- Observability / behavior --
@@ -4575,6 +4770,7 @@ class GlueLLM:
         elif not get_correlation_id():
             set_correlation_id()
         correlation_id = get_correlation_id()
+        successful_call_model.set(None)
         status = self._bind_status_observers(on_status, sinks)
 
         # Normalise user_input -> a single textual user_message (for guardrails,
@@ -4605,15 +4801,10 @@ class GlueLLM:
 
         start_time = time.time()
         tools_to_use = tools if tools is not None else self.tools
-        all_tools = tools_to_use
-        static_tools = [t for t in all_tools if is_static_tool(t)]
-        dynamic_tools = [t for t in all_tools if not is_static_tool(t)]
-        router_tool = None
-        if effective_tool_mode == "dynamic" and all_tools:
-            router_tool = build_router_tool(dynamic_tools)
-            active_tools: list[Callable] = [router_tool] + static_tools
-        else:
-            active_tools = all_tools
+        await self._ensure_registry_tools()
+        active_tools, router_tool, static_tools, dynamic_tools = self._prepare_active_tools(
+            tools_to_use, effective_tool_mode
+        )
         system_prompt_content = self._format_system_prompt(tools=active_tools)
         messages_snapshot: list[dict] = []
         result: ExecutionResult | None = None
@@ -4645,6 +4836,14 @@ class GlueLLM:
                 total_cost = 0.0
                 plain_response_text: str | None = None
                 response: Any = None
+                effective_threading = (
+                    response_threading if response_threading is not None else self.response_threading
+                )
+                thread_id: str | None = previous_response_id or (
+                    self._last_response_id if effective_threading else None
+                )
+                pending_wire_input: str | list[dict[str, Any]] | None = None
+                is_first_wire_call = True
 
                 def _track_usage(resp: Any) -> None:
                     nonlocal total_tokens_used, total_cost
@@ -4719,6 +4918,24 @@ class GlueLLM:
                                 )
 
                             instructions, input_items = _messages_to_response_input(messages)
+                            wire_kwargs: dict[str, Any] = {}
+                            if effective_threading:
+                                if is_first_wire_call:
+                                    wire_input: str | list[dict[str, Any]] = _initial_responses_wire_input(
+                                        user_input, user_message_text
+                                    )
+                                    wire_instructions = system_prompt_content if thread_id is None else None
+                                    is_first_wire_call = False
+                                else:
+                                    wire_input = pending_wire_input or []
+                                    wire_instructions = None
+                                if thread_id is not None:
+                                    wire_kwargs["previous_response_id"] = thread_id
+                                call_input = wire_input
+                                call_instructions = wire_instructions
+                            else:
+                                call_input = input_items
+                                call_instructions = instructions
 
                             await status.emit(
                             ProcessEvent(
@@ -4731,9 +4948,12 @@ class GlueLLM:
                                 ))
                             response = await self._llm_responses_call(
                                 _sr_merged_registry,
-                                input_data=input_items,
+                                fallback_models=fallback_models,
+                                status=status,
+                                correlation_id=correlation_id,
+                                input_data=call_input,
                                 model=model or self.model,
-                                instructions=instructions,
+                                instructions=call_instructions,
                                 tools=active_tools,
                                 # No structured-output schema during the tool phase
                                 request_timeout=request_timeout,
@@ -4743,7 +4963,12 @@ class GlueLLM:
                                 retry_config=effective_retry_config,
                                 rate_limit_config=effective_rate_limit_config,
                                 **effective_model_kwargs,
+                                **wire_kwargs,
                             )
+                            new_thread_id = _extract_response_id(response)
+                            if new_thread_id:
+                                thread_id = new_thread_id
+                                self._last_response_id = new_thread_id
                             response_tool_calls = _extract_response_function_calls(response)
                             _sr_tokens = _extract_response_token_usage(response)
                             await status.emit(
@@ -4818,7 +5043,7 @@ class GlueLLM:
                                     api_key=api_key,
                                     timeout=request_timeout,
                                 )
-                                active_tools = matched + static_tools
+                                active_tools = self._finalize_routed_tools(matched, static_tools)
                                 logger.debug(
                                     f"[{correlation_id}] Dynamic routing: matched={len(matched)}, "
                                     f"static={len(static_tools)}, total_active={len(active_tools)}"
@@ -4871,6 +5096,10 @@ class GlueLLM:
 
                             if effective_condense:
                                 _condense_tool_round(messages, aaak_tool_condensing=self.aaak_tool_condensing)
+                            if effective_threading:
+                                pending_wire_input = _tool_messages_to_responses_outputs(
+                                    [r["message"] for r in round_results]
+                                )
                         else:
                             logger.debug(f"Model finished tools after {iteration + 1} iteration(s)")
                             if response_text:
@@ -4903,6 +5132,9 @@ class GlueLLM:
                             ))
                         response = await self._llm_responses_call(
                             _sr_merged_registry,
+                            fallback_models=fallback_models,
+                            status=status,
+                            correlation_id=correlation_id,
                             input_data=input_items,
                             model=model or self.model,
                             instructions=instructions,
@@ -4978,6 +5210,9 @@ class GlueLLM:
                                     instructions, input_items = _messages_to_response_input(messages)
                                     response = await self._llm_responses_call(
                                         _sr_merged_registry,
+                                        fallback_models=fallback_models,
+                                        status=status,
+                                        correlation_id=correlation_id,
                                         input_data=input_items,
                                         model=model or self.model,
                                         instructions=instructions,
@@ -5063,6 +5298,9 @@ class GlueLLM:
                             instructions, input_items = _messages_to_response_input(messages)
                             response = await self._llm_responses_call(
                                 _sr_merged_registry,
+                                fallback_models=fallback_models,
+                                status=status,
+                                correlation_id=correlation_id,
                                 input_data=input_items,
                                 model=model or self.model,
                                 instructions=instructions,
@@ -5098,6 +5336,9 @@ class GlueLLM:
                                 ))
                             response = await self._llm_responses_call(
                                 _sr_merged_registry,
+                                fallback_models=fallback_models,
+                                status=status,
+                                correlation_id=correlation_id,
                                 input_data=input_items,
                                 model=model or self.model,
                                 instructions=instructions,
@@ -5157,6 +5398,9 @@ class GlueLLM:
                                 instructions, input_items = _messages_to_response_input(messages)
                                 response = await self._llm_responses_call(
                                     _sr_merged_registry,
+                                    fallback_models=fallback_models,
+                                    status=status,
+                                    correlation_id=correlation_id,
                                     input_data=input_items,
                                     model=model or self.model,
                                     instructions=instructions,
@@ -5191,7 +5435,8 @@ class GlueLLM:
                     raw_response=response,
                     tokens_used=total_tokens_used,
                     estimated_cost_usd=total_cost if total_cost > 0 else None,
-                    model=model or self.model,
+                    model=_model_used_in_call(model, self.model),
+                    response_id=_extract_response_id(response),
                     structured_output=structured_output,
                 )
 
@@ -5199,7 +5444,7 @@ class GlueLLM:
                     eval_store=effective_eval_store,
                     user_message=user_message_text,
                     system_prompt=system_prompt_content,
-                    model=model or self.model,
+                    model=_model_used_in_call(model, self.model),
                     messages_snapshot=messages_snapshot,
                     start_time=start_time,
                     result=result,
@@ -5247,6 +5492,9 @@ class GlueLLM:
         rate_limit_config: RateLimitConfig | None = None,
         retry_config: RetryConfig | None = None,
         retry_enabled: bool | None = None,
+        fallback_models: list[str] | None = None,
+        response_threading: bool | None = None,
+        previous_response_id: str | None = None,
         summarize_context: SummarizeContextConfig | bool | None = None,
         correlation_id: str | None = None,
         enable_eval_recording: bool | None = None,
@@ -5275,6 +5523,9 @@ class GlueLLM:
             rate_limit_config=rate_limit_config,
             retry_config=retry_config,
             retry_enabled=retry_enabled,
+            fallback_models=fallback_models,
+            response_threading=response_threading,
+            previous_response_id=previous_response_id,
             summarize_context=summarize_context,
             correlation_id=correlation_id,
             enable_eval_recording=enable_eval_recording,
@@ -5305,6 +5556,7 @@ class GlueLLM:
         rate_limit_config: RateLimitConfig | None = None,
         retry_config: RetryConfig | None = None,
         retry_enabled: bool | None = None,
+        fallback_models: list[str] | None = None,
         summarize_context: SummarizeContextConfig | bool | None = None,
         correlation_id: str | None = None,
         enable_eval_recording: bool | None = None,
@@ -5334,6 +5586,7 @@ class GlueLLM:
             rate_limit_config=rate_limit_config,
             retry_config=retry_config,
             retry_enabled=retry_enabled,
+            fallback_models=fallback_models,
             summarize_context=summarize_context,
             correlation_id=correlation_id,
             enable_eval_recording=enable_eval_recording,
@@ -5343,6 +5596,102 @@ class GlueLLM:
             sinks=sinks,
             track_costs=track_costs,
             **model_kwargs,
+        )
+
+    async def stream_response(
+        self,
+        user_input: str | list[dict[str, Any]],
+        *,
+        model: str | None = None,
+        tools: list[Callable] | None = None,
+        response_format: type[T] | None = None,
+        execute_tools: bool = True,
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
+        fallback_models: list[str] | None = None,
+        response_threading: bool | None = None,
+        previous_response_id: str | None = None,
+        on_status: OnStatusCallback = None,
+        sinks: list[Sink] | None = None,
+        **model_kwargs: Any,
+    ) -> AsyncIterator[StreamingChunk[Any]]:
+        """Stream a Responses API completion, mirroring :meth:`stream_complete`."""
+        from gluellm.responses_stream import consume_responses_stream_with_tools
+
+        if is_shutting_down():
+            raise RuntimeError("Cannot process request: shutdown in progress")
+
+        effective_model = model or self.model
+        tools_to_use = tools if tools is not None else self.tools
+        await self._ensure_registry_tools()
+        active_tools = self._prepare_active_tools(tools_to_use, self.tool_mode)[0]
+        status = self._bind_status_observers(on_status, sinks)
+        if not get_correlation_id():
+            set_correlation_id()
+        correlation_id = get_correlation_id()
+        effective_threading = (
+            response_threading if response_threading is not None else self.response_threading
+        )
+        thread_id: str | None = previous_response_id or (
+            self._last_response_id if effective_threading else None
+        )
+        instructions = self._format_system_prompt(tools=active_tools) if thread_id is None else None
+        wire_input = user_input if isinstance(user_input, (str, list)) else str(user_input)
+        accumulated = ""
+
+        await status.emit(ProcessEvent(kind="stream_start", correlation_id=correlation_id, timestamp=time.time()))
+        wire_kwargs: dict[str, Any] = {}
+        if thread_id is not None:
+            wire_kwargs["previous_response_id"] = thread_id
+
+        stream_iter = await self._llm_responses_call(
+            self._get_merged_hook_registry(),
+            fallback_models=fallback_models,
+            status=status,
+            correlation_id=correlation_id,
+            input_data=wire_input,
+            model=effective_model,
+            instructions=instructions,
+            tools=active_tools if execute_tools and active_tools else None,
+            stream=True,
+            connect_timeout=connect_timeout,
+            request_timeout=request_timeout,
+            **model_kwargs,
+            **wire_kwargs,
+        )
+
+        async for is_content, chunk_text, _assistant_msg in consume_responses_stream_with_tools(stream_iter):
+            if is_content:
+                accumulated += chunk_text
+                await status.emit(
+                    ProcessEvent(
+                        kind="stream_chunk",
+                        correlation_id=correlation_id,
+                        timestamp=time.time(),
+                        content=chunk_text,
+                        done=False,
+                    )
+                )
+                yield StreamingChunk(content=chunk_text, done=False, tool_calls_made=0)
+            else:
+                accumulated = chunk_text or accumulated
+
+        new_id = None
+        if hasattr(stream_iter, "response"):
+            new_id = _extract_response_id(getattr(stream_iter, "response", None))
+        if new_id:
+            self._last_response_id = new_id
+
+        structured_output = None
+        if response_format and accumulated:
+            structured_output = _parse_structured_content(accumulated, response_format)
+
+        await status.emit(ProcessEvent(kind="stream_end", correlation_id=correlation_id, timestamp=time.time()))
+        yield StreamingChunk(
+            content="",
+            done=True,
+            tool_calls_made=0,
+            structured_output=structured_output,
         )
 
     def _format_system_prompt(self, tools: list[Callable] | None = None) -> str:
@@ -5365,20 +5714,28 @@ class GlueLLM:
 
             AAAKCompressor.ensure_preamble_in_system(messages[0])
 
-    def _find_tool(self, tool_name: str, tools: list[Callable] | None = None) -> Callable | None:
-        """Find a tool by name.
+    def _find_tool(
+        self,
+        tool_name: str,
+        tools: list[Callable | dict[str, Any]] | None = None,
+        registry: ToolRegistry | None = None,
+    ) -> Callable | None:
+        """Find a local callable tool by name.
 
         Args:
             tool_name: Name of the tool to find
             tools: Optional list of tools to search (defaults to self.tools)
+            registry: Optional tool registry for remote tools (checked separately at execution)
 
         Returns:
             The tool function if found, None otherwise
         """
         tools_to_search = tools if tools is not None else self.tools
         for tool in tools_to_search:
-            if tool.__name__ == tool_name:
+            if callable(tool) and tool.__name__ == tool_name:
                 return tool
+        if registry is not None and registry.has_tool(tool_name):
+            return registry.find_callable(tool_name)
         return None
 
     @staticmethod
@@ -5423,18 +5780,20 @@ class GlueLLM:
     async def _execute_tool_calls_round(
         self,
         tool_calls: list[Any],
-        active_tools: list[Callable],
+        active_tools: list[Callable | dict[str, Any]],
         parallel: bool,
         iteration: int,
         correlation_id: str,
         on_status: OnStatusCallback,
         sinks: list[Sink] | None = None,
+        tool_registry: ToolRegistry | None = None,
     ) -> list[dict[str, Any]]:
         """Execute a round of tool calls (sequential or parallel).
 
         Returns a list of dicts, each with "history" and "message" keys for
         appending to tool_execution_history and messages.
         """
+        registry = tool_registry if tool_registry is not None else self.tool_registry
         status = self._bind_status_observers(on_status, sinks)
         mode = "parallel" if parallel else "sequential"
         logger.debug(
@@ -5446,7 +5805,7 @@ class GlueLLM:
         post_tool_hooks = merged_registry.get_hooks(HookStage.POST_TOOL)
 
         # Phase 1: parse and resolve each tool call
-        Parsed = tuple[int, Any, str, dict[str, Any] | None, Callable | None, str | None]
+        Parsed = tuple[int, Any, str, dict[str, Any] | None, Callable | None, str | None, bool]
         parsed: list[Parsed] = []
         for call_index, tool_call in enumerate(tool_calls, 1):
             tool_name = _tool_name_from_call(tool_call)
@@ -5456,23 +5815,34 @@ class GlueLLM:
                 logger.warning(
                     f"[{correlation_id}] Tool call {call_index} '{tool_name}' has invalid JSON arguments: {e}"
                 )
-                parsed.append((call_index, tool_call, tool_name, None, None, f"Invalid JSON in tool arguments: {str(e)}"))
+                parsed.append((call_index, tool_call, tool_name, None, None, f"Invalid JSON in tool arguments: {str(e)}", False))
                 continue
-            tool_func = self._find_tool(tool_name, tools=active_tools)
-            if not tool_func:
+            tool_func = self._find_tool(tool_name, tools=active_tools, registry=registry)
+            via_registry = False
+            if tool_func is None and registry is not None and registry.has_tool(tool_name):
+                via_registry = True
+            elif tool_func is None:
                 logger.warning(
                     f"[{correlation_id}] Tool call {call_index} '{tool_name}' not found in available tools"
                 )
-                parsed.append((call_index, tool_call, tool_name, tool_args, None, f"Tool '{tool_name}' not found in available tools"))
+                parsed.append((call_index, tool_call, tool_name, tool_args, None, f"Tool '{tool_name}' not found in available tools", False))
                 continue
-            parsed.append((call_index, tool_call, tool_name, tool_args, tool_func, None))
+            parsed.append((call_index, tool_call, tool_name, tool_args, tool_func, None, via_registry))
 
         def _truncate_for_log(value: Any, max_len: int = 200) -> str:
             """Truncate a value for logging purposes."""
             s = str(value)
             return s if len(s) <= max_len else s[:max_len] + "..."
 
-        async def run_one(call_index: int, tool_call: Any, tool_name: str, tool_args: dict[str, Any], tool_func: Callable) -> tuple[str, bool, float]:
+        async def run_one(
+            call_index: int,
+            tool_call: Any,
+            tool_name: str,
+            tool_args: dict[str, Any],
+            tool_func: Callable | None,
+            *,
+            via_registry: bool = False,
+        ) -> tuple[str, bool, float]:
             """Execute a single tool, running pre/post hooks around the invocation."""
             logger.debug(
                 f"[{correlation_id}] Executing tool '{tool_name}' (call {call_index}): "
@@ -5508,11 +5878,17 @@ class GlueLLM:
                                     "tool.success": True,
                                 },
                             )
-                tool_args = self._coerce_args_to_pydantic(tool_func, tool_args)
-                if asyncio.iscoroutinefunction(tool_func):
-                    result = await tool_func(**tool_args)
+                if via_registry:
+                    if registry is None:
+                        raise RuntimeError(f"Registry tool '{tool_name}' has no registry configured")
+                    result = await registry.call(tool_name, tool_args)
                 else:
-                    result = await asyncio.to_thread(tool_func, **tool_args)
+                    assert tool_func is not None
+                    tool_args = self._coerce_args_to_pydantic(tool_func, tool_args)
+                    if asyncio.iscoroutinefunction(tool_func):
+                        result = await tool_func(**tool_args)
+                    else:
+                        result = await asyncio.to_thread(tool_func, **tool_args)
                 elapsed = time.time() - start
                 logger.debug(
                     f"[{correlation_id}] Tool '{tool_name}' (call {call_index}) completed successfully "
@@ -5549,7 +5925,7 @@ class GlueLLM:
         results: list[dict[str, Any]] = []
         if parallel:
             # Emit all starts first
-            for call_index, tool_call, tool_name, _a, _f, err in parsed:
+            for call_index, tool_call, tool_name, _a, _f, err, _vr in parsed:
                 await status.emit(
                             ProcessEvent(
                         kind="tool_call_start",
@@ -5561,20 +5937,23 @@ class GlueLLM:
                     ))
             # Build ordered results: errors first, then runnables
             ordered: list[dict[str, Any] | None] = [None] * len(parsed)
-            runnable_items: list[tuple[int, Any, str, dict[str, Any], Callable]] = []
-            for i, (call_index, tool_call, tool_name, tool_args, tool_func, err) in enumerate(parsed):
+            runnable_items: list[tuple[int, Any, str, dict[str, Any], Callable | None, bool]] = []
+            for i, (call_index, tool_call, tool_name, tool_args, tool_func, err, via_registry) in enumerate(parsed):
                 if err is not None:
                     await status.emit(
                             ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=False, duration_seconds=0, error=err))
                     args_str = getattr(tool_call.function, "arguments", "{}")
                     ordered[i] = {"history": {"tool_name": tool_name, "arguments": args_str, "result": err, "error": True}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": err}}
                 else:
-                    runnable_items.append((call_index, tool_call, tool_name, tool_args or {}, tool_func))
+                    runnable_items.append((call_index, tool_call, tool_name, tool_args or {}, tool_func, via_registry))
             if runnable_items:
-                tasks = [run_one(ci, tc, tn, ta, tf) for ci, tc, tn, ta, tf in runnable_items]
+                tasks = [
+                    run_one(ci, tc, tn, ta, tf, via_registry=vr)
+                    for ci, tc, tn, ta, tf, vr in runnable_items
+                ]
                 gathered = await asyncio.gather(*tasks, return_exceptions=True)
                 runnable_idx = 0
-                for i, (call_index, tool_call, tool_name, tool_args, tool_func, err) in enumerate(parsed):
+                for i, (call_index, tool_call, tool_name, tool_args, tool_func, err, _via_registry) in enumerate(parsed):
                     if err is not None:
                         continue
                     g = gathered[runnable_idx]
@@ -5589,7 +5968,7 @@ class GlueLLM:
             results = [r for r in ordered if r is not None]
         else:
             # Sequential
-            for call_index, tool_call, tool_name, tool_args, tool_func, err in parsed:
+            for call_index, tool_call, tool_name, tool_args, tool_func, err, via_registry in parsed:
                 await status.emit(
                             ProcessEvent(kind="tool_call_start", correlation_id=correlation_id, timestamp=time.time(), iteration=iteration, tool_name=tool_name, call_index=call_index))
                 if err is not None:
@@ -5597,7 +5976,9 @@ class GlueLLM:
                             ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=False, duration_seconds=0, error=err))
                     results.append({"history": {"tool_name": tool_name, "arguments": getattr(tool_call.function, "arguments", "{}"), "result": err, "error": True}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": err}})
                     continue
-                result_str, error, duration = await run_one(call_index, tool_call, tool_name, tool_args or {}, tool_func)
+                result_str, error, duration = await run_one(
+                    call_index, tool_call, tool_name, tool_args or {}, tool_func, via_registry=via_registry
+                )
                 await status.emit(
                             ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=not error, duration_seconds=duration, error=result_str if error else None))
                 results.append({"history": {"tool_name": tool_name, "arguments": tool_args or {}, "result": result_str, "error": error}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": result_str}})
@@ -5698,6 +6079,7 @@ class GlueLLM:
         rate_limit_config: RateLimitConfig | None = None,
         retry_config: RetryConfig | None = None,
         retry_enabled: bool | None = None,
+        fallback_models: list[str] | None = None,
         # -- Context management --
         summarize_context: SummarizeContextConfig | bool | None = None,
         # -- Observability / behavior --
@@ -5800,18 +6182,14 @@ class GlueLLM:
         elif not get_correlation_id():
             set_correlation_id()
         correlation_id = get_correlation_id()
+        successful_call_model.set(None)
         status = self._bind_status_observers(on_status, sinks)
 
         # Resolve active_tools for dynamic vs standard mode
-        all_tools = self.tools
-        static_tools = [t for t in all_tools if is_static_tool(t)]
-        dynamic_tools = [t for t in all_tools if not is_static_tool(t)]
-        router_tool = None
-        if effective_tool_mode == "dynamic" and all_tools:
-            router_tool = build_router_tool(dynamic_tools)
-            active_tools: list[Callable] = [router_tool] + static_tools
-        else:
-            active_tools = all_tools
+        await self._ensure_registry_tools()
+        active_tools, router_tool, static_tools, dynamic_tools = self._prepare_active_tools(
+            self.tools, effective_tool_mode
+        )
 
         # Run input guardrails before processing
         _stream_merged_registry = self._get_merged_hook_registry()
@@ -5921,6 +6299,9 @@ class GlueLLM:
                         # we stream plain text and parse into response_format when the stream ends.
                         stream_iter = await self._llm_call(
                             _stream_merged_registry,
+                            fallback_models=fallback_models,
+                            status=status,
+                            correlation_id=correlation_id,
                             messages=messages,
                             model=model or self.model,
                             tools=None,
@@ -6025,6 +6406,9 @@ class GlueLLM:
                         ))
                     stream_iter = await self._llm_call(
                         _stream_merged_registry,
+                        fallback_models=fallback_models,
+                        status=status,
+                        correlation_id=correlation_id,
                         messages=messages,
                         model=model or self.model,
                         tools=active_tools if active_tools else None,
@@ -6120,7 +6504,7 @@ class GlueLLM:
                             api_key=None,
                             timeout=request_timeout,
                         )
-                        active_tools = matched + static_tools
+                        active_tools = self._finalize_routed_tools(matched, static_tools)
                         logger.debug(
                             f"[{get_correlation_id()}] Dynamic tool routing complete: "
                             f"matched={len(matched)}, static={len(static_tools)}, total_active={len(active_tools)}"
@@ -6224,6 +6608,9 @@ class GlueLLM:
                             try:
                                 response = await self._llm_call(
                                     _stream_merged_registry,
+                                    fallback_models=fallback_models,
+                                    status=status,
+                                    correlation_id=correlation_id,
                                     messages=messages,
                                     model=model or self.model,
                                     tools=None,  # No tools on retry
@@ -6948,6 +7335,43 @@ async def structured_response(
         track_costs=track_costs,
         **model_kwargs,
     )
+
+
+async def stream_response(
+    user_input: str | list[dict[str, Any]],
+    *,
+    model: str | None = None,
+    system_prompt: str | None = None,
+    tools: list[Callable] | None = None,
+    response_format: type[BaseModel] | None = None,
+    execute_tools: bool = True,
+    connect_timeout: float | None = None,
+    request_timeout: float | None = None,
+    fallback_models: list[str] | None = None,
+    response_threading: bool | None = None,
+    previous_response_id: str | None = None,
+    on_status: OnStatusCallback = None,
+    sinks: list[Sink] | None = None,
+    **model_kwargs: Any,
+) -> AsyncIterator[StreamingChunk[Any]]:
+    """Stream a Responses API completion (module-level helper)."""
+    client = GlueLLM(model=model, system_prompt=system_prompt, tools=tools)
+    async for chunk in client.stream_response(
+        user_input,
+        model=model,
+        tools=tools,
+        response_format=response_format,
+        execute_tools=execute_tools,
+        connect_timeout=connect_timeout,
+        request_timeout=request_timeout,
+        fallback_models=fallback_models,
+        response_threading=response_threading,
+        previous_response_id=previous_response_id,
+        on_status=on_status,
+        sinks=sinks,
+        **model_kwargs,
+    ):
+        yield chunk
 
 
 async def list_models(

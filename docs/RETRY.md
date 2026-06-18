@@ -26,6 +26,38 @@ Retry configuration is supported on:
 
 ---
 
+## Model fallback chains
+
+When the primary model fails with configured error types after retries are exhausted, GlueLLM can automatically try the next model in an ordered chain (LiteLLM-style degradation).
+
+```python
+from gluellm import GlueLLM, ModelFallbackConfig, RateLimitError
+
+client = GlueLLM(
+    model="openai:gpt-5.4",
+    fallback_config=ModelFallbackConfig(
+        models=["anthropic:claude-sonnet-4", "openai:gpt-4o-mini"],
+        fallback_on=[RateLimitError, TokenLimitError, AuthenticationError],
+    ),
+)
+
+# Or per-call override
+result = await client.complete(
+    "Hello",
+    fallback_models=["anthropic:claude-sonnet-4"],
+)
+```
+
+- **Primary model** is always tried first (`GlueLLM.model` or per-call `model=`).
+- **`fallback_models`** per call overrides `fallback_config.models`.
+- Each model receives the full `RetryConfig` attempt budget before advancing.
+- A `model_fallback` status event is emitted when advancing (via `on_status` / `StatusEmitter`).
+- `ExecutionResult.model` reflects the model that actually succeeded.
+
+Same-provider fallbacks share one rate-limit bucket (`global:{provider}`).
+
+---
+
 ## RetryConfig
 
 ```python

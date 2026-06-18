@@ -1986,11 +1986,18 @@ class TestProviderCache:
 
         from gluellm.api import _ProviderCache
 
+        import os
+
         cache = _ProviderCache()
         fake_provider = MagicMock()
 
-        with patch("gluellm.api.AnyLLM.create", return_value=fake_provider) as mock_create:
-            provider, model_id = cache.get_provider("openai/text-embedding-3-small", None)
+        env_backup = os.environ.pop("OPENAI_API_KEY", None)
+        try:
+            with patch("gluellm.api.AnyLLM.create", return_value=fake_provider) as mock_create:
+                provider, model_id = cache.get_provider("openai/text-embedding-3-small", None)
+        finally:
+            if env_backup is not None:
+                os.environ["OPENAI_API_KEY"] = env_backup
 
         assert provider is fake_provider
         assert model_id == "text-embedding-3-small"
@@ -3148,6 +3155,40 @@ class TestDualTimeoutParameters:
         assert timeout.connect == 5.0
         assert timeout.pool == min(settings.default_pool_timeout, settings.max_pool_timeout)
         assert timeout.pool != timeout.connect
+
+    async def test_safe_responses_call_does_not_forward_timeout_to_aresponses(self):
+        """Responses API params reject httpx.Timeout; enforce limits via asyncio.wait_for only."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        captured_kwargs: dict = {}
+
+        async def capture_aresponses(*args, **kwargs):
+            captured_kwargs.clear()
+            captured_kwargs.update(kwargs)
+            return MagicMock(
+                id="resp_test",
+                output=[],
+                output_text="ok",
+                usage=None,
+            )
+
+        mock_provider = MagicMock()
+        mock_provider.aresponses = AsyncMock(side_effect=capture_aresponses)
+
+        with patch("gluellm.api._provider_cache") as mock_cache:
+            mock_cache.get_provider = lambda model, api_key: (mock_provider, "gpt-5.4-2026-03-05")
+
+            from gluellm.api import _safe_responses_call
+
+            await _safe_responses_call(
+                input_data="hi",
+                model="openai:gpt-5.4-2026-03-05",
+                request_timeout=30.0,
+                connect_timeout=5.0,
+                timeout=__import__("httpx").Timeout(connect=5.0, read=30.0, write=30.0, pool=60.0),
+            )
+
+        assert "timeout" not in captured_kwargs
 
 
 class TestPerCallConfigGaps:
