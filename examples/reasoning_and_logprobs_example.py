@@ -18,7 +18,7 @@ async def example_reasoning_effort():
     print("Example 1: Reasoning Effort (Thinking Models)")
     print("=" * 70)
 
-    # reasoning_effort: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto"
+    # reasoning_effort: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"
     # Use a model that supports it (e.g. o4-mini); unsupported models error at the provider.
     result = await complete(
         user_message="What is the next number in: 2, 4, 8, 16, ?",

@@ -5,8 +5,11 @@ LLM agent with a specific role, tools, and behavior.
 """
 
 from collections.abc import Callable
+from typing import Literal
 
 from gluellm.models.prompt import SystemPrompt
+
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 
 
 class Agent:
@@ -23,6 +26,7 @@ class Agent:
         tools: List of callable tools the agent can use
         model: LLM model identifier (provider:model_name format)
         max_tool_iterations: Maximum tool execution iterations
+        reasoning_effort: Optional reasoning effort for reasoning-capable models
 
     Example:
         >>> from gluellm.models.agent import Agent
@@ -36,7 +40,8 @@ class Agent:
         ...     description="Helps with research tasks",
         ...     system_prompt=SystemPrompt(content="You are a research assistant."),
         ...     tools=[search_web],
-        ...     max_tool_iterations=5
+        ...     max_tool_iterations=5,
+        ...     reasoning_effort="high",
         ... )
     """
 
@@ -49,6 +54,7 @@ class Agent:
         max_tool_iterations: int = 10,
         model: str | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
     ):
         """Initialize an Agent.
 
@@ -61,6 +67,7 @@ class Agent:
                 (defaults to 10)
             model: LLM model to use (defaults to settings.default_model)
             max_tokens: Maximum number of tokens to generate (defaults to settings.default_max_tokens).
+            reasoning_effort: Reasoning effort for o-series / gpt-5 models.
         """
         from gluellm.config import settings
 
@@ -71,3 +78,4 @@ class Agent:
         self.model = model or settings.default_model
         self.max_tool_iterations = max_tool_iterations
         self.max_tokens = max_tokens if max_tokens is not None else settings.default_max_tokens
+        self.reasoning_effort = reasoning_effort

@@ -96,6 +96,7 @@ from gluellm.api import (
     get_session_summary,
     list_models,
     reset_session_tracker,
+    response,
     stream_complete,
     structured_complete,
     structured_response,
@@ -119,7 +120,7 @@ from gluellm.eval import (
     get_global_eval_store,
     set_global_eval_store,
 )
-from gluellm.events import ConsoleSink, JsonFileSink, ProcessEvent, Sink
+from gluellm.events import ConsoleSink, JsonFileSink, ProcessEvent, Sink, StatusEmitter
 from gluellm.guardrails import (
     GuardrailBlockedError,
     GuardrailRejectedError,
@@ -143,6 +144,7 @@ from gluellm.models.config import RequestConfig
 from gluellm.models.conversation import Conversation, Message, Role
 from gluellm.models.embedding import EmbeddingResult
 from gluellm.models.hook import HookConfig, HookContext, HookErrorStrategy, HookRegistry, HookStage
+from gluellm.models.agent import Agent, ReasoningEffort
 from gluellm.models.prompt import Prompt, SystemPrompt
 from gluellm.observability.logging_config import setup_logging
 from gluellm.rate_limiting.api_key_pool import APIKeyPool
@@ -204,6 +206,7 @@ __all__ = [
     "GlueLLM",
     "close_providers",
     "complete",
+    "response",
     "embed",
     "stream_complete",
     "structured_complete",
@@ -212,6 +215,7 @@ __all__ = [
     "EmbeddingResult",
     "StreamingChunk",
     "ProcessEvent",
+    "StatusEmitter",
     "Sink",
     "ConsoleSink",
     "JsonFileSink",
@@ -258,6 +262,8 @@ __all__ = [
     "Conversation",
     "Message",
     "Role",
+    "Agent",
+    "ReasoningEffort",
     "SystemPrompt",
     "Prompt",
     "EmbeddingResult",

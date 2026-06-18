@@ -49,6 +49,10 @@ OPENAI_PRICING: dict[str, ModelPricing] = {
     "o1-preview": ModelPricing(15.00, 60.00, cached_input_price_per_million=7.50),
     "o1-mini": ModelPricing(3.00, 12.00, cached_input_price_per_million=1.50),
     "o1": ModelPricing(15.00, 60.00, cached_input_price_per_million=7.50),
+    # O3 / O4 models
+    "o3-mini": ModelPricing(1.10, 4.40, cached_input_price_per_million=0.55),
+    "o4-mini": ModelPricing(1.10, 4.40, cached_input_price_per_million=0.55),
+    "o4": ModelPricing(15.00, 60.00, cached_input_price_per_million=7.50),
 }
 
 # Anthropic Pricing (as of December 2024)

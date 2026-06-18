@@ -6,22 +6,21 @@ which are responsible for executing queries using LLM agents.
 
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Generic, TypeVar
+from typing import Any
 
 from pydantic import BaseModel
 
-from gluellm.api import ExecutionResult
+from gluellm.api import ExecutionResult, OnStatusCallback
+from gluellm.events import Sink, StatusEmitter
 from gluellm.hooks import manager as hooks_manager
 from gluellm.hooks.manager import HookManager
 from gluellm.models.hook import HookRegistry, HookStage
 from gluellm.observability.logging_config import get_logger
 
-T_out = TypeVar("T_out", bound=BaseModel)
-
 logger = get_logger(__name__)
 
 
-class Executor(ABC, Generic[T_out]):
+class Executor[T_out: BaseModel](ABC):
     """Abstract base class for query executors.
 
     Executors are responsible for processing queries and returning responses.
@@ -41,13 +40,25 @@ class Executor(ABC, Generic[T_out]):
         ...         )
     """
 
-    def __init__(self, hook_registry: HookRegistry | None = None):
+    def __init__(
+        self,
+        hook_registry: HookRegistry | None = None,
+        on_status: OnStatusCallback = None,
+        sinks: list[Sink] | None = None,
+        status_emitter: StatusEmitter | None = None,
+    ):
         """Initialize an Executor.
 
         Args:
             hook_registry: Optional hook registry for this executor instance
+            on_status: Optional callback for process status events
+            sinks: Optional list of event sinks
+            status_emitter: Optional instance-level status emitter
         """
         self.hook_registry = hook_registry
+        self.on_status = on_status
+        self.sinks = sinks
+        self.status_emitter = status_emitter
         self._hook_manager = HookManager()
 
     async def execute(self, query: str) -> ExecutionResult[T_out]:

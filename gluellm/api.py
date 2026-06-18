@@ -84,7 +84,7 @@ from gluellm.tool_router import (
 from gluellm.costing.pricing_data import calculate_cost
 from gluellm.eval import get_global_eval_store
 from gluellm.eval.store import EvalStore
-from gluellm.events import ProcessEvent, Sink, emit_status
+from gluellm.events import ProcessEvent, Sink, StatusEmitter, emit_status
 from gluellm.guardrails import GuardrailBlockedError, GuardrailRejectedError, GuardrailsConfig
 from gluellm.hooks.manager import HookManager, _get_global_registry
 from gluellm.models.hook import HookRegistry, HookStage
@@ -92,7 +92,10 @@ from gluellm.guardrails.runner import run_input_guardrails, run_output_guardrail
 from gluellm.models.conversation import Conversation, Role
 from gluellm.models.eval import EvalRecord
 from gluellm.observability.logging_config import get_logger
-from gluellm.provider_params import normalize_model_params
+from gluellm.provider_params import (
+    normalize_model_params,
+    _update_kwargs_for_provider_reasoning_effort,
+)
 from gluellm.rate_limiting.api_key_pool import extract_provider_from_model
 from gluellm.rate_limiting.key_fingerprint import api_key_hmac_fingerprint
 from gluellm.rate_limiting.rate_limiter import acquire_rate_limit
@@ -111,8 +114,7 @@ from gluellm.telemetry import (
 # Callback for process status events (sync or async)
 type OnStatusCallback = Callable[[ProcessEvent], None] | Callable[[ProcessEvent], Awaitable[None]] | None
 
-# Reasoning effort for o3, o4-mini, Claude thinking models (any_llm 1.11.0)
-type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "auto"]
+from gluellm.models.agent import ReasoningEffort
 
 # GlueLLM call-level options that must never be forwarded to provider.acompletion (OpenAI, etc.).
 _PROVIDER_ACOMPLETION_SKIP_KEYS = frozenset({"max_tool_iterations", "execute_tools", "rate_limit_algorithm"})
@@ -377,6 +379,26 @@ PROVIDER_ENV_VAR_MAP: dict[str, str] = {
 }
 
 
+# Providers that use gRPC instead of httpx — must not receive a custom http_client.
+_GRPC_PROVIDERS = frozenset({"xai"})
+
+
+def _build_provider_http_client() -> httpx.AsyncClient:
+    """Build a bounded httpx AsyncClient for httpx-based LLM providers."""
+    return httpx.AsyncClient(
+        limits=httpx.Limits(
+            max_connections=settings.http_max_connections,
+            max_keepalive_connections=settings.http_max_keepalive_connections,
+        ),
+        timeout=httpx.Timeout(
+            connect=settings.default_connect_timeout,
+            read=settings.default_request_timeout,
+            write=settings.default_request_timeout,
+            pool=settings.default_pool_timeout,
+        ),
+    )
+
+
 # ============================================================================
 # Provider Cache
 # ============================================================================
@@ -425,9 +447,12 @@ class _ProviderCache:
         cache_key = (provider_name, resolved_key)
         with self._lock:
             if cache_key not in self._providers:
+                create_kwargs: dict[str, Any] = {"api_key": resolved_key}
+                if provider_name not in _GRPC_PROVIDERS:
+                    create_kwargs["http_client"] = _build_provider_http_client()
                 self._providers[cache_key] = AnyLLM.create(
                     provider_name,
-                    api_key=resolved_key,
+                    **create_kwargs,
                 )
             provider = self._providers[cache_key]
 
@@ -765,6 +790,24 @@ async def _record_eval_data(
         logger.error(f"Failed to record evaluation data: {e}", exc_info=True)
 
 
+def _estimate_model_call_cost_usd(
+    model: str,
+    tokens_used: dict[str, int] | None,
+) -> float | None:
+    """Estimate USD cost for a single LLM call without mutating session trackers."""
+    if not tokens_used:
+        return None
+
+    provider = extract_provider_from_model(model)
+    model_name = model.split(":", 1)[1] if ":" in model else model
+    return calculate_cost(
+        provider=provider,
+        model_name=model_name,
+        input_tokens=tokens_used.get("prompt", 0),
+        output_tokens=tokens_used.get("completion", 0),
+    )
+
+
 def _calculate_and_record_cost(
     model: str,
     tokens_used: dict[str, int] | None,
@@ -792,16 +835,7 @@ def _calculate_and_record_cost(
     prompt_tokens = tokens_used.get("prompt", 0)
     completion_tokens = tokens_used.get("completion", 0)
 
-    # Calculate cost
-    provider = extract_provider_from_model(model)
-    model_name = model.split(":", 1)[1] if ":" in model else model
-
-    cost = calculate_cost(
-        provider=provider,
-        model_name=model_name,
-        input_tokens=prompt_tokens,
-        output_tokens=completion_tokens,
-    )
+    cost = _estimate_model_call_cost_usd(model, tokens_used)
 
     # Record to session tracker
     _session_tracker.record_usage(
@@ -1601,6 +1635,7 @@ async def _safe_llm_call(
     request_timeout = min(request_timeout, settings.max_request_timeout)  # Enforce max timeout
     connect_timeout = connect_timeout or settings.default_connect_timeout
     connect_timeout = min(connect_timeout, settings.max_connect_timeout)  # Enforce max connect timeout
+    pool_timeout = min(settings.default_pool_timeout, settings.max_pool_timeout)
     _patch_any_llm_openai_converter()
 
     model_kwargs = dict(model_kwargs)
@@ -1613,14 +1648,23 @@ async def _safe_llm_call(
             connect=connect_timeout,
             read=request_timeout,
             write=request_timeout,
-            pool=connect_timeout,
+            pool=pool_timeout,
         )
 
     # Normalize provider-specific params (e.g. Anthropic max_tokens, OpenAI o-series max_completion_tokens)
     max_tokens, model_kwargs = normalize_model_params(model, max_tokens, model_kwargs)
+    provider = extract_provider_from_model(model)
+    reasoning_effort = model_kwargs.pop("reasoning_effort", None)
+    if reasoning_effort is not None:
+        model_kwargs = _update_kwargs_for_provider_reasoning_effort(
+            provider,
+            model,
+            reasoning_effort,
+            model_kwargs,
+            use_responses_api=False,
+        )
 
     # Apply rate limiting before making the call
-    provider = extract_provider_from_model(model)
     rate_limit_key = (
         f"global:{provider}" if not api_key else f"api_key:{api_key_hmac_fingerprint(api_key)}"
     )
@@ -2333,6 +2377,7 @@ async def _safe_responses_call(
     request_timeout = min(request_timeout, settings.max_request_timeout)
     connect_timeout = connect_timeout or settings.default_connect_timeout
     connect_timeout = min(connect_timeout, settings.max_connect_timeout)
+    pool_timeout = min(settings.default_pool_timeout, settings.max_pool_timeout)
     _patch_any_llm_openai_converter()
 
     # Filter and translate kwargs for the Responses surface
@@ -2347,11 +2392,16 @@ async def _safe_responses_call(
     if max_output_tokens is not None:
         kwargs["max_output_tokens"] = max_output_tokens
 
-    # reasoning_effort: str -> reasoning: {"effort": str}
+    # reasoning_effort: normalized via provider_params helper
     reasoning_effort = kwargs.pop("reasoning_effort", None)
     if reasoning_effort is not None and "reasoning" not in kwargs:
-        if reasoning_effort != "auto" and reasoning_effort is not None:
-            kwargs["reasoning"] = {"effort": reasoning_effort}
+        kwargs = _update_kwargs_for_provider_reasoning_effort(
+            extract_provider_from_model(model),
+            model,
+            reasoning_effort,
+            kwargs,
+            use_responses_api=True,
+        )
     if isinstance(kwargs.get("reasoning"), str):
         kwargs["reasoning"] = {"effort": kwargs["reasoning"]}
 
@@ -2365,7 +2415,7 @@ async def _safe_responses_call(
             connect=connect_timeout,
             read=request_timeout,
             write=request_timeout,
-            pool=connect_timeout,
+            pool=pool_timeout,
         )
 
     # Tools: convert callables/nested dicts into Responses flat format
@@ -2823,6 +2873,7 @@ class GlueLLM:
         guardrails: GuardrailsConfig | None = None,
         hook_registry: HookRegistry | None = None,
         session_label: str | None = None,
+        status_emitter: StatusEmitter | None = None,
     ):
         """Initialize GlueLLM client.
 
@@ -2847,7 +2898,7 @@ class GlueLLM:
             rate_limit_config: Optional rate limit configuration. Set algorithm to override
                 the default (from GLUELLM_RATE_LIMIT_ALGORITHM). E.g. RateLimitConfig(algorithm="leaking_bucket").
             model_kwargs: Optional dict of extra params for acompletion (e.g. temperature, top_p).
-            reasoning_effort: For o3, o4-mini, Claude thinking models: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto".
+            reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh".
             logprobs: Include log probabilities in the response (eval/confidence scoring).
             top_logprobs: Number of top log probs to return when logprobs=True.
             session_label: Observability metadata for gateway/mzai traces.
@@ -2905,6 +2956,16 @@ class GlueLLM:
         self.aaak_tool_condensing = (
             aaak_tool_condensing if aaak_tool_condensing is not None else settings.aaak_tool_condensing
         )
+        self.status_emitter = status_emitter
+
+    def _bind_status_observers(
+        self,
+        on_status: OnStatusCallback,
+        sinks: list[Sink] | None,
+    ) -> StatusEmitter:
+        """Merge instance-level and per-call status observers."""
+        base = self.status_emitter or StatusEmitter()
+        return base.bind(on_status=on_status, sinks=sinks)
 
     @property
     def summarize_context(self) -> bool:
@@ -3139,7 +3200,7 @@ class GlueLLM:
             rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
-            reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto".
+            reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh".
             logprobs: Include log probabilities (eval/confidence scoring).
             top_logprobs: Number of top log probs when logprobs=True.
             session_label: Observability metadata for gateway traces.
@@ -3217,6 +3278,7 @@ class GlueLLM:
             set_correlation_id()
 
         correlation_id = get_correlation_id()
+        status = self._bind_status_observers(on_status, sinks)
         logger.info(f"Starting completion request: correlation_id={correlation_id}, message_length={len(user_message)}")
 
         # Run input guardrails before processing
@@ -3304,7 +3366,7 @@ class GlueLLM:
                                 hooks=_pre_iteration_hooks,
                             )
 
-                        await emit_status(
+                        await status.emit(
                             ProcessEvent(
                                 kind="llm_call_start",
                                 correlation_id=correlation_id,
@@ -3312,10 +3374,7 @@ class GlueLLM:
                                 iteration=iteration + 1,
                                 model=model or self.model,
                                 message_count=len(messages),
-                            ),
-                            on_status,
-                            sinks=sinks,
-                        )
+                            ))
                         response = await self._llm_call(
                             _merged_guardrail_registry,
                             messages=messages,
@@ -3336,7 +3395,17 @@ class GlueLLM:
                             f"LLM call failed on iteration {iteration + 1}/{effective_max_tool_iterations}: {e}, "
                             f"error_type={type(e).__name__}, cause_chain={cause_chain}"
                         )
-                        # Add error context to the exception
+                        await status.emit(
+                            ProcessEvent(
+                                kind="llm_call_error",
+                                correlation_id=correlation_id,
+                                timestamp=time.time(),
+                                iteration=iteration + 1,
+                                model=model or self.model,
+                                error_type=type(e).__name__,
+                                error=str(e),
+                            )
+                        )
                         error_msg = (
                             f"Failed during tool execution loop (iteration {iteration + 1}/{effective_max_tool_iterations})"
                         )
@@ -3348,19 +3417,17 @@ class GlueLLM:
 
                     tokens_used = _extract_token_usage(response)
                     _has_tool_calls = bool(execute_tools and active_tools and response.choices[0].message.tool_calls)
-                    await emit_status(
-                        ProcessEvent(
+                    await status.emit(
+                            ProcessEvent(
                             kind="llm_call_end",
                             correlation_id=correlation_id,
                             timestamp=time.time(),
                             iteration=iteration + 1,
                             model=model or self.model,
-                            has_tool_calls=_has_tool_calls,
+                            tool_call_count=len(response.choices[0].message.tool_calls or []) if response.choices else 0,
                             token_usage=tokens_used,
-                        ),
-                        on_status,
-                        sinks=sinks,
-                    )
+                            estimated_cost_usd=_estimate_model_call_cost_usd(model or self.model, tokens_used),
+                        ))
 
                     # POST_ITERATION hook: content is the LLM response text before tool dispatch
                     if _post_iteration_hooks:
@@ -3403,17 +3470,14 @@ class GlueLLM:
                                 f"[{correlation_id}] Dynamic tool routing complete: "
                                 f"matched={len(matched)}, static={len(static_tools)}, total_active={len(active_tools)}"
                             )
-                            await emit_status(
-                                ProcessEvent(
+                            await status.emit(
+                            ProcessEvent(
                                     kind="tool_route",
                                     correlation_id=correlation_id,
                                     timestamp=time.time(),
                                     route_query=query,
                                     matched_tools=[t.__name__ for t in matched],
-                                ),
-                                on_status,
-                                sinks=sinks,
-                            )
+                                ))
                             # Update system prompt to reflect matched tools (no longer router)
                             self._apply_system_prompt_after_tool_route(messages, active_tools)
                             continue
@@ -3551,17 +3615,14 @@ class GlueLLM:
                         track_costs=track_costs,
                     )
 
-                    await emit_status(
-                        ProcessEvent(
+                    await status.emit(
+                            ProcessEvent(
                             kind="complete",
                             correlation_id=correlation_id,
                             timestamp=time.time(),
                             tool_calls_made=tool_calls_made,
                             response_length=len(final_content),
-                        ),
-                        on_status,
-                        sinks=sinks,
-                    )
+                        ))
 
                     result = ExecutionResult(
                         final_response=final_content,
@@ -3604,17 +3665,14 @@ class GlueLLM:
                     track_costs=track_costs,
                 )
 
-                await emit_status(
-                    ProcessEvent(
+                await status.emit(
+                            ProcessEvent(
                         kind="complete",
                         correlation_id=correlation_id,
                         timestamp=time.time(),
                         tool_calls_made=tool_calls_made,
                         response_length=len(final_content),
-                    ),
-                    on_status,
-                    sinks=sinks,
-                )
+                    ))
 
                 result = ExecutionResult(
                     final_response=final_content,
@@ -3727,7 +3785,7 @@ class GlueLLM:
             rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
-            reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto".
+            reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh".
             logprobs: Include log probabilities (eval/confidence scoring).
             top_logprobs: Number of top log probs when logprobs=True.
             session_label: Observability metadata for gateway traces.
@@ -3806,6 +3864,7 @@ class GlueLLM:
             set_correlation_id()
 
         correlation_id = get_correlation_id()
+        status = self._bind_status_observers(on_status, sinks)
         logger.info(
             f"Starting structured completion: correlation_id={correlation_id}, "
             f"response_format={response_format.__name__}, message_length={len(user_message)}"
@@ -3926,18 +3985,15 @@ class GlueLLM:
                                     hooks=_sc_pre_iter_hooks,
                                 )
 
-                            await emit_status(
-                                ProcessEvent(
+                            await status.emit(
+                            ProcessEvent(
                                     kind="llm_call_start",
                                     correlation_id=correlation_id,
                                     timestamp=time.time(),
                                     iteration=iteration + 1,
                                     model=model or self.model,
                                     message_count=len(messages),
-                                ),
-                                on_status,
-                                sinks=sinks,
-                            )
+                                ))
                             response = await self._llm_call(
                                 _sc_merged_registry,
                                 messages=messages,
@@ -3952,27 +4008,39 @@ class GlueLLM:
                                 rate_limit_config=effective_rate_limit_config,
                                 **effective_model_kwargs,
                             )
-                            _sc_has_tool_calls = bool(
-                                response.choices and response.choices[0].message.tool_calls
+                            _sc_tool_call_count = (
+                                len(response.choices[0].message.tool_calls or [])
+                                if response.choices and response.choices[0].message.tool_calls
+                                else 0
                             )
-                            await emit_status(
-                                ProcessEvent(
+                            _sc_tokens = _extract_token_usage(response)
+                            await status.emit(
+                            ProcessEvent(
                                     kind="llm_call_end",
                                     correlation_id=correlation_id,
                                     timestamp=time.time(),
                                     iteration=iteration + 1,
                                     model=model or self.model,
-                                    has_tool_calls=_sc_has_tool_calls,
-                                    token_usage=_extract_token_usage(response),
-                                ),
-                                on_status,
-                                sinks=sinks,
-                            )
+                                    tool_call_count=_sc_tool_call_count,
+                                    token_usage=_sc_tokens,
+                                    estimated_cost_usd=_estimate_model_call_cost_usd(model or self.model, _sc_tokens),
+                                ))
                         except LLMError as e:
                             cause_chain = _build_cause_chain(e)
                             logger.error(
                                 f"LLM call failed on iteration {iteration + 1}: {e}, "
                                 f"error_type={type(e).__name__}, cause_chain={cause_chain}"
+                            )
+                            await status.emit(
+                                ProcessEvent(
+                                    kind="llm_call_error",
+                                    correlation_id=correlation_id,
+                                    timestamp=time.time(),
+                                    iteration=iteration + 1,
+                                    model=model or self.model,
+                                    error_type=type(e).__name__,
+                                    error=str(e),
+                                )
                             )
                             raise type(e)(f"Failed during tool execution (iteration {iteration + 1}): {e}") from e
 
@@ -3987,7 +4055,7 @@ class GlueLLM:
                                 stage=HookStage.POST_ITERATION,
                                 metadata={
                                     "iteration": iteration + 1,
-                                    "has_tool_calls": _sc_has_tool_calls,
+                                    "has_tool_calls": _sc_tool_call_count > 0,
                                     "tool_count": len(active_tools),
                                 },
                                 hooks=_sc_post_iter_hooks,
@@ -4020,17 +4088,14 @@ class GlueLLM:
                                     f"[{correlation_id}] Dynamic tool routing complete: "
                                     f"matched={len(matched)}, static={len(static_tools)}, total_active={len(active_tools)}"
                                 )
-                                await emit_status(
-                                    ProcessEvent(
+                                await status.emit(
+                            ProcessEvent(
                                         kind="tool_route",
                                         correlation_id=correlation_id,
                                         timestamp=time.time(),
                                         route_query=query,
                                         matched_tools=[t.__name__ for t in matched],
-                                    ),
-                                    on_status,
-                                    sinks=sinks,
-                                )
+                                    ))
                                 # Update system prompt to reflect matched tools (no longer router)
                                 self._apply_system_prompt_after_tool_route(messages, active_tools)
                                 continue
@@ -4075,18 +4140,15 @@ class GlueLLM:
                 # PHASE 2: Final structured output call
                 logger.debug(f"Requesting structured output: response_format={response_format.__name__}")
                 try:
-                    await emit_status(
-                        ProcessEvent(
+                    await status.emit(
+                            ProcessEvent(
                             kind="llm_call_start",
                             correlation_id=correlation_id,
                             timestamp=time.time(),
                             iteration=None,
                             model=model or self.model,
                             message_count=len(messages),
-                        ),
-                        on_status,
-                        sinks=sinks,
-                    )
+                        ))
                     response = await self._llm_call(
                         _sc_merged_registry,
                         messages=messages,
@@ -4101,18 +4163,15 @@ class GlueLLM:
                         rate_limit_config=effective_rate_limit_config,
                         **effective_model_kwargs,
                     )
-                    await emit_status(
-                        ProcessEvent(
+                    await status.emit(
+                            ProcessEvent(
                             kind="llm_call_end",
                             correlation_id=correlation_id,
                             timestamp=time.time(),
                             model=model or self.model,
-                            has_tool_calls=False,
+                            tool_call_count=0,
                             token_usage=_extract_token_usage(response),
-                        ),
-                        on_status,
-                        sinks=sinks,
-                    )
+                        ))
                 except LLMError as e:
                     logger.error(f"Structured output call failed: {e}")
                     raise type(e)(f"Failed during structured output request: {e}") from e
@@ -4293,17 +4352,14 @@ class GlueLLM:
 
                 logger.info(f"Structured completion finished: tool_calls={tool_calls_made}, cost=${total_cost:.6f}")
 
-                await emit_status(
-                    ProcessEvent(
+                await status.emit(
+                            ProcessEvent(
                         kind="complete",
                         correlation_id=correlation_id,
                         timestamp=time.time(),
                         tool_calls_made=tool_calls_made,
                         response_length=len(content) if content else 0,
-                    ),
-                    on_status,
-                    sinks=sinks,
-                )
+                    ))
 
                 result = ExecutionResult(
                     final_response=content or "",
@@ -4406,10 +4462,10 @@ class GlueLLM:
         )
         return await _responses_call_with_retry(retry_config=hooked_config, **kwargs)
 
-    async def structured_response(
+    async def _responses_execute(
         self,
         user_input: str | list[dict[str, Any]],
-        response_format: type[T],
+        response_format: type[T] | None = None,
         # -- Core --
         api_key: str | None = None,
         model: str | None = None,
@@ -4519,6 +4575,7 @@ class GlueLLM:
         elif not get_correlation_id():
             set_correlation_id()
         correlation_id = get_correlation_id()
+        status = self._bind_status_observers(on_status, sinks)
 
         # Normalise user_input -> a single textual user_message (for guardrails,
         # logs, conversation tracking) and a parallel chat-completions message
@@ -4531,8 +4588,8 @@ class GlueLLM:
             extra_input_messages = _coerce_response_input_to_messages(user_input)
 
         logger.info(
-            f"Starting structured response: correlation_id={correlation_id}, "
-            f"response_format={response_format.__name__}, "
+            f"Starting Responses execution: correlation_id={correlation_id}, "
+            f"response_format={response_format.__name__ if response_format else None}, "
             f"input_kind={'string' if isinstance(user_input, str) else 'list'}, "
             f"message_length={len(user_message_text)}"
         )
@@ -4586,6 +4643,8 @@ class GlueLLM:
                 tool_calls_made = 0
                 total_tokens_used: dict[str, int] | None = None
                 total_cost = 0.0
+                plain_response_text: str | None = None
+                response: Any = None
 
                 def _track_usage(resp: Any) -> None:
                     nonlocal total_tokens_used, total_cost
@@ -4661,18 +4720,15 @@ class GlueLLM:
 
                             instructions, input_items = _messages_to_response_input(messages)
 
-                            await emit_status(
-                                ProcessEvent(
+                            await status.emit(
+                            ProcessEvent(
                                     kind="llm_call_start",
                                     correlation_id=correlation_id,
                                     timestamp=time.time(),
                                     iteration=iteration + 1,
                                     model=model or self.model,
                                     message_count=len(messages),
-                                ),
-                                on_status,
-                                sinks=sinks,
-                            )
+                                ))
                             response = await self._llm_responses_call(
                                 _sr_merged_registry,
                                 input_data=input_items,
@@ -4689,25 +4745,34 @@ class GlueLLM:
                                 **effective_model_kwargs,
                             )
                             response_tool_calls = _extract_response_function_calls(response)
-                            _sr_has_tool_calls = bool(response_tool_calls)
-                            await emit_status(
-                                ProcessEvent(
+                            _sr_tokens = _extract_response_token_usage(response)
+                            await status.emit(
+                            ProcessEvent(
                                     kind="llm_call_end",
                                     correlation_id=correlation_id,
                                     timestamp=time.time(),
                                     iteration=iteration + 1,
                                     model=model or self.model,
-                                    has_tool_calls=_sr_has_tool_calls,
-                                    token_usage=_extract_response_token_usage(response),
-                                ),
-                                on_status,
-                                sinks=sinks,
-                            )
+                                    tool_call_count=len(response_tool_calls),
+                                    token_usage=_sr_tokens,
+                                    estimated_cost_usd=_estimate_model_call_cost_usd(model or self.model, _sr_tokens),
+                                ))
                         except LLMError as e:
                             cause_chain = _build_cause_chain(e)
                             logger.error(
                                 f"Responses call failed on iteration {iteration + 1}: {e}, "
                                 f"error_type={type(e).__name__}, cause_chain={cause_chain}"
+                            )
+                            await status.emit(
+                                ProcessEvent(
+                                    kind="llm_call_error",
+                                    correlation_id=correlation_id,
+                                    timestamp=time.time(),
+                                    iteration=iteration + 1,
+                                    model=model or self.model,
+                                    error_type=type(e).__name__,
+                                    error=str(e),
+                                )
                             )
                             raise type(e)(
                                 f"Failed during tool execution (iteration {iteration + 1}): {e}"
@@ -4723,7 +4788,7 @@ class GlueLLM:
                                 stage=HookStage.POST_ITERATION,
                                 metadata={
                                     "iteration": iteration + 1,
-                                    "has_tool_calls": _sr_has_tool_calls,
+                                    "has_tool_calls": len(response_tool_calls) > 0,
                                     "tool_count": len(active_tools),
                                     "endpoint": "responses",
                                 },
@@ -4758,17 +4823,14 @@ class GlueLLM:
                                     f"[{correlation_id}] Dynamic routing: matched={len(matched)}, "
                                     f"static={len(static_tools)}, total_active={len(active_tools)}"
                                 )
-                                await emit_status(
-                                    ProcessEvent(
+                                await status.emit(
+                            ProcessEvent(
                                         kind="tool_route",
                                         correlation_id=correlation_id,
                                         timestamp=time.time(),
                                         route_query=query,
                                         matched_tools=[t.__name__ for t in matched],
-                                    ),
-                                    on_status,
-                                    sinks=sinks,
-                                )
+                                    ))
                                 self._apply_system_prompt_after_tool_route(messages, active_tools)
                                 continue
 
@@ -4813,193 +4875,32 @@ class GlueLLM:
                             logger.debug(f"Model finished tools after {iteration + 1} iteration(s)")
                             if response_text:
                                 messages.append({"role": "assistant", "content": response_text})
+                                plain_response_text = response_text
                             break
                     else:
                         logger.debug(
                             f"Reached max tool iterations ({effective_max_tool_iterations})"
                         )
 
-                # PHASE 2: Final structured-output call
-                logger.debug(
-                    f"Requesting structured Responses output: response_format={response_format.__name__}"
-                )
-                try:
-                    instructions, input_items = _messages_to_response_input(messages)
-                    await emit_status(
-                        ProcessEvent(
-                            kind="llm_call_start",
-                            correlation_id=correlation_id,
-                            timestamp=time.time(),
-                            iteration=None,
-                            model=model or self.model,
-                            message_count=len(messages),
-                        ),
-                        on_status,
-                        sinks=sinks,
-                    )
-                    response = await self._llm_responses_call(
-                        _sr_merged_registry,
-                        input_data=input_items,
-                        model=model or self.model,
-                        instructions=instructions,
-                        response_format=response_format,
-                        request_timeout=request_timeout,
-                        connect_timeout=connect_timeout,
-                        api_key=api_key,
-                        max_tokens=effective_max_tokens,
-                        retry_config=effective_retry_config,
-                        rate_limit_config=effective_rate_limit_config,
-                        **effective_model_kwargs,
-                    )
-                    await emit_status(
-                        ProcessEvent(
-                            kind="llm_call_end",
-                            correlation_id=correlation_id,
-                            timestamp=time.time(),
-                            model=model or self.model,
-                            has_tool_calls=False,
-                            token_usage=_extract_response_token_usage(response),
-                        ),
-                        on_status,
-                        sinks=sinks,
-                    )
-                except LLMError as e:
-                    logger.error(f"Structured Responses output call failed: {e}")
-                    raise type(e)(f"Failed during structured output request: {e}") from e
-
-                _track_usage(response)
-
-                parsed = _extract_response_parsed(response, response_format)
-                content = _extract_response_text(response)
-                logger.debug(
-                    f"Structured Responses received: parsed_type={type(parsed)}, "
-                    f"content_length={len(content) if content else 0}"
-                )
-
-                # Output guardrails with retry loop (mirrors structured_complete)
-                if effective_guardrails and content:
-                    max_retries = effective_guardrails.max_output_guardrail_retries
-                    output_retry_count = 0
-                    while output_retry_count <= max_retries:
-                        try:
-                            content = await self._run_guardrails(
-                                content,
-                                effective_guardrails,
-                                "output",
-                                _sr_merged_registry,
-                                attempt=output_retry_count,
-                            )
-                            break
-                        except GuardrailRejectedError as e:
-                            output_retry_count += 1
-                            if output_retry_count > max_retries:
-                                logger.warning(
-                                    f"Output guardrails failed after {max_retries} retries: {e.reason}"
-                                )
-                                raise GuardrailBlockedError(
-                                    f"Output guardrails failed after {max_retries} retries: {e.reason}",
-                                    guardrail_name=e.guardrail_name,
-                                ) from e
-
-                            messages.append({"role": "assistant", "content": content})
-                            feedback_message = (
-                                f"Your previous response was rejected: {e.reason}. "
-                                "Please provide a revised structured response that addresses this issue."
-                            )
-                            messages.append({"role": "user", "content": feedback_message})
-                            logger.info(
-                                f"Output guardrail rejected structured response "
-                                f"(attempt {output_retry_count}/{max_retries}): {e.reason}. "
-                                "Requesting revised response."
-                            )
-
-                            try:
-                                instructions, input_items = _messages_to_response_input(messages)
-                                response = await self._llm_responses_call(
-                                    _sr_merged_registry,
-                                    input_data=input_items,
-                                    model=model or self.model,
-                                    instructions=instructions,
-                                    response_format=response_format,
-                                    request_timeout=request_timeout,
-                                    connect_timeout=connect_timeout,
-                                    api_key=api_key,
-                                    max_tokens=effective_max_tokens,
-                                    retry_config=effective_retry_config,
-                                    rate_limit_config=effective_rate_limit_config,
-                                    **effective_model_kwargs,
-                                )
-                            except LLMError as llm_error:
-                                raise GuardrailBlockedError(
-                                    f"Failed to get revised structured response after guardrail rejection: {llm_error}",
-                                    guardrail_name=e.guardrail_name,
-                                ) from llm_error
-
-                            _track_usage(response)
-                            parsed = _extract_response_parsed(response, response_format)
-                            content = _extract_response_text(response)
-                            logger.debug(
-                                f"Received revised structured Responses output "
-                                f"(length={len(content) if content else 0})"
-                            )
-
-                if content:
-                    self._conversation.add_message(Role.ASSISTANT, content)
-
-                # Validation-aware retry loop (mirrors structured_complete)
-                max_val_retries = max_validation_retries if max_validation_retries is not None else 3
-                validation_attempt = 0
                 structured_output: T | None = None
-                while True:
+                content = ""
+
+                if response_format is not None:
+                    # PHASE 2: Final structured-output call
+                    logger.debug(
+                        f"Requesting structured Responses output: response_format={response_format.__name__}"
+                    )
                     try:
-                        if isinstance(parsed, response_format):
-                            logger.debug(f"Using parsed Pydantic instance: {response_format.__name__}")
-                            structured_output = parsed
-                        elif isinstance(parsed, dict):
-                            logger.debug(f"Instantiating {response_format.__name__} from dict")
-                            structured_output = response_format(**parsed)
-                        elif content:
-                            data = json.loads(content)
-                            logger.debug(
-                                f"Parsed JSON from content, instantiating {response_format.__name__}"
-                            )
-                            structured_output = response_format(**data)
-                        else:
-                            logger.warning(f"Using parsed response as-is (type: {type(parsed)})")
-                            structured_output = parsed
-                        break
-                    except (ValidationError, json.JSONDecodeError, TypeError) as e:
-                        validation_attempt += 1
-                        if validation_attempt > max_val_retries:
-                            raise
-                        messages.append({"role": "assistant", "content": content or ""})
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"Your response failed validation: {e}\n"
-                                    "Please return a corrected JSON response."
-                                ),
-                            }
-                        )
-                        logger.info(
-                            f"Validation retry {validation_attempt}/{max_val_retries}: {e}"
-                        )
-                        _val_retry_hooks = _sr_merged_registry.get_hooks(HookStage.ON_VALIDATION_RETRY)
-                        if _val_retry_hooks:
-                            await self._hook_manager.execute_hooks(
-                                content=content or "",
-                                stage=HookStage.ON_VALIDATION_RETRY,
-                                metadata={
-                                    "validation_attempt": validation_attempt,
-                                    "max_validation_retries": max_val_retries,
-                                    "error": str(e),
-                                    "response_format_name": response_format.__name__,
-                                    "endpoint": "responses",
-                                },
-                                hooks=_val_retry_hooks,
-                            )
                         instructions, input_items = _messages_to_response_input(messages)
+                        await status.emit(
+                            ProcessEvent(
+                                kind="llm_call_start",
+                                correlation_id=correlation_id,
+                                timestamp=time.time(),
+                                iteration=None,
+                                model=model or self.model,
+                                message_count=len(messages),
+                            ))
                         response = await self._llm_responses_call(
                             _sr_merged_registry,
                             input_data=input_items,
@@ -5014,25 +4915,274 @@ class GlueLLM:
                             rate_limit_config=effective_rate_limit_config,
                             **effective_model_kwargs,
                         )
+                        await status.emit(
+                            ProcessEvent(
+                                kind="llm_call_end",
+                                correlation_id=correlation_id,
+                                timestamp=time.time(),
+                                model=model or self.model,
+                                tool_call_count=0,
+                                token_usage=_extract_response_token_usage(response),
+                            ))
+                    except LLMError as e:
+                        logger.error(f"Structured Responses output call failed: {e}")
+                        raise type(e)(f"Failed during structured output request: {e}") from e
+    
+                    _track_usage(response)
+    
+                    parsed = _extract_response_parsed(response, response_format)
+                    content = _extract_response_text(response)
+                    logger.debug(
+                        f"Structured Responses received: parsed_type={type(parsed)}, "
+                        f"content_length={len(content) if content else 0}"
+                    )
+    
+                    # Output guardrails with retry loop (mirrors structured_complete)
+                    if effective_guardrails and content:
+                        max_retries = effective_guardrails.max_output_guardrail_retries
+                        output_retry_count = 0
+                        while output_retry_count <= max_retries:
+                            try:
+                                content = await self._run_guardrails(
+                                    content,
+                                    effective_guardrails,
+                                    "output",
+                                    _sr_merged_registry,
+                                    attempt=output_retry_count,
+                                )
+                                break
+                            except GuardrailRejectedError as e:
+                                output_retry_count += 1
+                                if output_retry_count > max_retries:
+                                    logger.warning(
+                                        f"Output guardrails failed after {max_retries} retries: {e.reason}"
+                                    )
+                                    raise GuardrailBlockedError(
+                                        f"Output guardrails failed after {max_retries} retries: {e.reason}",
+                                        guardrail_name=e.guardrail_name,
+                                    ) from e
+    
+                                messages.append({"role": "assistant", "content": content})
+                                feedback_message = (
+                                    f"Your previous response was rejected: {e.reason}. "
+                                    "Please provide a revised structured response that addresses this issue."
+                                )
+                                messages.append({"role": "user", "content": feedback_message})
+                                logger.info(
+                                    f"Output guardrail rejected structured response "
+                                    f"(attempt {output_retry_count}/{max_retries}): {e.reason}. "
+                                    "Requesting revised response."
+                                )
+    
+                                try:
+                                    instructions, input_items = _messages_to_response_input(messages)
+                                    response = await self._llm_responses_call(
+                                        _sr_merged_registry,
+                                        input_data=input_items,
+                                        model=model or self.model,
+                                        instructions=instructions,
+                                        response_format=response_format,
+                                        request_timeout=request_timeout,
+                                        connect_timeout=connect_timeout,
+                                        api_key=api_key,
+                                        max_tokens=effective_max_tokens,
+                                        retry_config=effective_retry_config,
+                                        rate_limit_config=effective_rate_limit_config,
+                                        **effective_model_kwargs,
+                                    )
+                                except LLMError as llm_error:
+                                    raise GuardrailBlockedError(
+                                        f"Failed to get revised structured response after guardrail rejection: {llm_error}",
+                                        guardrail_name=e.guardrail_name,
+                                    ) from llm_error
+    
+                                _track_usage(response)
+                                parsed = _extract_response_parsed(response, response_format)
+                                content = _extract_response_text(response)
+                                logger.debug(
+                                    f"Received revised structured Responses output "
+                                    f"(length={len(content) if content else 0})"
+                                )
+    
+                    if content:
+                        self._conversation.add_message(Role.ASSISTANT, content)
+    
+                    # Validation-aware retry loop (mirrors structured_complete)
+                    max_val_retries = max_validation_retries if max_validation_retries is not None else 3
+                    validation_attempt = 0
+                    structured_output: T | None = None
+                    while True:
+                        try:
+                            if isinstance(parsed, response_format):
+                                logger.debug(f"Using parsed Pydantic instance: {response_format.__name__}")
+                                structured_output = parsed
+                            elif isinstance(parsed, dict):
+                                logger.debug(f"Instantiating {response_format.__name__} from dict")
+                                structured_output = response_format(**parsed)
+                            elif content:
+                                data = json.loads(content)
+                                logger.debug(
+                                    f"Parsed JSON from content, instantiating {response_format.__name__}"
+                                )
+                                structured_output = response_format(**data)
+                            else:
+                                logger.warning(f"Using parsed response as-is (type: {type(parsed)})")
+                                structured_output = parsed
+                            break
+                        except (ValidationError, json.JSONDecodeError, TypeError) as e:
+                            validation_attempt += 1
+                            if validation_attempt > max_val_retries:
+                                raise
+                            messages.append({"role": "assistant", "content": content or ""})
+                            messages.append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        f"Your response failed validation: {e}\n"
+                                        "Please return a corrected JSON response."
+                                    ),
+                                }
+                            )
+                            logger.info(
+                                f"Validation retry {validation_attempt}/{max_val_retries}: {e}"
+                            )
+                            _val_retry_hooks = _sr_merged_registry.get_hooks(HookStage.ON_VALIDATION_RETRY)
+                            if _val_retry_hooks:
+                                await self._hook_manager.execute_hooks(
+                                    content=content or "",
+                                    stage=HookStage.ON_VALIDATION_RETRY,
+                                    metadata={
+                                        "validation_attempt": validation_attempt,
+                                        "max_validation_retries": max_val_retries,
+                                        "error": str(e),
+                                        "response_format_name": response_format.__name__,
+                                        "endpoint": "responses",
+                                    },
+                                    hooks=_val_retry_hooks,
+                                )
+                            instructions, input_items = _messages_to_response_input(messages)
+                            response = await self._llm_responses_call(
+                                _sr_merged_registry,
+                                input_data=input_items,
+                                model=model or self.model,
+                                instructions=instructions,
+                                response_format=response_format,
+                                request_timeout=request_timeout,
+                                connect_timeout=connect_timeout,
+                                api_key=api_key,
+                                max_tokens=effective_max_tokens,
+                                retry_config=effective_retry_config,
+                                rate_limit_config=effective_rate_limit_config,
+                                **effective_model_kwargs,
+                            )
+                            _track_usage(response)
+                            parsed = _extract_response_parsed(response, response_format)
+                            content = _extract_response_text(response)
+
+                else:
+                    # Plain Responses completion (no structured schema)
+                    if plain_response_text is not None:
+                        content = plain_response_text
+                    else:
+                        logger.debug("Requesting plain Responses output")
+                        try:
+                            instructions, input_items = _messages_to_response_input(messages)
+                            await status.emit(
+                            ProcessEvent(
+                                    kind="llm_call_start",
+                                    correlation_id=correlation_id,
+                                    timestamp=time.time(),
+                                    iteration=None,
+                                    model=model or self.model,
+                                    message_count=len(messages),
+                                ))
+                            response = await self._llm_responses_call(
+                                _sr_merged_registry,
+                                input_data=input_items,
+                                model=model or self.model,
+                                instructions=instructions,
+                                request_timeout=request_timeout,
+                                connect_timeout=connect_timeout,
+                                api_key=api_key,
+                                max_tokens=effective_max_tokens,
+                                retry_config=effective_retry_config,
+                                rate_limit_config=effective_rate_limit_config,
+                                **effective_model_kwargs,
+                            )
+                            await status.emit(
+                            ProcessEvent(
+                                    kind="llm_call_end",
+                                    correlation_id=correlation_id,
+                                    timestamp=time.time(),
+                                    model=model or self.model,
+                                    tool_call_count=0,
+                                    token_usage=_extract_response_token_usage(response),
+                                ))
+                        except LLMError as e:
+                            logger.error(f"Plain Responses output call failed: {e}")
+                            raise type(e)(f"Failed during response request: {e}") from e
                         _track_usage(response)
-                        parsed = _extract_response_parsed(response, response_format)
-                        content = _extract_response_text(response)
+                        content = _extract_response_text(response) or ""
+
+                    if effective_guardrails and content:
+                        max_retries = effective_guardrails.max_output_guardrail_retries
+                        output_retry_count = 0
+                        while output_retry_count <= max_retries:
+                            try:
+                                content = await self._run_guardrails(
+                                    content,
+                                    effective_guardrails,
+                                    "output",
+                                    _sr_merged_registry,
+                                    attempt=output_retry_count,
+                                )
+                                break
+                            except GuardrailRejectedError as e:
+                                output_retry_count += 1
+                                if output_retry_count > max_retries:
+                                    raise GuardrailBlockedError(
+                                        f"Output guardrails failed after {max_retries} retries: {e.reason}",
+                                        guardrail_name=e.guardrail_name,
+                                    ) from e
+                                messages.append({"role": "assistant", "content": content})
+                                messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            f"Your previous response was rejected: {e.reason}. "
+                                            "Please provide a revised response."
+                                        ),
+                                    }
+                                )
+                                instructions, input_items = _messages_to_response_input(messages)
+                                response = await self._llm_responses_call(
+                                    _sr_merged_registry,
+                                    input_data=input_items,
+                                    model=model or self.model,
+                                    instructions=instructions,
+                                    request_timeout=request_timeout,
+                                    connect_timeout=connect_timeout,
+                                    api_key=api_key,
+                                    max_tokens=effective_max_tokens,
+                                    retry_config=effective_retry_config,
+                                    rate_limit_config=effective_rate_limit_config,
+                                    **effective_model_kwargs,
+                                )
+                                _track_usage(response)
+                                content = _extract_response_text(response) or ""
 
                 logger.info(
-                    f"Structured response finished: tool_calls={tool_calls_made}, cost=${total_cost:.6f}"
+                    f"Responses execution finished: tool_calls={tool_calls_made}, cost=${total_cost:.6f}"
                 )
 
-                await emit_status(
-                    ProcessEvent(
+                await status.emit(
+                            ProcessEvent(
                         kind="complete",
                         correlation_id=correlation_id,
                         timestamp=time.time(),
                         tool_calls_made=tool_calls_made,
                         response_length=len(content) if content else 0,
-                    ),
-                    on_status,
-                    sinks=sinks,
-                )
+                    ))
 
                 result = ExecutionResult(
                     final_response=content or "",
@@ -5077,6 +5227,123 @@ class GlueLLM:
                     hook_manager=self._hook_manager,
                 )
             clear_correlation_id()
+
+    async def response(
+        self,
+        user_input: str | list[dict[str, Any]],
+        *,
+        api_key: str | None = None,
+        model: str | None = None,
+        tools: list[Callable] | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        condense_tool_messages: bool | None = None,
+        execute_tools: bool = True,
+        parallel_tool_calls: bool | None = None,
+        tool_execution_order: ToolExecutionOrder | None = None,
+        tool_mode: ToolMode | None = None,
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
+        rate_limit_config: RateLimitConfig | None = None,
+        retry_config: RetryConfig | None = None,
+        retry_enabled: bool | None = None,
+        summarize_context: SummarizeContextConfig | bool | None = None,
+        correlation_id: str | None = None,
+        enable_eval_recording: bool | None = None,
+        guardrails: GuardrailsConfig | None = None,
+        on_status: OnStatusCallback = None,
+        sinks: list[Sink] | None = None,
+        track_costs: bool | None = None,
+        **model_kwargs: Any,
+    ) -> ExecutionResult:
+        """Complete a request via the OpenAI Responses API."""
+        return await self._responses_execute(
+            user_input,
+            response_format=None,
+            api_key=api_key,
+            model=model,
+            tools=tools,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+            condense_tool_messages=condense_tool_messages,
+            execute_tools=execute_tools,
+            parallel_tool_calls=parallel_tool_calls,
+            tool_execution_order=tool_execution_order,
+            tool_mode=tool_mode,
+            connect_timeout=connect_timeout,
+            request_timeout=request_timeout,
+            rate_limit_config=rate_limit_config,
+            retry_config=retry_config,
+            retry_enabled=retry_enabled,
+            summarize_context=summarize_context,
+            correlation_id=correlation_id,
+            enable_eval_recording=enable_eval_recording,
+            guardrails=guardrails,
+            on_status=on_status,
+            sinks=sinks,
+            track_costs=track_costs,
+            **model_kwargs,
+        )
+
+    async def structured_response(
+        self,
+        user_input: str | list[dict[str, Any]],
+        response_format: type[T],
+        *,
+        api_key: str | None = None,
+        model: str | None = None,
+        tools: list[Callable] | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        condense_tool_messages: bool | None = None,
+        execute_tools: bool = True,
+        parallel_tool_calls: bool | None = None,
+        tool_execution_order: ToolExecutionOrder | None = None,
+        tool_mode: ToolMode | None = None,
+        connect_timeout: float | None = None,
+        request_timeout: float | None = None,
+        rate_limit_config: RateLimitConfig | None = None,
+        retry_config: RetryConfig | None = None,
+        retry_enabled: bool | None = None,
+        summarize_context: SummarizeContextConfig | bool | None = None,
+        correlation_id: str | None = None,
+        enable_eval_recording: bool | None = None,
+        guardrails: GuardrailsConfig | None = None,
+        max_validation_retries: int | None = None,
+        on_status: OnStatusCallback = None,
+        sinks: list[Sink] | None = None,
+        track_costs: bool | None = None,
+        **model_kwargs: Any,
+    ) -> ExecutionResult[T]:
+        """Structured completion using the OpenAI Responses API."""
+        return await self._responses_execute(
+            user_input,
+            response_format=response_format,
+            api_key=api_key,
+            model=model,
+            tools=tools,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+            condense_tool_messages=condense_tool_messages,
+            execute_tools=execute_tools,
+            parallel_tool_calls=parallel_tool_calls,
+            tool_execution_order=tool_execution_order,
+            tool_mode=tool_mode,
+            connect_timeout=connect_timeout,
+            request_timeout=request_timeout,
+            rate_limit_config=rate_limit_config,
+            retry_config=retry_config,
+            retry_enabled=retry_enabled,
+            summarize_context=summarize_context,
+            correlation_id=correlation_id,
+            enable_eval_recording=enable_eval_recording,
+            guardrails=guardrails,
+            max_validation_retries=max_validation_retries,
+            on_status=on_status,
+            sinks=sinks,
+            track_costs=track_costs,
+            **model_kwargs,
+        )
 
     def _format_system_prompt(self, tools: list[Callable] | None = None) -> str:
         """Format system prompt. Tool schemas are sent via the API tools parameter, not here."""
@@ -5168,6 +5435,7 @@ class GlueLLM:
         Returns a list of dicts, each with "history" and "message" keys for
         appending to tool_execution_history and messages.
         """
+        status = self._bind_status_observers(on_status, sinks)
         mode = "parallel" if parallel else "sequential"
         logger.debug(
             f"[{correlation_id}] Starting tool execution round: iteration={iteration}, "
@@ -5282,28 +5550,22 @@ class GlueLLM:
         if parallel:
             # Emit all starts first
             for call_index, tool_call, tool_name, _a, _f, err in parsed:
-                await emit_status(
-                    ProcessEvent(
+                await status.emit(
+                            ProcessEvent(
                         kind="tool_call_start",
                         correlation_id=correlation_id,
                         timestamp=time.time(),
                         iteration=iteration,
                         tool_name=tool_name,
                         call_index=call_index,
-                    ),
-                    on_status,
-                    sinks=sinks,
-                )
+                    ))
             # Build ordered results: errors first, then runnables
             ordered: list[dict[str, Any] | None] = [None] * len(parsed)
             runnable_items: list[tuple[int, Any, str, dict[str, Any], Callable]] = []
             for i, (call_index, tool_call, tool_name, tool_args, tool_func, err) in enumerate(parsed):
                 if err is not None:
-                    await emit_status(
-                        ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=False, duration_seconds=0, error=err),
-                        on_status,
-                        sinks=sinks,
-                    )
+                    await status.emit(
+                            ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=False, duration_seconds=0, error=err))
                     args_str = getattr(tool_call.function, "arguments", "{}")
                     ordered[i] = {"history": {"tool_name": tool_name, "arguments": args_str, "result": err, "error": True}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": err}}
                 else:
@@ -5321,35 +5583,23 @@ class GlueLLM:
                         result_str, error, duration = f"Error executing tool: {type(g).__name__}: {str(g)}", True, 0.0
                     else:
                         result_str, error, duration = g
-                    await emit_status(
-                        ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=not error, duration_seconds=duration, error=result_str if error else None),
-                        on_status,
-                        sinks=sinks,
-                    )
+                    await status.emit(
+                            ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=not error, duration_seconds=duration, error=result_str if error else None))
                     ordered[i] = {"history": {"tool_name": tool_name, "arguments": tool_args or {}, "result": result_str, "error": error}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": result_str}}
             results = [r for r in ordered if r is not None]
         else:
             # Sequential
             for call_index, tool_call, tool_name, tool_args, tool_func, err in parsed:
-                await emit_status(
-                    ProcessEvent(kind="tool_call_start", correlation_id=correlation_id, timestamp=time.time(), iteration=iteration, tool_name=tool_name, call_index=call_index),
-                    on_status,
-                    sinks=sinks,
-                )
+                await status.emit(
+                            ProcessEvent(kind="tool_call_start", correlation_id=correlation_id, timestamp=time.time(), iteration=iteration, tool_name=tool_name, call_index=call_index))
                 if err is not None:
-                    await emit_status(
-                        ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=False, duration_seconds=0, error=err),
-                        on_status,
-                        sinks=sinks,
-                    )
+                    await status.emit(
+                            ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=False, duration_seconds=0, error=err))
                     results.append({"history": {"tool_name": tool_name, "arguments": getattr(tool_call.function, "arguments", "{}"), "result": err, "error": True}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": err}})
                     continue
                 result_str, error, duration = await run_one(call_index, tool_call, tool_name, tool_args or {}, tool_func)
-                await emit_status(
-                    ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=not error, duration_seconds=duration, error=result_str if error else None),
-                    on_status,
-                    sinks=sinks,
-                )
+                await status.emit(
+                            ProcessEvent(kind="tool_call_end", correlation_id=correlation_id, timestamp=time.time(), tool_name=tool_name, call_index=call_index, success=not error, duration_seconds=duration, error=result_str if error else None))
                 results.append({"history": {"tool_name": tool_name, "arguments": tool_args or {}, "result": result_str, "error": error}, "message": {"role": "tool", "tool_call_id": tool_call.id, "content": result_str}})
 
         # Log summary of tool execution round
@@ -5549,6 +5799,8 @@ class GlueLLM:
             set_correlation_id(correlation_id)
         elif not get_correlation_id():
             set_correlation_id()
+        correlation_id = get_correlation_id()
+        status = self._bind_status_observers(on_status, sinks)
 
         # Resolve active_tools for dynamic vs standard mode
         all_tools = self.tools
@@ -5659,15 +5911,12 @@ class GlueLLM:
                     # Try streaming first (if no tools or tools disabled, stream directly)
                     if not execute_tools or not active_tools:
                         # Simple streaming without tool execution
-                        await emit_status(
+                        await status.emit(
                             ProcessEvent(
                                 kind="stream_start",
                                 correlation_id=get_correlation_id(),
                                 timestamp=time.time(),
-                            ),
-                            on_status,
-                            sinks=sinks,
-                        )
+                            ))
                         # Providers (e.g. OpenAI) do not support response_format with stream=True;
                         # we stream plain text and parse into response_format when the stream ends.
                         stream_iter = await self._llm_call(
@@ -5694,28 +5943,22 @@ class GlueLLM:
                                         done=False,
                                         tool_calls_made=tool_calls_made,
                                     )
-                                    await emit_status(
-                                        ProcessEvent(
+                                    await status.emit(
+                            ProcessEvent(
                                             kind="stream_chunk",
                                             correlation_id=get_correlation_id(),
                                             timestamp=time.time(),
                                             content=delta.content,
                                             done=False,
-                                        ),
-                                        on_status,
-                                        sinks=sinks,
-                                    )
+                                        ))
                                     yield chunk
                         # Final chunk - run output guardrails on accumulated content
-                        await emit_status(
+                        await status.emit(
                             ProcessEvent(
                                 kind="stream_end",
                                 correlation_id=get_correlation_id(),
                                 timestamp=time.time(),
-                            ),
-                            on_status,
-                            sinks=sinks,
-                        )
+                            ))
                         structured_output = None
                         if response_format and accumulated_content:
                             structured_output = _parse_structured_content(accumulated_content, response_format)
@@ -5765,27 +6008,21 @@ class GlueLLM:
                         return
 
                     # With tools: stream so we get token-by-token text and can detect tool_calls from the stream
-                    await emit_status(
-                        ProcessEvent(
+                    await status.emit(
+                            ProcessEvent(
                             kind="stream_start",
                             correlation_id=get_correlation_id(),
                             timestamp=time.time(),
-                        ),
-                        on_status,
-                        sinks=sinks,
-                    )
-                    await emit_status(
-                        ProcessEvent(
+                        ))
+                    await status.emit(
+                            ProcessEvent(
                             kind="llm_call_start",
                             correlation_id=get_correlation_id(),
                             timestamp=time.time(),
                             iteration=iteration + 1,
                             model=model or self.model,
                             message_count=len(messages),
-                        ),
-                        on_status,
-                        sinks=sinks,
-                    )
+                        ))
                     stream_iter = await self._llm_call(
                         _stream_merged_registry,
                         messages=messages,
@@ -5804,17 +6041,14 @@ class GlueLLM:
                     assistant_message = None
                     async for is_content, content_or_accumulated, msg in _consume_stream_with_tools(stream_iter):
                         if is_content:
-                            await emit_status(
-                                ProcessEvent(
+                            await status.emit(
+                            ProcessEvent(
                                     kind="stream_chunk",
                                     correlation_id=get_correlation_id(),
                                     timestamp=time.time(),
                                     content=content_or_accumulated,
                                     done=False,
-                                ),
-                                on_status,
-                                sinks=sinks,
-                            )
+                                ))
                             yield StreamingChunk(
                                 content=content_or_accumulated,
                                 done=False,
@@ -5824,20 +6058,21 @@ class GlueLLM:
                             accumulated_content = content_or_accumulated
                             assistant_message = msg
                             break
-                    has_tool_calls = bool(assistant_message and getattr(assistant_message, "tool_calls", None))
-                    await emit_status(
-                        ProcessEvent(
+                    _stream_tool_call_count = (
+                        len(assistant_message.tool_calls or [])
+                        if assistant_message and getattr(assistant_message, "tool_calls", None)
+                        else 0
+                    )
+                    await status.emit(
+                            ProcessEvent(
                             kind="llm_call_end",
                             correlation_id=get_correlation_id(),
                             timestamp=time.time(),
                             iteration=iteration + 1,
                             model=model or self.model,
-                            has_tool_calls=has_tool_calls,
+                            tool_call_count=_stream_tool_call_count,
                             token_usage=None,
-                        ),
-                        on_status,
-                        sinks=sinks,
-                    )
+                        ))
                 except LLMError as e:
                     cause_chain = _build_cause_chain(e)
                     logger.error(
@@ -5890,17 +6125,14 @@ class GlueLLM:
                             f"[{get_correlation_id()}] Dynamic tool routing complete: "
                             f"matched={len(matched)}, static={len(static_tools)}, total_active={len(active_tools)}"
                         )
-                        await emit_status(
+                        await status.emit(
                             ProcessEvent(
                                 kind="tool_route",
                                 correlation_id=get_correlation_id(),
                                 timestamp=time.time(),
                                 route_query=query,
                                 matched_tools=[t.__name__ for t in matched],
-                            ),
-                            on_status,
-                            sinks=sinks,
-                        )
+                            ))
                         # Update system prompt to reflect matched tools (no longer router)
                         self._apply_system_prompt_after_tool_route(messages, active_tools)
                         continue
@@ -6023,15 +6255,12 @@ class GlueLLM:
 
                 # Stream the final response character by character (simulated streaming)
                 # In a real implementation, you'd stream from the API
-                await emit_status(
-                    ProcessEvent(
+                await status.emit(
+                            ProcessEvent(
                         kind="stream_end",
                         correlation_id=get_correlation_id(),
                         timestamp=time.time(),
-                    ),
-                    on_status,
-                    sinks=sinks,
-                )
+                    ))
                 structured_output = None
                 if response_format and final_content:
                     structured_output = _parse_structured_content(final_content, response_format)
@@ -6467,6 +6696,93 @@ async def structured_complete(
         max_validation_retries=max_validation_retries,
         on_status=on_status,
         session_label=session_label,
+        sinks=sinks,
+        track_costs=track_costs,
+        **model_kwargs,
+    )
+
+
+async def response(
+    user_input: str | list[dict[str, Any]],
+    *,
+    model: str | None = None,
+    system_prompt: str | None = None,
+    tools: list[Callable] | None = None,
+    max_tokens: int | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+    condense_tool_messages: bool | None = None,
+    execute_tools: bool = True,
+    max_tool_iterations: int | None = None,
+    parallel_tool_calls: bool | None = None,
+    tool_execution_order: ToolExecutionOrder | None = None,
+    tool_mode: ToolMode | None = None,
+    tool_route_model: str | None = None,
+    connect_timeout: float | None = None,
+    request_timeout: float | None = None,
+    rate_limit_config: RateLimitConfig | None = None,
+    retry_config: RetryConfig | None = None,
+    retry_enabled: bool | None = None,
+    summarize_context: SummarizeContextConfig | bool | None = None,
+    aaak_compression_enabled: bool | None = None,
+    aaak_compression_model: str | None = None,
+    aaak_tool_condensing: bool | None = None,
+    correlation_id: str | None = None,
+    enable_eval_recording: bool | None = None,
+    guardrails: GuardrailsConfig | None = None,
+    on_status: OnStatusCallback = None,
+    sinks: list[Sink] | None = None,
+    hook_registry: HookRegistry | None = None,
+    track_costs: bool | None = None,
+    **model_kwargs: Any,
+) -> ExecutionResult:
+    """Quick completion via the OpenAI Responses API."""
+    effective_tool_mode = tool_mode if tool_mode is not None else settings.default_tool_mode
+    effective_tool_execution_order = (
+        tool_execution_order if tool_execution_order is not None else settings.default_tool_execution_order
+    )
+    client = GlueLLM(
+        model=model,
+        system_prompt=system_prompt,
+        max_tokens=max_tokens,
+        model_kwargs=model_kwargs if model_kwargs else None,
+        reasoning_effort=reasoning_effort,
+        condense_tool_messages=condense_tool_messages,
+        max_tool_iterations=max_tool_iterations,
+        parallel_tool_calls=parallel_tool_calls,
+        tool_execution_order=effective_tool_execution_order,
+        tool_mode=effective_tool_mode,
+        tool_route_model=tool_route_model,
+        tools=tools,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
+        summarize_context=summarize_context,
+        aaak_compression_enabled=aaak_compression_enabled,
+        aaak_compression_model=aaak_compression_model,
+        aaak_tool_condensing=aaak_tool_condensing,
+        guardrails=guardrails,
+        hook_registry=hook_registry,
+    )
+    return await client.response(
+        user_input,
+        model=model,
+        tools=tools,
+        max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
+        condense_tool_messages=condense_tool_messages,
+        execute_tools=execute_tools,
+        parallel_tool_calls=parallel_tool_calls,
+        tool_execution_order=tool_execution_order,
+        tool_mode=tool_mode,
+        connect_timeout=connect_timeout,
+        request_timeout=request_timeout,
+        rate_limit_config=rate_limit_config,
+        retry_config=retry_config,
+        retry_enabled=retry_enabled,
+        summarize_context=summarize_context,
+        correlation_id=correlation_id,
+        enable_eval_recording=enable_eval_recording,
+        guardrails=guardrails,
+        on_status=on_status,
         sinks=sinks,
         track_costs=track_costs,
         **model_kwargs,

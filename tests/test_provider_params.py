@@ -4,6 +4,8 @@ import pytest
 
 from gluellm.provider_params import (
     ANTHROPIC_DEFAULT_MAX_TOKENS,
+    _normalize_openai_reasoning_effort,
+    _update_kwargs_for_provider_reasoning_effort,
     normalize_model_params,
 )
 
@@ -126,18 +128,39 @@ class TestNormalizeModelParams:
         result_max, _ = normalize_model_params("anthropic:claude-3-5-sonnet", None, {})
         assert result_max == ANTHROPIC_DEFAULT_MAX_TOKENS
 
-    async def test_reasoning_effort_passed_through_for_all_models(self):
-        """reasoning_effort is never stripped in normalize_model_params; provider validates."""
-        models = (
+
+class TestReasoningEffortNormalization:
+    @pytest.mark.parametrize(
+        "model,effort,expected",
+        [
+            ("o3-mini", "xhigh", "high"),
+            ("o3-mini", "high", "high"),
+            ("o3-mini", "minimal", "low"),
+            ("gpt-5-mini-2025-08-07", "xhigh", "high"),
+            ("gpt-5.4-2026-03-05", "xhigh", "xhigh"),
+            ("gpt-5.1-2025-11-13", "xhigh", "xhigh"),
+        ],
+    )
+    async def test_openai_reasoning_effort_downgraded_to_supported(self, model, effort, expected):
+        assert _normalize_openai_reasoning_effort(model, effort) == expected
+
+    async def test_responses_api_wraps_reasoning_effort(self):
+        kwargs = _update_kwargs_for_provider_reasoning_effort(
+            "openai",
             "openai:gpt-5.4-2026-03-05",
-            "openai:o1-mini",
-            "openai:o1",
-            "openai:o3-mini",
-            "openai:o4-mini",
-            "openai:o4",
+            "high",
+            {},
+            use_responses_api=True,
         )
-        for model in models:
-            _, kwargs = normalize_model_params(
-                model, None, {"reasoning_effort": "high"}
-            )
-            assert kwargs.get("reasoning_effort") == "high", f"Failed for {model}"
+        assert kwargs == {"reasoning": {"effort": "high"}}
+        assert "reasoning_effort" not in kwargs
+
+    async def test_chat_api_sets_flat_reasoning_effort(self):
+        kwargs = _update_kwargs_for_provider_reasoning_effort(
+            "openai",
+            "openai:o3-mini",
+            "xhigh",
+            {},
+            use_responses_api=False,
+        )
+        assert kwargs == {"reasoning_effort": "high"}

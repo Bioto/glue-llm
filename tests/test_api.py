@@ -11,6 +11,7 @@ from gluellm.api import (
     ExecutionResult,
     GlueLLM,
     LLMError,
+    RateLimitError,
     _condense_tool_round,
     complete,
     get_session_summary,
@@ -18,7 +19,7 @@ from gluellm.api import (
     stream_complete,
     structured_complete,
 )
-from gluellm.events import ConsoleSink, JsonFileSink, ProcessEvent
+from gluellm.events import ConsoleSink, JsonFileSink, ProcessEvent, StatusEmitter
 
 # Mark all tests as async
 pytestmark = pytest.mark.asyncio
@@ -1488,6 +1489,66 @@ class TestProcessStatusEvents:
         assert "stream_end" in kinds
 
 
+class TestStatusEmitterObservability:
+    """Regression tests for StatusEmitter and enriched ProcessEvent payloads."""
+
+    async def test_status_emitter_bind_merges_instance_and_per_call_observers(self):
+        instance_events: list[ProcessEvent] = []
+        per_call_events: list[ProcessEvent] = []
+
+        class ListSink:
+            def __init__(self, bucket: list[ProcessEvent]):
+                self._bucket = bucket
+
+            async def handle(self, event: ProcessEvent) -> None:
+                self._bucket.append(event)
+
+        emitter = StatusEmitter(sinks=[ListSink(instance_events)])
+
+        def on_status(event: ProcessEvent) -> None:
+            per_call_events.append(event)
+
+        bound = emitter.bind(on_status=on_status)
+        await bound.emit(ProcessEvent(kind="llm_call_start"))
+
+        assert len(instance_events) == 1
+        assert len(per_call_events) == 1
+
+    @patch("gluellm.api._safe_llm_call")
+    async def test_llm_call_end_includes_tool_call_count_and_estimated_cost(self, mock_safe_call):
+        resp = Mock()
+        choice = Mock()
+        msg = Mock()
+        msg.content = "Hello"
+        msg.tool_calls = [Mock()]
+        choice.message = msg
+        resp.choices = [choice]
+        resp.usage = Mock(prompt_tokens=1000, completion_tokens=500, total_tokens=1500)
+        mock_safe_call.return_value = resp
+
+        events: list[ProcessEvent] = []
+
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
+        await client.complete("Hi", on_status=events.append)
+
+        end_events = [e for e in events if e.kind == "llm_call_end"]
+        assert end_events
+        assert end_events[0].tool_call_count == 1
+        assert end_events[0].estimated_cost_usd is not None
+
+    @patch("gluellm.api._safe_llm_call", side_effect=RateLimitError("rate limited"))
+    async def test_llm_call_error_emitted_before_reraise(self, mock_safe_call):
+        events: list[ProcessEvent] = []
+
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
+        with pytest.raises(RateLimitError):
+            await client.complete("Hi", on_status=events.append)
+
+        error_events = [e for e in events if e.kind == "llm_call_error"]
+        assert len(error_events) == 1
+        assert error_events[0].error_type == "RateLimitError"
+
+
 class TestStreamCompleteWithTools:
     """Test stream_complete with execute_tools=True (streaming + tool loop)."""
 
@@ -1933,7 +1994,10 @@ class TestProviderCache:
 
         assert provider is fake_provider
         assert model_id == "text-embedding-3-small"
-        mock_create.assert_called_once_with("openai", api_key=mock_create.call_args[1]["api_key"])
+        mock_create.assert_called_once()
+        assert mock_create.call_args.args == ("openai",)
+        assert mock_create.call_args.kwargs["api_key"] is None
+        assert "http_client" in mock_create.call_args.kwargs
 
     async def test_close_all_calls_aclose_on_cached_clients(self):
         """close_all() must call aclose() on every cached provider's HTTP client."""
@@ -1957,6 +2021,48 @@ class TestProviderCache:
         mock_client.aclose.assert_called_once()
         # Cache must be empty after close so no stale clients linger
         assert len(cache._providers) == 0
+
+    async def test_provider_cache_passes_bounded_http_client_for_httpx_providers(self):
+        """httpx-based providers receive a bounded http_client at creation time."""
+        from unittest.mock import MagicMock, patch
+
+        import httpx
+
+        from gluellm.api import _ProviderCache, _build_provider_http_client
+        from gluellm.config import settings
+
+        cache = _ProviderCache()
+        fake_provider = MagicMock()
+
+        with patch("gluellm.api.AnyLLM.create", return_value=fake_provider) as mock_create:
+            cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-test")
+
+        create_kwargs = mock_create.call_args.kwargs
+        assert "http_client" in create_kwargs
+        http_client = create_kwargs["http_client"]
+        assert isinstance(http_client, httpx.AsyncClient)
+        assert http_client._transport._pool._max_connections == settings.http_max_connections
+        assert http_client._transport._pool._max_keepalive_connections == settings.http_max_keepalive_connections
+
+        # Factory produces equivalent clients
+        built = _build_provider_http_client()
+        assert built._transport._pool._max_connections == settings.http_max_connections
+
+    async def test_provider_cache_excludes_http_client_for_grpc_providers(self):
+        """gRPC providers (xai) must not receive a custom httpx http_client."""
+        from unittest.mock import MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+        fake_provider = MagicMock()
+
+        with patch("gluellm.api.AnyLLM.create", return_value=fake_provider) as mock_create:
+            cache.get_provider("xai:grok-2-1212", "sk-test")
+
+        create_kwargs = mock_create.call_args.kwargs
+        assert "http_client" not in create_kwargs
+        assert create_kwargs["api_key"] == "sk-test"
 
     async def test_close_providers_does_not_raise_event_loop_closed_error(self):
         """close_providers() must gracefully handle providers with no client attribute."""
@@ -2930,6 +3036,7 @@ class TestDualTimeoutParameters:
             mock_cache.get_provider = lambda model, api_key: (mock_provider, "gpt-5.4-2026-03-05")
 
             from gluellm.api import _safe_llm_call
+            from gluellm.config import settings
 
             await _safe_llm_call(
                 messages=[{"role": "user", "content": "hi"}],
@@ -2944,7 +3051,7 @@ class TestDualTimeoutParameters:
         assert timeout.connect == 5.0
         assert timeout.read == 30.0
         assert timeout.write == 30.0
-        assert timeout.pool == 5.0
+        assert timeout.pool == settings.default_pool_timeout
 
     async def test_module_complete_passes_both_timeouts_to_client(self):
         """Module-level complete() passes request_timeout and connect_timeout to GlueLLM.complete."""
@@ -2992,6 +3099,8 @@ class TestDualTimeoutParameters:
         ):
             mock_settings.max_connect_timeout = 30.0
             mock_settings.default_connect_timeout = 10.0
+            mock_settings.default_pool_timeout = 60.0
+            mock_settings.max_pool_timeout = 120.0
             mock_settings.default_request_timeout = 60.0
             mock_settings.max_request_timeout = 300.0
             mock_cache.get_provider = lambda model, api_key: (mock_provider, "gpt-5.4-2026-03-05")
@@ -3005,6 +3114,40 @@ class TestDualTimeoutParameters:
             )
 
         assert captured_model_kwargs["timeout"].connect == 30.0
+
+    async def test_pool_timeout_uses_default_pool_timeout_not_connect_timeout(self):
+        """pool timeout is decoupled from connect_timeout and uses default_pool_timeout."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        import httpx
+
+        captured_model_kwargs = {}
+
+        async def capture_and_return(*args, **kwargs):
+            captured_model_kwargs.clear()
+            captured_model_kwargs.update(kwargs)
+            return self._make_fake_completion()
+
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(side_effect=capture_and_return)
+
+        with patch("gluellm.api._provider_cache") as mock_cache:
+            mock_cache.get_provider = lambda model, api_key: (mock_provider, "gpt-5.4-2026-03-05")
+
+            from gluellm.api import _safe_llm_call
+            from gluellm.config import settings
+
+            await _safe_llm_call(
+                messages=[{"role": "user", "content": "hi"}],
+                model="openai:gpt-5.4-2026-03-05",
+                connect_timeout=5.0,
+            )
+
+        timeout = captured_model_kwargs["timeout"]
+        assert isinstance(timeout, httpx.Timeout)
+        assert timeout.connect == 5.0
+        assert timeout.pool == min(settings.default_pool_timeout, settings.max_pool_timeout)
+        assert timeout.pool != timeout.connect
 
 
 class TestPerCallConfigGaps:

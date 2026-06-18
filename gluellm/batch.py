@@ -12,7 +12,8 @@ from typing import TypeVar
 
 from pydantic import BaseModel
 
-from gluellm.api import GlueLLM, _build_cause_chain
+from gluellm.api import GlueLLM, OnStatusCallback, _build_cause_chain
+from gluellm.events import Sink, StatusEmitter
 from gluellm.hooks.manager import HookManager, _get_global_registry
 from gluellm.models.batch import (
     APIKeyConfig,
@@ -58,6 +59,9 @@ class BatchProcessor:
         max_tool_iterations: int | None = None,
         config: BatchConfig | None = None,
         hook_registry: HookRegistry | None = None,
+        on_status: OnStatusCallback = None,
+        sinks: list[Sink] | None = None,
+        status_emitter: StatusEmitter | None = None,
     ):
         """Initialize the batch processor.
 
@@ -76,6 +80,9 @@ class BatchProcessor:
         self.config = config or BatchConfig()
         self._hook_registry = hook_registry or HookRegistry()
         self._hook_manager = HookManager()
+        self.on_status = on_status
+        self.sinks = sinks
+        self.status_emitter = status_emitter
         # Initialize API key pool if keys are provided
         self.key_pool: APIKeyPool | None = None
         if self.config.api_keys:
@@ -228,7 +235,13 @@ class BatchProcessor:
                         max_tool_iterations=request.max_tool_iterations or self.max_tool_iterations,
                         tool_execution_order=request.tool_execution_order,
                         hook_registry=self._hook_registry,
+                        status_emitter=self.status_emitter,
                     )
+
+                    status_kwargs = {
+                        "on_status": self.on_status,
+                        "sinks": self.sinks,
+                    }
 
                     # Execute the request — structured or plain
                     if request.response_format is not None:
@@ -240,6 +253,7 @@ class BatchProcessor:
                             request_timeout=request.timeout,
                             api_key=api_key,
                             tool_execution_order=request.tool_execution_order,
+                            **status_kwargs,
                         )
                     else:
                         result = await client.complete(
@@ -249,6 +263,7 @@ class BatchProcessor:
                             request_timeout=request.timeout,
                             api_key=api_key,
                             tool_execution_order=request.tool_execution_order,
+                            **status_kwargs,
                         )
 
                     elapsed_time = time.time() - start_time
@@ -352,6 +367,9 @@ async def batch_complete(
     tools: list[Callable] | None = None,
     max_tool_iterations: int | None = None,
     config: BatchConfig | None = None,
+    on_status: OnStatusCallback = None,
+    sinks: list[Sink] | None = None,
+    status_emitter: StatusEmitter | None = None,
 ) -> BatchResponse:
     """Process a batch of completion requests.
 
@@ -388,6 +406,9 @@ async def batch_complete(
         tools=tools,
         max_tool_iterations=max_tool_iterations,
         config=config,
+        on_status=on_status,
+        sinks=sinks,
+        status_emitter=status_emitter,
     )
     return await processor.process(requests)
 

@@ -14,6 +14,8 @@ Available Settings:
     - Retry Behavior: retry_max_attempts, retry_min_wait, retry_max_wait, retry_multiplier
     - Request Timeout: default_request_timeout, max_request_timeout
     - Connection Timeout: default_connect_timeout, max_connect_timeout
+    - Pool Timeout: default_pool_timeout, max_pool_timeout
+    - HTTP Connection Pool: http_max_connections, http_max_keepalive_connections
     - Logging: log_level, log_file_level, log_dir, log_file_name, log_json_format, log_max_bytes, log_backup_count, log_console_output
     - API Keys: openai_api_key, anthropic_api_key, xai_api_key
     - Tracing: enable_tracing, mlflow_tracking_uri, mlflow_experiment_name, otel_exporter_endpoint
@@ -68,7 +70,7 @@ class GlueLLMSettings(BaseSettings):
     default_embedding_dimensions: int | None = None  # e.g., 512 for text-embedding-3-small
     default_system_prompt: str = "You are a helpful assistant."
     default_max_tokens: int | None = None  # Global default; overridable per client and per call (e.g. 8192 for Anthropic)
-    default_reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "auto"] | None = None
+    default_reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None = None
     default_parallel_tool_calls: bool | None = None
 
     # Tool execution settings
@@ -89,8 +91,16 @@ class GlueLLMSettings(BaseSettings):
     max_request_timeout: Annotated[float, Field(gt=0)] = 1800.0  # Maximum 30 minutes
 
     # Connection timeout settings (in seconds)
-    default_connect_timeout: Annotated[float, Field(gt=0)] = 10.0  # Default 10 seconds
+    default_connect_timeout: Annotated[float, Field(gt=0)] = 30.0  # Default 30 seconds
     max_connect_timeout: Annotated[float, Field(gt=0)] = 60.0  # Maximum 60 seconds
+
+    # Pool timeout settings (in seconds) — time to wait for a free connection from the pool
+    default_pool_timeout: Annotated[float, Field(gt=0)] = 60.0  # Default 60 seconds
+    max_pool_timeout: Annotated[float, Field(gt=0)] = 120.0  # Maximum 120 seconds
+
+    # HTTP connection pool limits (httpx-based providers only)
+    http_max_connections: Annotated[int, Field(gt=0)] = 50
+    http_max_keepalive_connections: Annotated[int, Field(gt=0)] = 50
 
     # Logging settings
     log_level: str = "INFO"

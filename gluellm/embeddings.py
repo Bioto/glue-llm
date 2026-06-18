@@ -192,6 +192,7 @@ async def _safe_embedding_call(
     request_timeout = min(request_timeout, settings.max_request_timeout)  # Enforce max timeout
     connect_timeout = connect_timeout or settings.default_connect_timeout
     connect_timeout = min(connect_timeout, settings.max_connect_timeout)  # Enforce max connect timeout
+    pool_timeout = min(settings.default_pool_timeout, settings.max_pool_timeout)
 
     # Inject httpx.Timeout into embedding_kwargs if caller hasn't set it (provider SDKs accept this)
     embedding_kwargs_dict = dict(embedding_kwargs) if embedding_kwargs else {}
@@ -200,7 +201,7 @@ async def _safe_embedding_call(
             connect=connect_timeout,
             read=request_timeout,
             write=request_timeout,
-            pool=connect_timeout,
+            pool=pool_timeout,
         )
 
     # Apply rate limiting before making the call
