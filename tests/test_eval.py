@@ -1118,6 +1118,7 @@ class TestAgentDataRecording:
         set_global_eval_store(store)
 
         def test_tool(x: str) -> str:
+            """Test tool for eval recording."""
             return f"Result: {x}"
 
         agent = Agent(
@@ -1131,15 +1132,13 @@ class TestAgentDataRecording:
 
         executor = AgentExecutor(agent=agent)
 
-        # Mock the LLM call
-        with patch("gluellm.api._llm_call_with_retry") as mock_call:
-            mock_response = MagicMock()
-            mock_response.choices = [MagicMock()]
-            mock_response.choices[0].message.content = "Response"
-            mock_response.choices[0].message.tool_calls = None
-            mock_response.usage = None
-            mock_call.return_value = mock_response
+        fake_resp = MagicMock()
+        fake_resp.id = "resp_eval"
+        fake_resp.output = []
+        fake_resp.output_text = "Response"
+        fake_resp.usage = None
 
+        with patch("gluellm.api._responses_call_with_retry", return_value=fake_resp):
             await executor.execute("Test")
 
         await store.close()

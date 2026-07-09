@@ -18,6 +18,72 @@ _MAX_COMPLETION_TOKENS_MODELS_RE = re.compile(
     re.IGNORECASE,
 )
 
+_REASONING_EFFORT_ORDER: tuple[str, ...] = (
+    "none",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+)
+
+# gpt-5.1+ (and gpt-5.4, etc.) support the full effort range including xhigh.
+_GPT_51_PLUS_RE = re.compile(r"^gpt-5\.(?:[1-9]|[1-9][0-9])", re.IGNORECASE)
+
+
+def _openai_supported_reasoning_efforts(model_name: str) -> tuple[str, ...]:
+    """Return supported reasoning effort values for an OpenAI model name."""
+    name = model_name.lower()
+    if re.match(r"^o\d", name):
+        return ("low", "medium", "high")
+    if _GPT_51_PLUS_RE.match(name):
+        return _REASONING_EFFORT_ORDER
+    if name.startswith("gpt-5"):
+        return ("none", "minimal", "low", "medium", "high")
+    return _REASONING_EFFORT_ORDER
+
+
+def _normalize_openai_reasoning_effort(model_name: str, effort: str) -> str:
+    """Downgrade unsupported reasoning effort to the nearest lower supported value."""
+    supported = _openai_supported_reasoning_efforts(model_name)
+    if effort in supported:
+        return effort
+    if effort not in _REASONING_EFFORT_ORDER:
+        return supported[0]
+    effort_idx = _REASONING_EFFORT_ORDER.index(effort)
+    for candidate in reversed(_REASONING_EFFORT_ORDER[: effort_idx + 1]):
+        if candidate in supported:
+            return candidate
+    return supported[0]
+
+
+def _update_kwargs_for_provider_reasoning_effort(
+    provider: str,
+    model: str,
+    effort: str | None,
+    kwargs: dict[str, Any],
+    *,
+    use_responses_api: bool = False,
+) -> dict[str, Any]:
+    """Normalize and inject provider-specific reasoning effort kwargs."""
+    if effort is None:
+        return kwargs
+
+    model_name = model.split(":", 1)[1] if ":" in model else model.split("/", 1)[-1]
+    normalized = effort
+    if provider == "openai":
+        normalized = _normalize_openai_reasoning_effort(model_name, effort)
+
+    updated = dict(kwargs)
+    updated.pop("reasoning_effort", None)
+    updated.pop("reasoning", None)
+
+    if use_responses_api:
+        updated["reasoning"] = {"effort": normalized}
+    else:
+        updated["reasoning_effort"] = normalized
+    return updated
+
 
 def normalize_model_params(
     model: str,

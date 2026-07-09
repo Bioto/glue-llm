@@ -66,8 +66,12 @@ gluellm.configure(
 |---------|---------|---------|-------------|
 | `default_request_timeout` | `GLUELLM_DEFAULT_REQUEST_TIMEOUT` | `60.0` | Request timeout (seconds) |
 | `max_request_timeout` | `GLUELLM_MAX_REQUEST_TIMEOUT` | `300.0` | Max allowed request timeout |
-| `default_connect_timeout` | `GLUELLM_DEFAULT_CONNECT_TIMEOUT` | `10.0` | Connection timeout (seconds) |
+| `default_connect_timeout` | `GLUELLM_DEFAULT_CONNECT_TIMEOUT` | `30.0` | Connection timeout (seconds) |
 | `max_connect_timeout` | `GLUELLM_MAX_CONNECT_TIMEOUT` | `60.0` | Max allowed connect timeout |
+| `default_pool_timeout` | `GLUELLM_DEFAULT_POOL_TIMEOUT` | `60.0` | Pool wait timeout (seconds) |
+| `max_pool_timeout` | `GLUELLM_MAX_POOL_TIMEOUT` | `120.0` | Max allowed pool timeout |
+| `http_max_connections` | `GLUELLM_HTTP_MAX_CONNECTIONS` | `50` | Max HTTP connections per provider client |
+| `http_max_keepalive_connections` | `GLUELLM_HTTP_MAX_KEEPALIVE_CONNECTIONS` | `50` | Max keepalive connections per provider client |
 
 ### API Keys
 

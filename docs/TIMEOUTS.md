@@ -4,7 +4,8 @@ GlueLLM has two independent, configurable timeouts for every LLM and embedding c
 
 | Timeout | Governs | Default | Env var |
 |---------|---------|---------|---------|
-| `connect_timeout` | TCP connection establishment | 10s | `GLUELLM_DEFAULT_CONNECT_TIMEOUT` |
+| `connect_timeout` | TCP connection establishment | 30s | `GLUELLM_DEFAULT_CONNECT_TIMEOUT` |
+| `pool` (httpx) | Wait for a free connection from the pool | 60s | `GLUELLM_DEFAULT_POOL_TIMEOUT` |
 | `request_timeout` | Full round-trip (send + receive) | 60s | `GLUELLM_DEFAULT_REQUEST_TIMEOUT` |
 
 Both are enforced in parallel: `connect_timeout` is applied at the httpx transport layer (fires if the server doesn't accept the connection in time), while `request_timeout` is an `asyncio.wait_for` guard over the entire coroutine (fires if the full response — including token generation — takes too long).
@@ -112,8 +113,10 @@ GLUELLM_MAX_CONNECT_TIMEOUT=60         # no connect timeout may exceed 60s
 |---------|---------|-------------|
 | `GLUELLM_DEFAULT_REQUEST_TIMEOUT` | `60.0` | Default request timeout in seconds |
 | `GLUELLM_MAX_REQUEST_TIMEOUT` | `300.0` | Hard cap on request timeout (5 minutes) |
-| `GLUELLM_DEFAULT_CONNECT_TIMEOUT` | `10.0` | Default connection timeout in seconds |
+| `GLUELLM_DEFAULT_CONNECT_TIMEOUT` | `30.0` | Default connection timeout in seconds |
 | `GLUELLM_MAX_CONNECT_TIMEOUT` | `60.0` | Hard cap on connection timeout |
+| `GLUELLM_DEFAULT_POOL_TIMEOUT` | `60.0` | Default pool wait timeout in seconds |
+| `GLUELLM_MAX_POOL_TIMEOUT` | `120.0` | Hard cap on pool timeout |
 
 If a caller passes a value exceeding the max, it is silently clamped to the max. This prevents a single misconfigured call from hanging indefinitely.
 
@@ -126,7 +129,7 @@ flowchart TD
     Call["complete() / embed()"]
     SafeLLMCall["_safe_llm_call()"]
     EnforceTimeouts["Clamp to max settings\nBuild httpx.Timeout object"]
-    InjectKwarg["Inject as model_kwargs['timeout']\n(connect=connect_timeout, read=request_timeout,\n write=request_timeout, pool=connect_timeout)"]
+    InjectKwarg["Inject as model_kwargs['timeout']\n(connect=connect_timeout, read=request_timeout,\n write=request_timeout, pool=default_pool_timeout)"]
     AsyncioWait["asyncio.wait_for(\n    provider.acompletion(...),\n    timeout=request_timeout\n)"]
     ProviderSDK["any-llm → AsyncOpenAI / AsyncAnthropic\nhttpx uses injected Timeout"]
 

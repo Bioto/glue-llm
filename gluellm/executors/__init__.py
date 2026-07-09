@@ -9,9 +9,10 @@ from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel
 
-from gluellm.api import ExecutionResult, GlueLLM
+from gluellm.api import ExecutionResult, GlueLLM, OnStatusCallback
 from gluellm.config import settings
-from gluellm.models.agent import Agent
+from gluellm.events import Sink, StatusEmitter
+from gluellm.models.agent import Agent, ReasoningEffort
 
 from ._base import Executor
 
@@ -29,6 +30,7 @@ class SimpleExecutor(Executor):
         system_prompt: Optional system prompt for the LLM
         tools: Optional list of callable tools
         max_tool_iterations: Maximum tool execution iterations
+        reasoning_effort: Optional reasoning effort for reasoning-capable models
 
     Example:
         >>> from gluellm.executors import SimpleExecutor
@@ -51,7 +53,11 @@ class SimpleExecutor(Executor):
         system_prompt: str | None = None,
         tools: list[Callable] | None = None,
         max_tool_iterations: int | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
         hook_registry=None,
+        on_status: OnStatusCallback = None,
+        sinks: list[Sink] | None = None,
+        status_emitter: StatusEmitter | None = None,
     ):
         """Initialize a SimpleExecutor.
 
@@ -60,13 +66,23 @@ class SimpleExecutor(Executor):
             system_prompt: System prompt for the LLM (optional)
             tools: List of callable tools (defaults to empty list)
             max_tool_iterations: Maximum tool execution iterations (optional)
+            reasoning_effort: Reasoning effort for reasoning-capable models
             hook_registry: Optional hook registry for this executor
+            on_status: Optional callback for process status events
+            sinks: Optional list of event sinks
+            status_emitter: Optional instance-level status emitter
         """
-        super().__init__(hook_registry=hook_registry)
+        super().__init__(
+            hook_registry=hook_registry,
+            on_status=on_status,
+            sinks=sinks,
+            status_emitter=status_emitter,
+        )
         self.model = model or settings.default_model
         self.system_prompt = system_prompt
         self.tools = tools
         self.max_tool_iterations = max_tool_iterations
+        self.reasoning_effort = reasoning_effort
 
     async def _execute_internal(self, query: str) -> ExecutionResult[Any]:
         """Execute a query using the configured LLM.
@@ -82,8 +98,14 @@ class SimpleExecutor(Executor):
             system_prompt=self.system_prompt,
             tools=self.tools,
             max_tool_iterations=self.max_tool_iterations,
+            reasoning_effort=self.reasoning_effort,
+            status_emitter=self.status_emitter,
         )
-        return await client.complete(query)
+        return await client.response(
+            query,
+            on_status=self.on_status,
+            sinks=self.sinks,
+        )
 
 
 class AgentExecutor(Executor):
@@ -118,14 +140,29 @@ class AgentExecutor(Executor):
         >>> asyncio.run(main())
     """
 
-    def __init__(self, agent: Agent, hook_registry=None):
+    def __init__(
+        self,
+        agent: Agent,
+        hook_registry=None,
+        on_status: OnStatusCallback = None,
+        sinks: list[Sink] | None = None,
+        status_emitter: StatusEmitter | None = None,
+    ):
         """Initialize an AgentExecutor.
 
         Args:
             agent: The Agent instance to use for query execution
             hook_registry: Optional hook registry for this executor
+            on_status: Optional callback for process status events
+            sinks: Optional list of event sinks
+            status_emitter: Optional instance-level status emitter
         """
-        super().__init__(hook_registry=hook_registry)
+        super().__init__(
+            hook_registry=hook_registry,
+            on_status=on_status,
+            sinks=sinks,
+            status_emitter=status_emitter,
+        )
         self.agent = agent
 
     async def _execute_internal(self, query: str) -> ExecutionResult[Any]:
@@ -147,8 +184,14 @@ class AgentExecutor(Executor):
                 tools=self.agent.tools,
                 max_tool_iterations=self.agent.max_tool_iterations,
                 max_tokens=self.agent.max_tokens,
+                reasoning_effort=self.agent.reasoning_effort,
+                status_emitter=self.status_emitter,
             )
-            return await client.complete(query)
+            return await client.response(
+                query,
+                on_status=self.on_status,
+                sinks=self.sinks,
+            )
         finally:
             _current_agent.reset(token)
 
@@ -156,8 +199,21 @@ class AgentExecutor(Executor):
 class AgentStructuredExecutor(Executor[StructuredT], Generic[StructuredT]):
     """Executor that uses a configured Agent for query processing and returns structured output."""
 
-    def __init__(self, agent: Agent, response_format: type[StructuredT], hook_registry=None):
-        super().__init__(hook_registry=hook_registry)
+    def __init__(
+        self,
+        agent: Agent,
+        response_format: type[StructuredT],
+        hook_registry=None,
+        on_status: OnStatusCallback = None,
+        sinks: list[Sink] | None = None,
+        status_emitter: StatusEmitter | None = None,
+    ):
+        super().__init__(
+            hook_registry=hook_registry,
+            on_status=on_status,
+            sinks=sinks,
+            status_emitter=status_emitter,
+        )
         self.agent = agent
         self.response_format = response_format
 
@@ -173,8 +229,15 @@ class AgentStructuredExecutor(Executor[StructuredT], Generic[StructuredT]):
                 tools=self.agent.tools,
                 max_tool_iterations=self.agent.max_tool_iterations,
                 max_tokens=self.agent.max_tokens,
+                reasoning_effort=self.agent.reasoning_effort,
+                status_emitter=self.status_emitter,
             )
-            return await client.structured_complete(query, self.response_format)
+            return await client.structured_response(
+                query,
+                self.response_format,
+                on_status=self.on_status,
+                sinks=self.sinks,
+            )
         finally:
             _current_agent.reset(token)
 
@@ -200,17 +263,3 @@ def _trigger_model_rebuild():
 
 
 _trigger_model_rebuild()
-
-
-if __name__ == "__main__":
-    import asyncio
-
-    async def main():
-        """Demo script for SimpleExecutor."""
-        executor = SimpleExecutor(
-            system_prompt="You are a simple executor that can execute a query",
-            tools=[],
-        )
-        print((await executor.execute("What is the weather in Tokyo?")).final_response)
-
-    asyncio.run(main())

@@ -53,6 +53,7 @@ Documentation for the GlueLLM LLM orchestration framework.
 | [EMBEDDINGS.md](EMBEDDINGS.md) | Embedding generation |
 | [CLI.md](CLI.md) | Command-line interface |
 | [CONNECTION_POOLING.md](CONNECTION_POOLING.md) | HTTP connection pooling |
+| [MCP.md](MCP.md) | MCP tool integration |
 
 ## Operations
 

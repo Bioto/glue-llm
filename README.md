@@ -301,7 +301,7 @@ For reasoning models (o3, o4-mini, Claude 3.7 thinking), use `reasoning_effort` 
 result = await complete(
     "Solve this logic puzzle...",
     model="openai:o4-mini",
-    reasoning_effort="high",  # "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"auto"
+    reasoning_effort="high",  # "none"|"minimal"|"low"|"medium"|"high"|"xhigh"
 )
 ```
 

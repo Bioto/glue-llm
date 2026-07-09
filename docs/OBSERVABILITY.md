@@ -87,25 +87,27 @@ When `mlflow_tracking_uri` is set:
 
 ## Process Events (Sinks)
 
-Status events (LLM start/end, tool start/end) can be emitted to sinks:
+Status events (`llm_call_start`, `llm_call_end`, `llm_call_error`, tool events, etc.) can be observed via `on_status`, typed sinks, or a `StatusEmitter`:
 
 ```python
-from gluellm.events import ConsoleSink, JsonFileSink, ProcessEvent
+from gluellm import StatusEmitter, ConsoleSink, JsonFileSink, ProcessEvent
 
-# Built-in sinks
-sinks = [ConsoleSink(), JsonFileSink("status.jsonl")]
-result = await complete("Hello", sinks=sinks)
+emitter = StatusEmitter(sinks=[ConsoleSink(), JsonFileSink("status.jsonl")])
+client = GlueLLM(status_emitter=emitter)
+result = await client.complete("Hello", on_status=lambda e: print(e.kind))
 ```
 
-Custom sink: implement `Sink` with `emit(event: ProcessEvent)`.
+`llm_call_end` events include `tool_call_count`, `token_usage`, and `estimated_cost_usd` when pricing data is available. Failed LLM calls emit `llm_call_error` with `error_type` before the exception propagates.
+
+Custom sink: implement `Sink` with `async def handle(event: ProcessEvent)`.
 
 ## on_status Callback
 
-Per-call callback for status events:
+Per-call callback for status events (merged with any instance-level `StatusEmitter`):
 
 ```python
 async def on_status(event: ProcessEvent):
-    print(f"{event.stage}: {event}")
+    print(f"{event.kind}: tool_call_count={event.tool_call_count}")
 
 result = await complete("Hello", on_status=on_status)
 ```

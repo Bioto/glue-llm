@@ -35,6 +35,11 @@ class TestModelPricing:
         assert pricing.input_price_per_million == 0.15
         assert pricing.output_price_per_million == 0.60
 
+    def test_o4_mini_model_has_pricing(self):
+        pricing = get_model_pricing("openai", "o4-mini")
+        assert pricing is not None
+        assert pricing.input_price_per_million == 1.10
+
     def test_anthropic_model_exact_match(self):
         pricing = get_model_pricing("anthropic", "claude-3-5-sonnet-20241022")
         assert pricing is not None

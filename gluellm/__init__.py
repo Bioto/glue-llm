@@ -96,7 +96,9 @@ from gluellm.api import (
     get_session_summary,
     list_models,
     reset_session_tracker,
+    response,
     stream_complete,
+    stream_response,
     structured_complete,
     structured_response,
 )
@@ -119,7 +121,7 @@ from gluellm.eval import (
     get_global_eval_store,
     set_global_eval_store,
 )
-from gluellm.events import ConsoleSink, JsonFileSink, ProcessEvent, Sink
+from gluellm.events import ConsoleSink, JsonFileSink, ProcessEvent, Sink, StatusEmitter
 from gluellm.guardrails import (
     GuardrailBlockedError,
     GuardrailRejectedError,
@@ -143,6 +145,7 @@ from gluellm.models.config import RequestConfig
 from gluellm.models.conversation import Conversation, Message, Role
 from gluellm.models.embedding import EmbeddingResult
 from gluellm.models.hook import HookConfig, HookContext, HookErrorStrategy, HookRegistry, HookStage
+from gluellm.models.agent import Agent, ReasoningEffort
 from gluellm.models.prompt import Prompt, SystemPrompt
 from gluellm.observability.logging_config import setup_logging
 from gluellm.rate_limiting.api_key_pool import APIKeyPool
@@ -173,7 +176,9 @@ from gluellm.schema import (
     create_openai_response_format,
     normalize_schema_for_openai,
 )
+from gluellm.resilience.fallback import ModelFallbackConfig
 from gluellm.tool_router import ToolMode, static_tool
+from gluellm.tools import MCPToolSource, ToolRegistry, load_mcp_tools
 
 # Initialize logging on package import
 _setup_logging_called = False
@@ -204,14 +209,17 @@ __all__ = [
     "GlueLLM",
     "close_providers",
     "complete",
+    "response",
     "embed",
     "stream_complete",
+    "stream_response",
     "structured_complete",
     "structured_response",
     "ExecutionResult",
     "EmbeddingResult",
     "StreamingChunk",
     "ProcessEvent",
+    "StatusEmitter",
     "Sink",
     "ConsoleSink",
     "JsonFileSink",
@@ -244,6 +252,7 @@ __all__ = [
     "RetryCallback",
     "RateLimitAlgorithm",
     "RateLimitConfig",
+    "ModelFallbackConfig",
     "SummarizeContextConfig",
     # AAAK compression
     "AAAKCompressor",
@@ -258,6 +267,8 @@ __all__ = [
     "Conversation",
     "Message",
     "Role",
+    "Agent",
+    "ReasoningEffort",
     "SystemPrompt",
     "Prompt",
     "EmbeddingResult",
@@ -275,6 +286,10 @@ __all__ = [
     "ToolMode",
     "static_tool",
     "ToolExecutionOrder",
+    # MCP tools
+    "MCPToolSource",
+    "ToolRegistry",
+    "load_mcp_tools",
     # Configuration
     "GlueLLMSettings",
     "configure",

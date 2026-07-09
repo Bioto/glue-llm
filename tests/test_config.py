@@ -215,3 +215,22 @@ class TestConfigurationEdgeCases:
             config = GlueLLMSettings()
             assert config.max_tool_iterations == 15
             assert isinstance(config.max_tool_iterations, int)
+
+
+class TestHttpPoolSettings:
+    """Test HTTP pool and timeout configuration defaults."""
+
+    def test_default_connect_and_pool_timeout_values(self):
+        """Default connect timeout is 30s and pool timeout is 60s."""
+        with patch.dict(os.environ, {}, clear=True):
+            config = GlueLLMSettings(_env_file="")
+            assert config.default_connect_timeout == 30.0
+            assert config.default_pool_timeout == 60.0
+            assert config.max_pool_timeout == 120.0
+
+    def test_http_connection_pool_limits(self):
+        """HTTP connection pool limits default to 50."""
+        with patch.dict(os.environ, {}, clear=True):
+            config = GlueLLMSettings(_env_file="")
+            assert config.http_max_connections == 50
+            assert config.http_max_keepalive_connections == 50

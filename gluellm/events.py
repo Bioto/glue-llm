@@ -1,8 +1,9 @@
 """Process status events for GlueLLM LLM execution.
 
 This module defines event types emitted during complete(), stream_complete(),
-and structured_complete() so callers can observe progress (LLM calls, tool
-execution, streaming chunks) via an optional on_status callback or typed sinks.
+structured_complete(), response(), and structured_response() so callers can
+observe progress (LLM calls, tool execution, streaming chunks) via an optional
+on_status callback, typed sinks, or a StatusEmitter.
 """
 
 import inspect
@@ -17,12 +18,14 @@ from pydantic import BaseModel, Field
 ProcessEventKind = Literal[
     "llm_call_start",
     "llm_call_end",
+    "llm_call_error",
     "tool_call_start",
     "tool_call_end",
     "tool_route",
     "stream_start",
     "stream_chunk",
     "stream_end",
+    "model_fallback",
     "complete",
 ]
 
@@ -38,12 +41,18 @@ class ProcessEvent(BaseModel):
     correlation_id: str | None = Field(default=None, description="Request correlation ID")
     timestamp: float | None = Field(default=None, description="Event time (e.g. time.time())")
 
-    # llm_call_start / llm_call_end
+    # llm_call_start / llm_call_end / llm_call_error
     iteration: int | None = Field(default=None, description="Tool loop iteration (1-based)")
     model: str | None = Field(default=None, description="Model identifier")
     message_count: int | None = Field(default=None, description="Number of messages in the request")
-    has_tool_calls: bool | None = Field(default=None, description="Whether response requested tool calls")
+    tool_call_count: int | None = Field(default=None, description="Number of tool calls in the response")
     token_usage: dict[str, int] | None = Field(default=None, description="Token usage dict")
+    estimated_cost_usd: float | None = Field(default=None, description="Estimated USD cost for this LLM call")
+    error_type: str | None = Field(default=None, description="Exception class name for llm_call_error events")
+
+    # model_fallback
+    from_model: str | None = Field(default=None, description="Model that failed before fallback")
+    to_model: str | None = Field(default=None, description="Next model in fallback chain")
 
     # tool_call_start / tool_call_end
     tool_name: str | None = Field(default=None, description="Name of the tool")
@@ -96,9 +105,40 @@ class JsonFileSink:
             await f.write(event.model_dump_json() + "\n")
 
 
+OnStatusCallback = Callable[[ProcessEvent], None] | Callable[[ProcessEvent], Awaitable[None]] | None
+
+
+class StatusEmitter:
+    """Fan-out dispatcher for process status events."""
+
+    def __init__(
+        self,
+        on_status: OnStatusCallback = None,
+        sinks: list[Sink] | None = None,
+    ) -> None:
+        self.on_status = on_status
+        self.sinks = list(sinks) if sinks else []
+
+    def bind(
+        self,
+        on_status: OnStatusCallback = None,
+        sinks: list[Sink] | None = None,
+    ) -> "StatusEmitter":
+        """Merge instance-level observers with per-call overrides."""
+        merged_on_status = on_status if on_status is not None else self.on_status
+        merged_sinks = list(self.sinks)
+        if sinks:
+            merged_sinks.extend(sinks)
+        return StatusEmitter(on_status=merged_on_status, sinks=merged_sinks or None)
+
+    async def emit(self, event: ProcessEvent) -> None:
+        """Dispatch an event to the bound callback and sinks."""
+        await emit_status(event, self.on_status, sinks=self.sinks or None)
+
+
 async def emit_status(
     event: ProcessEvent,
-    on_status: Callable[[ProcessEvent], None] | Callable[[ProcessEvent], Awaitable[None]] | None = None,
+    on_status: OnStatusCallback = None,
     sinks: list[Sink] | None = None,
 ) -> None:
     """Invoke on_status and sinks with the event.
