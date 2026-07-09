@@ -64,24 +64,54 @@ def _update_kwargs_for_provider_reasoning_effort(
     kwargs: dict[str, Any],
     *,
     use_responses_api: bool = False,
+    reasoning_summary: str | None = None,
 ) -> dict[str, Any]:
-    """Normalize and inject provider-specific reasoning effort kwargs."""
-    if effort is None:
+    """Normalize and inject provider-specific reasoning effort/summary kwargs.
+
+    For the Responses API, builds ``reasoning={"effort": ..., "summary": ...}``.
+    ``reasoning_summary`` is only meaningful on the Responses path; chat
+    completions ignore it. An existing ``reasoning`` dict in kwargs (with a
+    caller-provided ``summary``) is preserved when merging.
+    """
+    if effort is None and reasoning_summary is None:
         return kwargs
 
     model_name = model.split(":", 1)[1] if ":" in model else model.split("/", 1)[-1]
-    normalized = effort
-    if provider == "openai":
-        normalized = _normalize_openai_reasoning_effort(model_name, effort)
-
     updated = dict(kwargs)
+    existing_reasoning = updated.get("reasoning")
+    existing_summary: str | None = None
+    if isinstance(existing_reasoning, dict):
+        summary_val = existing_reasoning.get("summary")
+        if isinstance(summary_val, str):
+            existing_summary = summary_val
+
     updated.pop("reasoning_effort", None)
-    updated.pop("reasoning", None)
+    updated.pop("reasoning_summary", None)
 
     if use_responses_api:
-        updated["reasoning"] = {"effort": normalized}
+        reasoning: dict[str, Any] = {}
+        if isinstance(existing_reasoning, dict):
+            reasoning.update(existing_reasoning)
+        if effort is not None:
+            normalized = effort
+            if provider == "openai":
+                normalized = _normalize_openai_reasoning_effort(model_name, effort)
+            reasoning["effort"] = normalized
+        # Explicit reasoning_summary wins; else keep caller-provided summary on reasoning dict
+        summary = reasoning_summary if reasoning_summary is not None else existing_summary
+        if summary is not None:
+            reasoning["summary"] = summary
+        if reasoning:
+            updated["reasoning"] = reasoning
+        elif "reasoning" in updated and not isinstance(updated["reasoning"], dict):
+            updated.pop("reasoning", None)
     else:
-        updated["reasoning_effort"] = normalized
+        updated.pop("reasoning", None)
+        if effort is not None:
+            normalized = effort
+            if provider == "openai":
+                normalized = _normalize_openai_reasoning_effort(model_name, effort)
+            updated["reasoning_effort"] = normalized
     return updated
 
 

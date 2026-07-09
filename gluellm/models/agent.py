@@ -10,6 +10,7 @@ from typing import Literal
 from gluellm.models.prompt import SystemPrompt
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+ReasoningSummary = Literal["auto", "concise", "detailed"]
 
 
 class Agent:

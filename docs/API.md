@@ -229,6 +229,8 @@ print(response.final_response)  # "Your name is Alice."
 | `tokens_used` | `dict \| None` | `{prompt, completion, total}` |
 | `estimated_cost_usd` | `float \| None` | Estimated cost in USD |
 | `model` | `str \| None` | Model used |
+| `response_id` | `str \| None` | Responses API id (`response()` / `structured_response()`) |
+| `reasoning_trace` | `str \| None` | Concatenated reasoning summary when `reasoning_summary` was set (Responses API) |
 | `structured_output` | `Any \| None` | Parsed Pydantic model (for `structured_complete`) |
 
 ### StreamingChunk
@@ -303,11 +305,27 @@ async for chunk in client.stream_response("Tell me a joke", execute_tools=False)
         print()
 ```
 
+Pass `reasoning_summary="auto"` (with a reasoning-capable model) to receive `ProcessEvent(kind="reasoning_chunk")` via `on_status` / sinks while answer text continues to stream as `StreamingChunk` / `stream_chunk`.
+
+### Reasoning traces (Responses API)
+
+```python
+result = await client.response(
+    "Explain your answer.",
+    reasoning_effort="high",
+    reasoning_summary="auto",  # "auto" | "concise" | "detailed"
+)
+print(result.reasoning_trace)
+```
+
+`reasoning_summary` is merged into the provider `reasoning={"effort": ..., "summary": ...}` dict. Chat Completions does not populate `reasoning_trace`.
+
 ### Model fallback and response threading
 
 - **`fallback_models`** / **`fallback_config`**: ordered model degradation — see [RETRY.md](RETRY.md).
 - **`response_threading=True`**: chain calls with `previous_response_id` through tool loops (Responses API only).
 - **`ExecutionResult.response_id`**: final Responses API id when using `response()` / `structured_response()`.
+- **`ExecutionResult.reasoning_trace`**: reasoning summary text when `reasoning_summary` is set.
 
 ## See Also
 

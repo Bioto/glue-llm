@@ -24,6 +24,7 @@ ProcessEventKind = Literal[
     "tool_route",
     "stream_start",
     "stream_chunk",
+    "reasoning_chunk",
     "stream_end",
     "model_fallback",
     "complete",
@@ -65,8 +66,10 @@ class ProcessEvent(BaseModel):
     duration_seconds: float | None = Field(default=None, description="Tool execution duration")
     error: str | None = Field(default=None, description="Error message if tool failed")
 
-    # stream_chunk
-    content: str | None = Field(default=None, description="Chunk content (for stream_chunk)")
+    # stream_chunk / reasoning_chunk
+    content: str | None = Field(
+        default=None, description="Chunk content (for stream_chunk / reasoning_chunk)"
+    )
     done: bool | None = Field(default=None, description="Whether stream is done (for stream_chunk)")
 
     # complete

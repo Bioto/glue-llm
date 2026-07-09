@@ -1104,6 +1104,106 @@ class TestStructuredResponse:
         assert dumped["raw_response"]["output_text"] == "hi"
         assert dumped["raw_response"]["usage"]["input_tokens"] == 1
 
+    async def test_extract_response_reasoning_joins_summary_text(self):
+        """Reasoning summary and content parts are concatenated into one trace."""
+        from gluellm.api import _extract_response_reasoning
+
+        resp = SimpleNamespace(
+            output=[
+                SimpleNamespace(
+                    type="reasoning",
+                    id="rs_1",
+                    summary=[
+                        SimpleNamespace(type="summary_text", text="Step one."),
+                        SimpleNamespace(type="summary_text", text="Step two."),
+                    ],
+                    content=[SimpleNamespace(type="reasoning_text", text="Hidden detail.")],
+                ),
+                SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    content=[SimpleNamespace(type="output_text", text="Answer")],
+                ),
+            ]
+        )
+        assert _extract_response_reasoning(resp) == "Step one.\nStep two.\nHidden detail."
+
+    async def test_extract_response_reasoning_returns_none_when_empty(self):
+        """Empty or missing reasoning items must not invent a trace."""
+        from gluellm.api import _extract_response_reasoning
+
+        assert _extract_response_reasoning(SimpleNamespace(output=[])) is None
+        assert (
+            _extract_response_reasoning(
+                SimpleNamespace(
+                    output=[
+                        {
+                            "type": "reasoning",
+                            "id": "rs_empty",
+                            "summary": [],
+                            "content": [],
+                        }
+                    ]
+                )
+            )
+            is None
+        )
+        assert _extract_response_reasoning(None) is None
+
+    async def test_serialize_response_preserves_reasoning_summary(self):
+        """Serialization must keep reasoning summary text, not only the type stub."""
+        from gluellm.api import _serialize_response_to_dict
+
+        resp = SimpleNamespace(
+            id="resp_1",
+            model="openai:o4-mini",
+            object="response",
+            output_text="Paris",
+            output=[
+                SimpleNamespace(
+                    type="reasoning",
+                    id="rs_1",
+                    summary=[SimpleNamespace(type="summary_text", text="Capital of France.")],
+                    content=[],
+                ),
+                SimpleNamespace(
+                    type="message",
+                    role="assistant",
+                    content=[SimpleNamespace(type="output_text", text="Paris")],
+                ),
+            ],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=2, total_tokens=3),
+        )
+        dumped = _serialize_response_to_dict(resp)
+        reasoning_items = [i for i in dumped["output"] if i["type"] == "reasoning"]
+        assert len(reasoning_items) == 1
+        assert reasoning_items[0]["id"] == "rs_1"
+        assert reasoning_items[0]["summary"] == [{"type": "summary_text", "text": "Capital of France."}]
+
+    async def test_execution_result_includes_reasoning_trace_from_output(self):
+        """response() populates ExecutionResult.reasoning_trace from output items."""
+        from gluellm.api import GlueLLM
+
+        client = GlueLLM(model="openai:gpt-test")
+        fake = SimpleNamespace(
+            id="resp_r",
+            output=[
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [{"type": "summary_text", "text": "Thinking aloud."}],
+                }
+            ],
+            output_text="42",
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1, total_tokens=2),
+        )
+
+        with patch.object(client, "_llm_responses_call", new=AsyncMock(return_value=fake)):
+            result = await client.response("hi", execute_tools=False, reasoning_summary="auto")
+
+        assert result.final_response == "42"
+        assert result.reasoning_trace == "Thinking aloud."
+
 
 class TestSinkSystem:
     """Test typed sink system for ProcessEvent observation."""

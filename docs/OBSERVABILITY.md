@@ -87,7 +87,7 @@ When `mlflow_tracking_uri` is set:
 
 ## Process Events (Sinks)
 
-Status events (`llm_call_start`, `llm_call_end`, `llm_call_error`, tool events, etc.) can be observed via `on_status`, typed sinks, or a `StatusEmitter`:
+Status events (`llm_call_start`, `llm_call_end`, `llm_call_error`, tool events, `reasoning_chunk`, etc.) can be observed via `on_status`, typed sinks, or a `StatusEmitter`:
 
 ```python
 from gluellm import StatusEmitter, ConsoleSink, JsonFileSink, ProcessEvent
@@ -98,6 +98,8 @@ result = await client.complete("Hello", on_status=lambda e: print(e.kind))
 ```
 
 `llm_call_end` events include `tool_call_count`, `token_usage`, and `estimated_cost_usd` when pricing data is available. Failed LLM calls emit `llm_call_error` with `error_type` before the exception propagates.
+
+When streaming via `stream_response(..., reasoning_summary="auto")`, reasoning summary deltas are emitted as `reasoning_chunk` events (`content` holds the delta). Answer text remains on `stream_chunk` / `StreamingChunk` so the two streams stay separate.
 
 Custom sink: implement `Sink` with `async def handle(event: ProcessEvent)`.
 

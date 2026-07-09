@@ -115,7 +115,7 @@ from gluellm.telemetry import (
 # Callback for process status events (sync or async)
 type OnStatusCallback = Callable[[ProcessEvent], None] | Callable[[ProcessEvent], Awaitable[None]] | None
 
-from gluellm.models.agent import ReasoningEffort
+from gluellm.models.agent import ReasoningEffort, ReasoningSummary
 from gluellm.resilience.fallback import ModelFallbackConfig, call_with_model_fallback, resolve_fallback_chain, successful_call_model
 
 # GlueLLM call-level options that must never be forwarded to provider.acompletion (OpenAI, etc.).
@@ -2193,6 +2193,64 @@ def _extract_response_text(resp: Any) -> str:
     return "".join(parts)
 
 
+def _reasoning_part_text(part: Any) -> str | None:
+    """Extract text from a reasoning summary/content part if present."""
+    if isinstance(part, dict):
+        text = part.get("text")
+        return str(text) if text else None
+    text = getattr(part, "text", None)
+    return str(text) if text else None
+
+
+def _extract_response_reasoning(resp: Any) -> str | None:
+    """Extract concatenated reasoning summary/text from a Responses API response.
+
+    Walks ``output`` items with ``type == "reasoning"`` and joins
+    ``summary[].text`` plus optional ``content[].text`` (``reasoning_text``).
+    Returns ``None`` when no reasoning text is present (including empty summaries).
+
+    Also accepts a ``model_dump()``-style dict (or objects whose ``output`` is
+    only available after dumping), since some provider wrappers expose reasoning
+    inconsistently on the live object.
+    """
+    if resp is None:
+        return None
+
+    output = getattr(resp, "output", None) if not isinstance(resp, dict) else resp.get("output")
+    if not output and hasattr(resp, "model_dump"):
+        try:
+            dumped = resp.model_dump(warnings=False)
+        except TypeError:
+            dumped = resp.model_dump()
+        except Exception:
+            dumped = None
+        if isinstance(dumped, dict):
+            output = dumped.get("output") or []
+
+    parts: list[str] = []
+    for item in output or []:
+        item_type = item.get("type") if isinstance(item, dict) else getattr(item, "type", None)
+        if hasattr(item_type, "value"):
+            item_type = item_type.value
+        if str(item_type) != "reasoning":
+            continue
+
+        summary = item.get("summary") if isinstance(item, dict) else getattr(item, "summary", None)
+        for part in summary or []:
+            text = _reasoning_part_text(part)
+            if text:
+                parts.append(text)
+
+        content = item.get("content") if isinstance(item, dict) else getattr(item, "content", None)
+        for part in content or []:
+            text = _reasoning_part_text(part)
+            if text:
+                parts.append(text)
+
+    joined = "\n".join(parts).strip()
+    return joined or None
+
+
 def _extract_response_token_usage(resp: Any) -> dict[str, int] | None:
     """Extract token usage from a Response, mapped onto the chat-completions schema.
 
@@ -2292,6 +2350,43 @@ def _serialize_response_to_dict(response: Any) -> dict[str, Any]:
                     "type": "message",
                     "role": getattr(item, "role", None) if not isinstance(item, dict) else item.get("role"),
                     "content": content_out,
+                }
+            )
+        elif item_type == "reasoning":
+            if isinstance(item, dict):
+                summary_raw = item.get("summary") or []
+                content_raw = item.get("content") or []
+                item_id = item.get("id")
+            else:
+                summary_raw = getattr(item, "summary", None) or []
+                content_raw = getattr(item, "content", None) or []
+                item_id = getattr(item, "id", None)
+
+            def _serialize_reasoning_parts(parts: Any) -> list[dict[str, Any]]:
+                serialized: list[dict[str, Any]] = []
+                for part in parts or []:
+                    if isinstance(part, dict):
+                        serialized.append(
+                            {
+                                "type": part.get("type"),
+                                "text": part.get("text"),
+                            }
+                        )
+                    else:
+                        serialized.append(
+                            {
+                                "type": getattr(part, "type", None),
+                                "text": getattr(part, "text", None),
+                            }
+                        )
+                return serialized
+
+            output_items.append(
+                {
+                    "type": "reasoning",
+                    "id": item_id,
+                    "summary": _serialize_reasoning_parts(summary_raw),
+                    "content": _serialize_reasoning_parts(content_raw),
                 }
             )
         else:
@@ -2416,6 +2511,8 @@ async def _safe_responses_call(
       via :func:`_build_responses_text_format`.
     * ``reasoning_effort`` (chat-completions style) is wrapped into
       ``reasoning={"effort": ...}`` because the Responses API expects a dict.
+    * ``reasoning_summary`` merges into ``reasoning={"summary": ...}`` so
+      providers return readable reasoning traces (opt-in).
     * ``parallel_tool_calls`` is coerced to ``int`` to match the
       ``aresponses`` signature.
     """
@@ -2439,18 +2536,20 @@ async def _safe_responses_call(
     if max_output_tokens is not None:
         kwargs["max_output_tokens"] = max_output_tokens
 
-    # reasoning_effort: normalized via provider_params helper
+    # reasoning_effort / reasoning_summary: normalized via provider_params helper
     reasoning_effort = kwargs.pop("reasoning_effort", None)
-    if reasoning_effort is not None and "reasoning" not in kwargs:
+    reasoning_summary = kwargs.pop("reasoning_summary", None)
+    if isinstance(kwargs.get("reasoning"), str):
+        kwargs["reasoning"] = {"effort": kwargs["reasoning"]}
+    if reasoning_effort is not None or reasoning_summary is not None:
         kwargs = _update_kwargs_for_provider_reasoning_effort(
             extract_provider_from_model(model),
             model,
             reasoning_effort,
             kwargs,
             use_responses_api=True,
+            reasoning_summary=reasoning_summary,
         )
-    if isinstance(kwargs.get("reasoning"), str):
-        kwargs["reasoning"] = {"effort": kwargs["reasoning"]}
 
     # parallel_tool_calls: aresponses signature is int | None
     if "parallel_tool_calls" in kwargs and kwargs["parallel_tool_calls"] is not None:
@@ -2811,6 +2910,16 @@ class ExecutionResult(BaseModel, Generic[T]):
         str | None,
         Field(
             description="OpenAI Responses API response id when using the Responses path",
+            default=None,
+        ),
+    ]
+    reasoning_trace: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Concatenated reasoning summary/text from Responses API reasoning "
+                "output items when reasoning_summary was requested"
+            ),
             default=None,
         ),
     ]
@@ -4665,6 +4774,7 @@ class GlueLLM:
         # -- Model generation --
         max_tokens: int | None = None,
         reasoning_effort: ReasoningEffort | None = None,
+        reasoning_summary: ReasoningSummary | None = None,
         # -- Tools --
         condense_tool_messages: bool | None = None,
         execute_tools: bool = True,
@@ -4760,6 +4870,8 @@ class GlueLLM:
         effective_model_kwargs = {**self.model_kwargs, **call_model_kwargs}
         if reasoning_effort is not None:
             effective_model_kwargs["reasoning_effort"] = reasoning_effort
+        if reasoning_summary is not None:
+            effective_model_kwargs["reasoning_summary"] = reasoning_summary
         if parallel_tool_calls is not None:
             effective_model_kwargs["parallel_tool_calls"] = parallel_tool_calls
         effective_summarize_cfg = _merge_summarize_context_for_call(self._summarize_context_cfg, summarize_context)
@@ -5437,6 +5549,7 @@ class GlueLLM:
                     estimated_cost_usd=total_cost if total_cost > 0 else None,
                     model=_model_used_in_call(model, self.model),
                     response_id=_extract_response_id(response),
+                    reasoning_trace=_extract_response_reasoning(response),
                     structured_output=structured_output,
                 )
 
@@ -5482,6 +5595,7 @@ class GlueLLM:
         tools: list[Callable] | None = None,
         max_tokens: int | None = None,
         reasoning_effort: ReasoningEffort | None = None,
+        reasoning_summary: ReasoningSummary | None = None,
         condense_tool_messages: bool | None = None,
         execute_tools: bool = True,
         parallel_tool_calls: bool | None = None,
@@ -5513,6 +5627,7 @@ class GlueLLM:
             tools=tools,
             max_tokens=max_tokens,
             reasoning_effort=reasoning_effort,
+            reasoning_summary=reasoning_summary,
             condense_tool_messages=condense_tool_messages,
             execute_tools=execute_tools,
             parallel_tool_calls=parallel_tool_calls,
@@ -5546,6 +5661,7 @@ class GlueLLM:
         tools: list[Callable] | None = None,
         max_tokens: int | None = None,
         reasoning_effort: ReasoningEffort | None = None,
+        reasoning_summary: ReasoningSummary | None = None,
         condense_tool_messages: bool | None = None,
         execute_tools: bool = True,
         parallel_tool_calls: bool | None = None,
@@ -5576,6 +5692,7 @@ class GlueLLM:
             tools=tools,
             max_tokens=max_tokens,
             reasoning_effort=reasoning_effort,
+            reasoning_summary=reasoning_summary,
             condense_tool_messages=condense_tool_messages,
             execute_tools=execute_tools,
             parallel_tool_calls=parallel_tool_calls,
@@ -5611,11 +5728,18 @@ class GlueLLM:
         fallback_models: list[str] | None = None,
         response_threading: bool | None = None,
         previous_response_id: str | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
+        reasoning_summary: ReasoningSummary | None = None,
         on_status: OnStatusCallback = None,
         sinks: list[Sink] | None = None,
         **model_kwargs: Any,
     ) -> AsyncIterator[StreamingChunk[Any]]:
-        """Stream a Responses API completion, mirroring :meth:`stream_complete`."""
+        """Stream a Responses API completion, mirroring :meth:`stream_complete`.
+
+        Reasoning summary deltas (when ``reasoning_summary`` is set) are emitted
+        as ``ProcessEvent(kind="reasoning_chunk")`` and are not mixed into
+        ``StreamingChunk.content`` answer text.
+        """
         from gluellm.responses_stream import consume_responses_stream_with_tools
 
         if is_shutting_down():
@@ -5640,9 +5764,13 @@ class GlueLLM:
         accumulated = ""
 
         await status.emit(ProcessEvent(kind="stream_start", correlation_id=correlation_id, timestamp=time.time()))
-        wire_kwargs: dict[str, Any] = {}
+        wire_kwargs: dict[str, Any] = dict(model_kwargs)
         if thread_id is not None:
             wire_kwargs["previous_response_id"] = thread_id
+        if reasoning_effort is not None:
+            wire_kwargs["reasoning_effort"] = reasoning_effort
+        if reasoning_summary is not None:
+            wire_kwargs["reasoning_summary"] = reasoning_summary
 
         stream_iter = await self._llm_responses_call(
             self._get_merged_hook_registry(),
@@ -5656,12 +5784,11 @@ class GlueLLM:
             stream=True,
             connect_timeout=connect_timeout,
             request_timeout=request_timeout,
-            **model_kwargs,
             **wire_kwargs,
         )
 
-        async for is_content, chunk_text, _assistant_msg in consume_responses_stream_with_tools(stream_iter):
-            if is_content:
+        async for kind, chunk_text, _assistant_msg in consume_responses_stream_with_tools(stream_iter):
+            if kind == "content":
                 accumulated += chunk_text
                 await status.emit(
                     ProcessEvent(
@@ -5673,7 +5800,18 @@ class GlueLLM:
                     )
                 )
                 yield StreamingChunk(content=chunk_text, done=False, tool_calls_made=0)
+            elif kind == "reasoning":
+                await status.emit(
+                    ProcessEvent(
+                        kind="reasoning_chunk",
+                        correlation_id=correlation_id,
+                        timestamp=time.time(),
+                        content=chunk_text,
+                        done=False,
+                    )
+                )
             else:
+                # Final sentinel: kind == "done"
                 accumulated = chunk_text or accumulated
 
         new_id = None
@@ -7097,6 +7235,7 @@ async def response(
     tools: list[Callable] | None = None,
     max_tokens: int | None = None,
     reasoning_effort: ReasoningEffort | None = None,
+    reasoning_summary: ReasoningSummary | None = None,
     condense_tool_messages: bool | None = None,
     execute_tools: bool = True,
     max_tool_iterations: int | None = None,
@@ -7155,6 +7294,7 @@ async def response(
         tools=tools,
         max_tokens=max_tokens,
         reasoning_effort=reasoning_effort,
+        reasoning_summary=reasoning_summary,
         condense_tool_messages=condense_tool_messages,
         execute_tools=execute_tools,
         parallel_tool_calls=parallel_tool_calls,
@@ -7186,6 +7326,7 @@ async def structured_response(
     # -- Model generation --
     max_tokens: int | None = None,
     reasoning_effort: ReasoningEffort | None = None,
+    reasoning_summary: ReasoningSummary | None = None,
     # -- Tools --
     condense_tool_messages: bool | None = None,
     execute_tools: bool = True,
@@ -7242,6 +7383,9 @@ async def structured_response(
             ``max_output_tokens``).
         reasoning_effort: Wrapped into ``reasoning={"effort": ...}`` for
             the Responses API.
+        reasoning_summary: Opt into readable reasoning traces via
+            ``reasoning={"summary": ...}``; available on
+            ``ExecutionResult.reasoning_trace``.
         max_validation_retries: Max retries when Pydantic validation fails.
         (other args mirror :func:`structured_complete`)
         **model_kwargs: Extra params for ``aresponses`` (e.g. ``temperature``,
@@ -7315,6 +7459,7 @@ async def structured_response(
         tools=tools,
         max_tokens=max_tokens,
         reasoning_effort=reasoning_effort,
+        reasoning_summary=reasoning_summary,
         condense_tool_messages=condense_tool_messages,
         execute_tools=execute_tools,
         parallel_tool_calls=parallel_tool_calls,
@@ -7350,6 +7495,8 @@ async def stream_response(
     fallback_models: list[str] | None = None,
     response_threading: bool | None = None,
     previous_response_id: str | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
+    reasoning_summary: ReasoningSummary | None = None,
     on_status: OnStatusCallback = None,
     sinks: list[Sink] | None = None,
     **model_kwargs: Any,
@@ -7367,6 +7514,8 @@ async def stream_response(
         fallback_models=fallback_models,
         response_threading=response_threading,
         previous_response_id=previous_response_id,
+        reasoning_effort=reasoning_effort,
+        reasoning_summary=reasoning_summary,
         on_status=on_status,
         sinks=sinks,
         **model_kwargs,

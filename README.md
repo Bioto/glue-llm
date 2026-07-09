@@ -293,7 +293,7 @@ import gluellm
 gluellm.configure(default_tool_execution_order="parallel")
 ```
 
-### Reasoning effort and logprobs
+### Reasoning effort, traces, and logprobs
 
 For reasoning models (o3, o4-mini, Claude 3.7 thinking), use `reasoning_effort` to control thinking depth:
 
@@ -306,6 +306,23 @@ result = await complete(
 ```
 
 Set a default via `GLUELLM_DEFAULT_REASONING_EFFORT` or on the client.
+
+On the **Responses API** path, opt into readable reasoning summaries with `reasoning_summary` (`"auto"` | `"concise"` | `"detailed"`). Summaries appear on `ExecutionResult.reasoning_trace`; during `stream_response`, deltas are emitted as `ProcessEvent(kind="reasoning_chunk")` (not mixed into answer chunks):
+
+```python
+from gluellm import response
+
+result = await response(
+    "Solve this logic puzzle...",
+    model="openai:o4-mini",
+    reasoning_effort="high",
+    reasoning_summary="auto",
+)
+print(result.reasoning_trace)  # model reasoning summary
+print(result.final_response)
+```
+
+Chat Completions does not expose the same summary surface; use `response()` / `structured_response()` / `stream_response()` for traces.
 
 For eval and confidence scoring, enable `logprobs`:
 

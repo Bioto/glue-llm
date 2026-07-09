@@ -164,3 +164,42 @@ class TestReasoningEffortNormalization:
             use_responses_api=False,
         )
         assert kwargs == {"reasoning_effort": "high"}
+
+    async def test_responses_kwargs_include_reasoning_summary_when_set(self):
+        """reasoning_summary merges into Responses reasoning dict alongside effort."""
+        kwargs = _update_kwargs_for_provider_reasoning_effort(
+            "openai",
+            "openai:o4-mini",
+            "high",
+            {},
+            use_responses_api=True,
+            reasoning_summary="auto",
+        )
+        assert kwargs == {"reasoning": {"effort": "high", "summary": "auto"}}
+        assert "reasoning_summary" not in kwargs
+        assert "reasoning_effort" not in kwargs
+
+    async def test_responses_reasoning_summary_preserves_caller_reasoning_dict(self):
+        """Caller-provided reasoning.summary is kept when reasoning_summary is unset."""
+        kwargs = _update_kwargs_for_provider_reasoning_effort(
+            "openai",
+            "openai:o4-mini",
+            "medium",
+            {"reasoning": {"summary": "detailed", "effort": "low"}},
+            use_responses_api=True,
+            reasoning_summary=None,
+        )
+        assert kwargs["reasoning"]["effort"] == "medium"
+        assert kwargs["reasoning"]["summary"] == "detailed"
+
+    async def test_responses_reasoning_summary_only_without_effort(self):
+        """Summary can be set without effort on the Responses path."""
+        kwargs = _update_kwargs_for_provider_reasoning_effort(
+            "openai",
+            "openai:o4-mini",
+            None,
+            {},
+            use_responses_api=True,
+            reasoning_summary="concise",
+        )
+        assert kwargs == {"reasoning": {"summary": "concise"}}

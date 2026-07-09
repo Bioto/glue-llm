@@ -145,7 +145,7 @@ from gluellm.models.config import RequestConfig
 from gluellm.models.conversation import Conversation, Message, Role
 from gluellm.models.embedding import EmbeddingResult
 from gluellm.models.hook import HookConfig, HookContext, HookErrorStrategy, HookRegistry, HookStage
-from gluellm.models.agent import Agent, ReasoningEffort
+from gluellm.models.agent import Agent, ReasoningEffort, ReasoningSummary
 from gluellm.models.prompt import Prompt, SystemPrompt
 from gluellm.observability.logging_config import setup_logging
 from gluellm.rate_limiting.api_key_pool import APIKeyPool
@@ -269,6 +269,7 @@ __all__ = [
     "Role",
     "Agent",
     "ReasoningEffort",
+    "ReasoningSummary",
     "SystemPrompt",
     "Prompt",
     "EmbeddingResult",
