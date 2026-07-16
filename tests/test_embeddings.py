@@ -326,3 +326,40 @@ class TestEmbeddingGeneration:
         assert isinstance(result, EmbeddingResult)
         assert result.dimension == 768
         assert len(result.embeddings) == 1
+
+    async def test_embed_keeps_prefixed_model_for_gateway(self):
+        """embed() must send provider:model on the wire when OPENAI_BASE_URL is a gateway."""
+        import os
+
+        mock_response = CreateEmbeddingResponse(
+            data=[{"embedding": [0.1] * 768, "index": 0, "object": "embedding"}],
+            model="openai:text-embedding-3-small",
+            object="list",
+            usage={"prompt_tokens": 2, "total_tokens": 2},
+        )
+
+        mock_create = AsyncMock(return_value=mock_response)
+        mock_client = MagicMock()
+        mock_client.embeddings.create = mock_create
+
+        env_backup = os.environ.get("OPENAI_BASE_URL")
+        try:
+            os.environ["OPENAI_BASE_URL"] = "http://otari:8000/v1"
+            with (
+                patch.object(gluellm_api._provider_cache, "_providers", {}),
+                patch("any_llm.providers.openai.base.AsyncOpenAI", return_value=mock_client),
+            ):
+                await embed(
+                    "Your document chunk to embed.",
+                    model="openai:text-embedding-3-small",
+                    dimensions=768,
+                    api_key="sk-test-dummy",
+                )
+        finally:
+            if env_backup is None:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            else:
+                os.environ["OPENAI_BASE_URL"] = env_backup
+
+        mock_create.assert_called_once()
+        assert mock_create.call_args.kwargs.get("model") == "openai:text-embedding-3-small"

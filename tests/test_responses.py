@@ -66,6 +66,34 @@ class TestResponsesBasic:
         async for _ in result:
             break
 
+    async def test_responses_keeps_prefixed_model_for_gateway(self):
+        """responses() must send provider:model on the wire when OPENAI_BASE_URL is a gateway."""
+        import os
+
+        mock_resp = SimpleNamespace(
+            output_text="pong",
+            output=[],
+            model="openai:gpt-5.4-mini-2026-03-17",
+            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=1, total_tokens=6),
+        )
+
+        env_backup = os.environ.get("OPENAI_BASE_URL")
+        try:
+            os.environ["OPENAI_BASE_URL"] = "http://otari:8000/v1"
+            with patch("any_llm.aresponses", new=AsyncMock(return_value=mock_resp)) as mock:
+                await responses(
+                    "ping",
+                    model="openai:gpt-5.4-mini-2026-03-17",
+                )
+        finally:
+            if env_backup is None:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            else:
+                os.environ["OPENAI_BASE_URL"] = env_backup
+
+        assert mock.call_args.kwargs["model"] == "openai:gpt-5.4-mini-2026-03-17"
+        assert mock.call_args.kwargs["provider"] == "openai"
+
 
 class TestResponseResultExtraction:
     """Tests for output extraction from various response formats."""

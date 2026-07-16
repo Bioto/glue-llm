@@ -2232,6 +2232,75 @@ class TestProviderCache:
 
         mock_client.close.assert_called_once()
 
+    async def test_provider_cache_keeps_prefix_when_openai_base_url_is_gateway(self):
+        """Gateway hosts must receive provider:model on the wire, not the stripped id."""
+        import os
+        from unittest.mock import MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+        fake_provider = MagicMock()
+
+        env_backup = os.environ.get("OPENAI_BASE_URL")
+        try:
+            os.environ["OPENAI_BASE_URL"] = "http://otari:8000/v1"
+            with patch("gluellm.api.AnyLLM.create", return_value=fake_provider):
+                _, model_id = cache.get_provider("openai:gpt-5.4-mini-2026-03-17", "sk-test")
+        finally:
+            if env_backup is None:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            else:
+                os.environ["OPENAI_BASE_URL"] = env_backup
+
+        assert model_id == "openai:gpt-5.4-mini-2026-03-17"
+
+    async def test_provider_cache_keeps_slash_prefix_when_openai_base_url_is_gateway(self):
+        """Gateway hosts must preserve provider/model slash format on the wire."""
+        import os
+        from unittest.mock import MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+        fake_provider = MagicMock()
+
+        env_backup = os.environ.get("OPENAI_BASE_URL")
+        try:
+            os.environ["OPENAI_BASE_URL"] = "http://otari:8000/v1"
+            with patch("gluellm.api.AnyLLM.create", return_value=fake_provider):
+                _, model_id = cache.get_provider("openai/text-embedding-3-small", "sk-test")
+        finally:
+            if env_backup is None:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            else:
+                os.environ["OPENAI_BASE_URL"] = env_backup
+
+        assert model_id == "openai/text-embedding-3-small"
+
+    async def test_provider_cache_strips_prefix_when_openai_base_url_is_default_host(self):
+        """Explicit default OpenAI host must still strip provider prefix."""
+        import os
+        from unittest.mock import MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+        fake_provider = MagicMock()
+
+        env_backup = os.environ.get("OPENAI_BASE_URL")
+        try:
+            os.environ["OPENAI_BASE_URL"] = "https://api.openai.com/v1"
+            with patch("gluellm.api.AnyLLM.create", return_value=fake_provider):
+                _, model_id = cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-test")
+        finally:
+            if env_backup is None:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            else:
+                os.environ["OPENAI_BASE_URL"] = env_backup
+
+        assert model_id == "gpt-5.4-2026-03-05"
+
     async def test_safe_llm_call_uses_cached_provider_not_new_instance(self):
         """_safe_llm_call must route through the provider cache, not create a fresh client.
 
@@ -2284,6 +2353,56 @@ class TestProviderCache:
         assert len(get_provider_calls) == 2
         # The provider's acompletion must have been called twice (not a new client each time)
         assert mock_provider.acompletion.call_count == 2
+
+
+class TestWireModelForProvider:
+    """Regression tests for gateway-aware model id formatting."""
+
+    def test_openai_api_base_is_gateway_when_host_is_not_openai(self):
+        from gluellm.model_id import openai_api_base_is_gateway
+
+        assert openai_api_base_is_gateway("http://otari:8000/v1") is True
+
+    def test_openai_api_base_is_not_gateway_for_default_host(self):
+        from gluellm.model_id import openai_api_base_is_gateway
+
+        assert openai_api_base_is_gateway("https://api.openai.com/v1") is False
+        assert openai_api_base_is_gateway("") is False
+        assert openai_api_base_is_gateway(None) is False
+
+    def test_wire_model_for_provider_keeps_prefix_for_openai_gateway(self):
+        from gluellm.model_id import wire_model_for_provider
+
+        result = wire_model_for_provider(
+            "openai:gpt-5.4-mini-2026-03-17",
+            "openai",
+            "gpt-5.4-mini-2026-03-17",
+            api_base="http://otari:8000/v1",
+        )
+        assert result == "openai:gpt-5.4-mini-2026-03-17"
+
+    def test_wire_model_for_provider_strips_prefix_for_default_openai(self):
+        from gluellm.model_id import wire_model_for_provider
+
+        result = wire_model_for_provider(
+            "openai:gpt-5.4-mini-2026-03-17",
+            "openai",
+            "gpt-5.4-mini-2026-03-17",
+            api_base="https://api.openai.com/v1",
+        )
+        assert result == "gpt-5.4-mini-2026-03-17"
+
+    def test_wire_model_for_provider_does_not_affect_non_openai_providers(self):
+        from gluellm.model_id import wire_model_for_provider
+
+        result = wire_model_for_provider(
+            "anthropic:claude-3-5-sonnet-20241022",
+            "anthropic",
+            "claude-3-5-sonnet-20241022",
+            api_base="http://otari:8000/v1",
+        )
+        assert result == "claude-3-5-sonnet-20241022"
+
 
 class TestCondenseToolRound:
     """Unit tests for the _condense_tool_round() utility.

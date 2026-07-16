@@ -135,17 +135,28 @@ async def responses(
         ... )
         >>> print(result.output)
     """
+    from gluellm.model_id import wire_model_for_provider
     from gluellm.rate_limiting.api_key_pool import extract_provider_from_model
 
-    model_str = model or settings.default_model
-    prov = provider or extract_provider_from_model(model_str)
-    if ":" in model_str and provider is None:
-        prov, model_str = model_str.split(":", 1)
+    original_model = model or settings.default_model
+    prov = provider or extract_provider_from_model(original_model)
+
+    if provider is None:
+        if ":" in original_model:
+            prov, model_id = original_model.split(":", 1)
+        elif "/" in original_model:
+            prov, model_id = original_model.split("/", 1)
+        else:
+            model_id = original_model
+    else:
+        model_id = original_model
+
+    wire_model = wire_model_for_provider(original_model, prov, model_id)
 
     call_kwargs: dict[str, Any] = {
         "provider": prov,
         "input_data": prompt,
-        "model": model_str,
+        "model": wire_model,
         "tools": tools,
         "instructions": instructions,
         "max_output_tokens": max_output_tokens or settings.default_max_tokens,
@@ -170,6 +181,6 @@ async def responses(
         output_items=output_items,
         tool_calls=_extract_tool_calls(raw),
         usage=_extract_usage(raw),
-        model=getattr(raw, "model", model_str),
+        model=getattr(raw, "model", wire_model),
         raw_response=raw,
     )

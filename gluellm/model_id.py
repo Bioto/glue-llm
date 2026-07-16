@@ -1,0 +1,50 @@
+"""Model identifier helpers for provider routing vs wire format."""
+
+from __future__ import annotations
+
+import os
+from urllib.parse import urlparse
+
+_OPENAI_DEFAULT_HOST = "api.openai.com"
+_OPENAI_API_BASE_ENV = "OPENAI_BASE_URL"
+
+
+def _normalize_api_base_host(api_base: str) -> str | None:
+    """Return the lowercase hostname from an API base URL, or None if unset/invalid."""
+    api_base = api_base.strip()
+    if not api_base:
+        return None
+    if "://" not in api_base:
+        api_base = f"//{api_base}"
+    host = urlparse(api_base).hostname
+    return host.lower() if host else None
+
+
+def openai_api_base_is_gateway(api_base: str | None = None) -> bool:
+    """Return True when the OpenAI provider points at a non-OpenAI gateway.
+
+    Reads ``OPENAI_BASE_URL`` when *api_base* is not provided. Unset or empty
+    values are treated as the default OpenAI host (not a gateway).
+    """
+    resolved = api_base if api_base is not None else os.environ.get(_OPENAI_API_BASE_ENV, "")
+    host = _normalize_api_base_host(resolved or "")
+    if host is None:
+        return False
+    return host != _OPENAI_DEFAULT_HOST
+
+
+def wire_model_for_provider(
+    original_model: str,
+    provider_name: str,
+    model_id: str,
+    *,
+    api_base: str | None = None,
+) -> str:
+    """Return the model string to send on the wire for the given provider.
+
+    Gateways such as Otari require ``provider:model`` (or ``provider/model``) on
+    the wire. The default OpenAI API expects only the bare model id.
+    """
+    if provider_name.lower() == "openai" and openai_api_base_is_gateway(api_base):
+        return original_model
+    return model_id

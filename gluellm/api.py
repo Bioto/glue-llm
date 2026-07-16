@@ -74,6 +74,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, field_s
 from pydantic.functional_validators import SkipValidation
 from gluellm.config import settings
 from gluellm.config import ToolExecutionOrder
+from gluellm.model_id import wire_model_for_provider
 from gluellm.tool_router import (
     ToolMode,
     build_router_tool,
@@ -458,7 +459,7 @@ class _ProviderCache:
                 )
             provider = self._providers[cache_key]
 
-        return provider, model_id
+        return provider, wire_model_for_provider(model, provider_name, model_id)
 
     async def close_all(self) -> None:
         """Close all cached provider HTTP clients gracefully.
