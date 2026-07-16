@@ -2403,6 +2403,111 @@ class TestWireModelForProvider:
         )
         assert result == "claude-3-5-sonnet-20241022"
 
+    def test_ensure_gateway_wire_model_restores_prefix_for_bare_id(self):
+        from gluellm.model_id import ensure_gateway_wire_model
+
+        assert (
+            ensure_gateway_wire_model(
+                "gpt-5.4-mini-2026-03-17",
+                "openai",
+                api_base="http://otari:8000/v1",
+            )
+            == "openai:gpt-5.4-mini-2026-03-17"
+        )
+
+    def test_ensure_gateway_wire_model_is_idempotent_when_already_prefixed(self):
+        from gluellm.model_id import ensure_gateway_wire_model
+
+        assert (
+            ensure_gateway_wire_model(
+                "openai:gpt-5.4-mini-2026-03-17",
+                "openai",
+                api_base="http://otari:8000/v1",
+            )
+            == "openai:gpt-5.4-mini-2026-03-17"
+        )
+
+    async def test_safe_responses_call_puts_full_model_in_aresponses_for_gateway(self):
+        """After split, gateway Responses calls must receive provider:model, not bare model_id."""
+        import os
+        from unittest.mock import AsyncMock, MagicMock
+
+        captured: dict = {}
+
+        async def capture_aresponses(*args, **kwargs):
+            captured.clear()
+            captured.update(kwargs)
+            if args:
+                captured["args"] = args
+            return MagicMock(
+                id="resp_test",
+                output=[],
+                output_text="ok",
+                usage=None,
+            )
+
+        mock_provider = MagicMock()
+        mock_provider.aresponses = AsyncMock(side_effect=capture_aresponses)
+
+        env_backup = os.environ.get("OPENAI_BASE_URL")
+        try:
+            os.environ["OPENAI_BASE_URL"] = "http://otari:8000/v1"
+            with patch("gluellm.api._provider_cache") as mock_cache:
+                # Simulate post-split bare model_id from provider routing
+                mock_cache.get_provider = lambda model, api_key: (
+                    mock_provider,
+                    "gpt-5.4-mini-2026-03-17",
+                )
+
+                from gluellm.api import _safe_responses_call
+
+                await _safe_responses_call(
+                    input_data="ping",
+                    model="openai:gpt-5.4-mini-2026-03-17",
+                )
+        finally:
+            if env_backup is None:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            else:
+                os.environ["OPENAI_BASE_URL"] = env_backup
+
+        assert captured.get("model") == "openai:gpt-5.4-mini-2026-03-17"
+
+    async def test_aresponses_patch_restores_prefix_before_responses_create(self):
+        """Monkeypatch must put provider:model back into params.model for gateway hosts."""
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        import gluellm.api as api_mod
+        from gluellm.api import _patch_any_llm_openai_gateway_responses_model
+
+        openai_base = __import__("any_llm.providers.openai.base", fromlist=["BaseOpenAIProvider"])
+        BaseOpenAIProvider = openai_base.BaseOpenAIProvider
+        original_aresponses = BaseOpenAIProvider._aresponses
+        original_flag = api_mod._any_llm_openai_gateway_responses_model_patch_applied
+
+        provider = MagicMock()
+        provider.PROVIDER_NAME = "openai"
+        provider.client = MagicMock()
+        provider.client.base_url = "http://otari:8000/v1"
+
+        params = SimpleNamespace(model="gpt-5.4-mini-2026-03-17")
+
+        async def fake_original(self, params, **kwargs):
+            return params.model
+
+        try:
+            BaseOpenAIProvider._aresponses = fake_original
+            api_mod._any_llm_openai_gateway_responses_model_patch_applied = False
+            _patch_any_llm_openai_gateway_responses_model()
+            result = await BaseOpenAIProvider._aresponses(provider, params)
+        finally:
+            BaseOpenAIProvider._aresponses = original_aresponses
+            api_mod._any_llm_openai_gateway_responses_model_patch_applied = original_flag
+
+        assert result == "openai:gpt-5.4-mini-2026-03-17"
+        assert params.model == "openai:gpt-5.4-mini-2026-03-17"
+
 
 class TestCondenseToolRound:
     """Unit tests for the _condense_tool_round() utility.

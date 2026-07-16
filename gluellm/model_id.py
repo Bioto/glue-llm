@@ -48,3 +48,20 @@ def wire_model_for_provider(
     if provider_name.lower() == "openai" and openai_api_base_is_gateway(api_base):
         return original_model
     return model_id
+
+
+def ensure_gateway_wire_model(
+    model: str,
+    provider_name: str = "openai",
+    *,
+    api_base: str | None = None,
+) -> str:
+    """If *api_base* is a gateway and *model* is bare, restore ``provider:model``.
+
+    Idempotent when *model* already contains ``:`` or ``/``.
+    """
+    if not model or ":" in model or "/" in model:
+        return model
+    if not openai_api_base_is_gateway(api_base):
+        return model
+    return f"{provider_name}:{model}"

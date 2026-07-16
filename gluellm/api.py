@@ -74,7 +74,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, field_s
 from pydantic.functional_validators import SkipValidation
 from gluellm.config import settings
 from gluellm.config import ToolExecutionOrder
-from gluellm.model_id import wire_model_for_provider
+from gluellm.model_id import ensure_gateway_wire_model, wire_model_for_provider
 from gluellm.tool_router import (
     ToolMode,
     build_router_tool,
@@ -264,6 +264,7 @@ logger = get_logger(__name__)
 _current_agent: ContextVar["Agent | None"] = ContextVar("_current_agent", default=None)
 _any_llm_openai_patch_applied = False
 _any_llm_openai_embedding_dimensions_patch_applied = False
+_any_llm_openai_gateway_responses_model_patch_applied = False
 
 
 def _convert_openai_chat_completion_without_parsed(response: Any) -> ChatCompletion:
@@ -326,6 +327,42 @@ def _patch_any_llm_openai_converter() -> None:
     openai_utils._convert_chat_completion = _convert_openai_chat_completion_without_parsed
     _any_llm_openai_patch_applied = True
     _patch_any_llm_openai_embedding_dimensions()
+    _patch_any_llm_openai_gateway_responses_model()
+
+
+def _patch_any_llm_openai_gateway_responses_model() -> None:
+    """Patch any_llm OpenAI ``_aresponses`` so gateway wire ``model`` keeps provider prefix.
+
+    After provider:model is split for routing, Otari-style gateways still need the
+    full ``provider:model`` in ``client.responses.create`` kwargs. When the client
+    ``base_url`` (or ``OPENAI_BASE_URL``) is not api.openai.com, restore the prefix
+    onto a bare model id before the create call.
+    """
+    global _any_llm_openai_gateway_responses_model_patch_applied
+    if _any_llm_openai_gateway_responses_model_patch_applied:
+        return
+
+    try:
+        openai_base = importlib.import_module("any_llm.providers.openai.base")
+        BaseOpenAIProvider = openai_base.BaseOpenAIProvider
+        original_aresponses = BaseOpenAIProvider._aresponses
+    except Exception:
+        return
+
+    async def _patched_aresponses(self: Any, params: Any, **kwargs: Any) -> Any:
+        api_base = str(getattr(getattr(self, "client", None), "base_url", "") or "")
+        provider_name = getattr(self, "PROVIDER_NAME", None) or "openai"
+        model = getattr(params, "model", None)
+        if isinstance(model, str) and model:
+            params.model = ensure_gateway_wire_model(
+                model,
+                str(provider_name),
+                api_base=api_base or None,
+            )
+        return await original_aresponses(self, params, **kwargs)
+
+    BaseOpenAIProvider._aresponses = _patched_aresponses
+    _any_llm_openai_gateway_responses_model_patch_applied = True
 
 
 def _patch_any_llm_openai_embedding_dimensions() -> None:
@@ -2601,10 +2638,14 @@ async def _safe_responses_call(
                 set_span_attributes(span, correlation_id=correlation_id)
 
             provider, model_id = _provider_cache.get_provider(model, api_key)
+            # After provider:model split, gateways need the full id in responses.create
+            # kwargs (not the bare model_id). get_provider may already restore it;
+            # wire_model_for_provider is idempotent with the original model string.
+            wire_model = wire_model_for_provider(model, provider_name, model_id)
 
             response = await asyncio.wait_for(
                 provider.aresponses(
-                    model=model_id,
+                    model=wire_model,
                     input_data=input_data,
                     tools=prepared_tools if prepared_tools else None,
                     stream=stream,
