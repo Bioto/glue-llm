@@ -2301,6 +2301,88 @@ class TestProviderCache:
 
         assert model_id == "gpt-5.4-2026-03-05"
 
+    async def test_provider_cache_uses_openai_client_for_anthropic_model_when_gateway(self):
+        """Gateway mode must not open native Anthropic SDK or require ANTHROPIC_API_KEY."""
+        import os
+        from unittest.mock import MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+        fake_provider = MagicMock()
+
+        base_backup = os.environ.get("OPENAI_BASE_URL")
+        key_backup = os.environ.get("OPENAI_API_KEY")
+        anthropic_backup = os.environ.pop("ANTHROPIC_API_KEY", None)
+        try:
+            os.environ["OPENAI_BASE_URL"] = "http://otari.example/v1"
+            os.environ["OPENAI_API_KEY"] = "test"
+            with patch("gluellm.api.AnyLLM.create", return_value=fake_provider) as mock_create:
+                provider, wire_model = cache.get_provider("anthropic:claude-sonnet-4", None)
+        finally:
+            if base_backup is None:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            else:
+                os.environ["OPENAI_BASE_URL"] = base_backup
+            if key_backup is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = key_backup
+            if anthropic_backup is not None:
+                os.environ["ANTHROPIC_API_KEY"] = anthropic_backup
+
+        mock_create.assert_called_once()
+        assert mock_create.call_args.args[0] == "openai"
+        assert provider is fake_provider
+        assert wire_model == "anthropic:claude-sonnet-4"
+
+    async def test_provider_cache_uses_anthropic_client_when_not_gateway(self):
+        """Non-gateway hosts must still route anthropic: models to the native provider."""
+        import os
+        from unittest.mock import MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+        fake_provider = MagicMock()
+
+        base_backup = os.environ.get("OPENAI_BASE_URL")
+        try:
+            os.environ.pop("OPENAI_BASE_URL", None)
+            with patch("gluellm.api.AnyLLM.create", return_value=fake_provider) as mock_create:
+                cache.get_provider("anthropic:claude-sonnet-4", "sk-anthropic")
+        finally:
+            if base_backup is None:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            else:
+                os.environ["OPENAI_BASE_URL"] = base_backup
+
+        mock_create.assert_called_once()
+        assert mock_create.call_args.args[0] == "anthropic"
+
+    async def test_provider_cache_keeps_openai_prefix_when_gateway(self):
+        """Gateway hosts must keep openai:gpt-4o-mini on the wire unchanged."""
+        import os
+        from unittest.mock import MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+        fake_provider = MagicMock()
+
+        env_backup = os.environ.get("OPENAI_BASE_URL")
+        try:
+            os.environ["OPENAI_BASE_URL"] = "http://otari.example/v1"
+            with patch("gluellm.api.AnyLLM.create", return_value=fake_provider):
+                _, wire_model = cache.get_provider("openai:gpt-4o-mini", "sk-test")
+        finally:
+            if env_backup is None:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            else:
+                os.environ["OPENAI_BASE_URL"] = env_backup
+
+        assert wire_model == "openai:gpt-4o-mini"
+
     async def test_safe_llm_call_uses_cached_provider_not_new_instance(self):
         """_safe_llm_call must route through the provider cache, not create a fresh client.
 
@@ -2428,9 +2510,9 @@ class TestWireModelForProvider:
         )
 
     async def test_safe_responses_call_puts_full_model_in_aresponses_for_gateway(self):
-        """After split, gateway Responses calls must receive provider:model, not bare model_id."""
+        """Gateway Responses calls must receive the full provider:model id on the wire."""
         import os
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import AsyncMock, MagicMock, patch
 
         captured: dict = {}
 
@@ -2449,29 +2531,29 @@ class TestWireModelForProvider:
         mock_provider = MagicMock()
         mock_provider.aresponses = AsyncMock(side_effect=capture_aresponses)
 
-        env_backup = os.environ.get("OPENAI_BASE_URL")
+        base_backup = os.environ.get("OPENAI_BASE_URL")
+        key_backup = os.environ.get("OPENAI_API_KEY")
         try:
-            os.environ["OPENAI_BASE_URL"] = "http://otari:8000/v1"
-            with patch("gluellm.api._provider_cache") as mock_cache:
-                # Simulate post-split bare model_id from provider routing
-                mock_cache.get_provider = lambda model, api_key: (
-                    mock_provider,
-                    "gpt-5.4-mini-2026-03-17",
-                )
-
+            os.environ["OPENAI_BASE_URL"] = "http://otari.example/v1"
+            os.environ["OPENAI_API_KEY"] = "test"
+            with patch("gluellm.api.AnyLLM.create", return_value=mock_provider):
                 from gluellm.api import _safe_responses_call
 
                 await _safe_responses_call(
                     input_data="ping",
-                    model="openai:gpt-5.4-mini-2026-03-17",
+                    model="anthropic:claude-sonnet-4",
                 )
         finally:
-            if env_backup is None:
+            if base_backup is None:
                 os.environ.pop("OPENAI_BASE_URL", None)
             else:
-                os.environ["OPENAI_BASE_URL"] = env_backup
+                os.environ["OPENAI_BASE_URL"] = base_backup
+            if key_backup is None:
+                os.environ.pop("OPENAI_API_KEY", None)
+            else:
+                os.environ["OPENAI_API_KEY"] = key_backup
 
-        assert captured.get("model") == "openai:gpt-5.4-mini-2026-03-17"
+        assert captured.get("model") == "anthropic:claude-sonnet-4"
 
     async def test_aresponses_patch_restores_prefix_before_responses_create(self):
         """Monkeypatch must put provider:model back into params.model for gateway hosts."""

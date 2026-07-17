@@ -74,7 +74,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, field_s
 from pydantic.functional_validators import SkipValidation
 from gluellm.config import settings
 from gluellm.config import ToolExecutionOrder
-from gluellm.model_id import ensure_gateway_wire_model, wire_model_for_provider
+from gluellm.model_id import ensure_gateway_wire_model, openai_api_base_is_gateway, wire_model_for_provider
 from gluellm.tool_router import (
     ToolMode,
     build_router_tool,
@@ -468,6 +468,22 @@ class _ProviderCache:
         Returns:
             Tuple of (provider_instance, model_id) ready for acompletion()/_aembedding()
         """
+        if openai_api_base_is_gateway():
+            provider_name = "openai"
+            resolved_key = api_key
+            if resolved_key is None:
+                resolved_key = os.environ.get(PROVIDER_ENV_VAR_MAP["openai"])
+            cache_key = (provider_name, resolved_key)
+            with self._lock:
+                if cache_key not in self._providers:
+                    self._providers[cache_key] = AnyLLM.create(
+                        provider_name,
+                        api_key=resolved_key,
+                        http_client=_build_provider_http_client(),
+                    )
+                provider = self._providers[cache_key]
+            return provider, model
+
         if ":" in model:
             provider_name, model_id = model.split(":", 1)
         elif "/" in model:
@@ -2637,11 +2653,7 @@ async def _safe_responses_call(
             if correlation_id:
                 set_span_attributes(span, correlation_id=correlation_id)
 
-            provider, model_id = _provider_cache.get_provider(model, api_key)
-            # After provider:model split, gateways need the full id in responses.create
-            # kwargs (not the bare model_id). get_provider may already restore it;
-            # wire_model_for_provider is idempotent with the original model string.
-            wire_model = wire_model_for_provider(model, provider_name, model_id)
+            provider, wire_model = _provider_cache.get_provider(model, api_key)
 
             response = await asyncio.wait_for(
                 provider.aresponses(

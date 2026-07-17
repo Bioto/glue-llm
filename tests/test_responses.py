@@ -94,6 +94,34 @@ class TestResponsesBasic:
         assert mock.call_args.kwargs["model"] == "openai:gpt-5.4-mini-2026-03-17"
         assert mock.call_args.kwargs["provider"] == "openai"
 
+    async def test_responses_uses_openai_client_for_anthropic_model_when_gateway(self):
+        """responses() must route anthropic: models through openai when using a gateway."""
+        import os
+
+        mock_resp = SimpleNamespace(
+            output_text="pong",
+            output=[],
+            model="anthropic:claude-sonnet-4",
+            usage=SimpleNamespace(prompt_tokens=5, completion_tokens=1, total_tokens=6),
+        )
+
+        env_backup = os.environ.get("OPENAI_BASE_URL")
+        try:
+            os.environ["OPENAI_BASE_URL"] = "http://otari.example/v1"
+            with patch("any_llm.aresponses", new=AsyncMock(return_value=mock_resp)) as mock:
+                await responses(
+                    "ping",
+                    model="anthropic:claude-sonnet-4",
+                )
+        finally:
+            if env_backup is None:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            else:
+                os.environ["OPENAI_BASE_URL"] = env_backup
+
+        assert mock.call_args.kwargs["model"] == "anthropic:claude-sonnet-4"
+        assert mock.call_args.kwargs["provider"] == "openai"
+
 
 class TestResponseResultExtraction:
     """Tests for output extraction from various response formats."""

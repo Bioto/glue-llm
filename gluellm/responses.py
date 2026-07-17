@@ -135,23 +135,28 @@ async def responses(
         ... )
         >>> print(result.output)
     """
-    from gluellm.model_id import wire_model_for_provider
+    from gluellm.model_id import openai_api_base_is_gateway, wire_model_for_provider
     from gluellm.rate_limiting.api_key_pool import extract_provider_from_model
 
     original_model = model or settings.default_model
-    prov = provider or extract_provider_from_model(original_model)
 
-    if provider is None:
-        if ":" in original_model:
-            prov, model_id = original_model.split(":", 1)
-        elif "/" in original_model:
-            prov, model_id = original_model.split("/", 1)
+    if openai_api_base_is_gateway():
+        prov = "openai"
+        wire_model = original_model
+    else:
+        prov = provider or extract_provider_from_model(original_model)
+
+        if provider is None:
+            if ":" in original_model:
+                prov, model_id = original_model.split(":", 1)
+            elif "/" in original_model:
+                prov, model_id = original_model.split("/", 1)
+            else:
+                model_id = original_model
         else:
             model_id = original_model
-    else:
-        model_id = original_model
 
-    wire_model = wire_model_for_provider(original_model, prov, model_id)
+        wire_model = wire_model_for_provider(original_model, prov, model_id)
 
     call_kwargs: dict[str, Any] = {
         "provider": prov,
