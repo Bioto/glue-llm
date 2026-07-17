@@ -2590,6 +2590,118 @@ class TestWireModelForProvider:
         assert result == "openai:gpt-5.4-mini-2026-03-17"
         assert params.model == "openai:gpt-5.4-mini-2026-03-17"
 
+    def test_convert_completion_params_keeps_max_tokens_for_anthropic_wire_model(self):
+        """Gateway anthropic wire ids must not send max_completion_tokens to Otari."""
+        import gluellm.api as api_mod
+        from any_llm.types.completion import CompletionParams
+        from gluellm.api import _patch_any_llm_openai_gateway_max_tokens
+
+        openai_base = __import__("any_llm.providers.openai.base", fromlist=["BaseOpenAIProvider"])
+        BaseOpenAIProvider = openai_base.BaseOpenAIProvider
+        original_convert = BaseOpenAIProvider._convert_completion_params
+        original_flag = api_mod._any_llm_openai_gateway_max_tokens_patch_applied
+
+        params = CompletionParams(
+            model_id="anthropic:claude-sonnet-5",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=256,
+        )
+
+        try:
+            api_mod._any_llm_openai_gateway_max_tokens_patch_applied = False
+            _patch_any_llm_openai_gateway_max_tokens()
+            converted = BaseOpenAIProvider._convert_completion_params(params)
+        finally:
+            BaseOpenAIProvider._convert_completion_params = original_convert
+            api_mod._any_llm_openai_gateway_max_tokens_patch_applied = original_flag
+
+        assert converted.get("max_tokens") == 256
+        assert "max_completion_tokens" not in converted
+
+    def test_convert_completion_params_keeps_max_tokens_for_xai_wire_model(self):
+        """Non-OpenAI wire prefixes (xai, gemini, etc.) keep max_tokens after conversion."""
+        import gluellm.api as api_mod
+        from any_llm.types.completion import CompletionParams
+        from gluellm.api import _patch_any_llm_openai_gateway_max_tokens
+
+        openai_base = __import__("any_llm.providers.openai.base", fromlist=["BaseOpenAIProvider"])
+        BaseOpenAIProvider = openai_base.BaseOpenAIProvider
+        original_convert = BaseOpenAIProvider._convert_completion_params
+        original_flag = api_mod._any_llm_openai_gateway_max_tokens_patch_applied
+
+        params = CompletionParams(
+            model_id="xai:grok-2",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=128,
+        )
+
+        try:
+            api_mod._any_llm_openai_gateway_max_tokens_patch_applied = False
+            _patch_any_llm_openai_gateway_max_tokens()
+            converted = BaseOpenAIProvider._convert_completion_params(params)
+        finally:
+            BaseOpenAIProvider._convert_completion_params = original_convert
+            api_mod._any_llm_openai_gateway_max_tokens_patch_applied = original_flag
+
+        assert converted.get("max_tokens") == 128
+        assert "max_completion_tokens" not in converted
+
+    def test_convert_completion_params_keeps_max_completion_tokens_for_openai_wire_model(self):
+        """OpenAI wire ids (gpt-5 / o-series) still use max_completion_tokens through gateway."""
+        import gluellm.api as api_mod
+        from any_llm.types.completion import CompletionParams
+        from gluellm.api import _patch_any_llm_openai_gateway_max_tokens
+
+        openai_base = __import__("any_llm.providers.openai.base", fromlist=["BaseOpenAIProvider"])
+        BaseOpenAIProvider = openai_base.BaseOpenAIProvider
+        original_convert = BaseOpenAIProvider._convert_completion_params
+        original_flag = api_mod._any_llm_openai_gateway_max_tokens_patch_applied
+
+        params = CompletionParams(
+            model_id="openai:gpt-5.4-mini-2026-03-17",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=512,
+        )
+
+        try:
+            api_mod._any_llm_openai_gateway_max_tokens_patch_applied = False
+            _patch_any_llm_openai_gateway_max_tokens()
+            converted = BaseOpenAIProvider._convert_completion_params(params)
+        finally:
+            BaseOpenAIProvider._convert_completion_params = original_convert
+            api_mod._any_llm_openai_gateway_max_tokens_patch_applied = original_flag
+
+        assert converted.get("max_completion_tokens") == 512
+        assert "max_tokens" not in converted
+
+    def test_convert_completion_params_keeps_max_completion_tokens_for_bare_openai_model(self):
+        """Bare model ids default to openai and keep max_completion_tokens after conversion."""
+        import gluellm.api as api_mod
+        from any_llm.types.completion import CompletionParams
+        from gluellm.api import _patch_any_llm_openai_gateway_max_tokens
+
+        openai_base = __import__("any_llm.providers.openai.base", fromlist=["BaseOpenAIProvider"])
+        BaseOpenAIProvider = openai_base.BaseOpenAIProvider
+        original_convert = BaseOpenAIProvider._convert_completion_params
+        original_flag = api_mod._any_llm_openai_gateway_max_tokens_patch_applied
+
+        params = CompletionParams(
+            model_id="gpt-5.4-mini-2026-03-17",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=512,
+        )
+
+        try:
+            api_mod._any_llm_openai_gateway_max_tokens_patch_applied = False
+            _patch_any_llm_openai_gateway_max_tokens()
+            converted = BaseOpenAIProvider._convert_completion_params(params)
+        finally:
+            BaseOpenAIProvider._convert_completion_params = original_convert
+            api_mod._any_llm_openai_gateway_max_tokens_patch_applied = original_flag
+
+        assert converted.get("max_completion_tokens") == 512
+        assert "max_tokens" not in converted
+
 
 class TestCondenseToolRound:
     """Unit tests for the _condense_tool_round() utility.

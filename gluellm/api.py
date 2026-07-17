@@ -265,6 +265,7 @@ _current_agent: ContextVar["Agent | None"] = ContextVar("_current_agent", defaul
 _any_llm_openai_patch_applied = False
 _any_llm_openai_embedding_dimensions_patch_applied = False
 _any_llm_openai_gateway_responses_model_patch_applied = False
+_any_llm_openai_gateway_max_tokens_patch_applied = False
 
 
 def _convert_openai_chat_completion_without_parsed(response: Any) -> ChatCompletion:
@@ -328,6 +329,39 @@ def _patch_any_llm_openai_converter() -> None:
     _any_llm_openai_patch_applied = True
     _patch_any_llm_openai_embedding_dimensions()
     _patch_any_llm_openai_gateway_responses_model()
+    _patch_any_llm_openai_gateway_max_tokens()
+
+
+def _patch_any_llm_openai_gateway_max_tokens() -> None:
+    """Patch any_llm OpenAI ``_convert_completion_params`` for gateway wire provider prefixes.
+
+    any-llm always remaps ``max_tokens`` to ``max_completion_tokens``. Otari-style
+    gateways fan non-OpenAI wire ids (e.g. ``anthropic:…``) to native SDKs that
+    reject ``max_completion_tokens``. When the wire model prefix is not ``openai``,
+    remap back to ``max_tokens`` after the default OpenAI conversion.
+    """
+    global _any_llm_openai_gateway_max_tokens_patch_applied
+    if _any_llm_openai_gateway_max_tokens_patch_applied:
+        return
+
+    try:
+        openai_base = importlib.import_module("any_llm.providers.openai.base")
+        BaseOpenAIProvider = openai_base.BaseOpenAIProvider
+        original_convert = BaseOpenAIProvider._convert_completion_params
+    except Exception:
+        return
+
+    @staticmethod
+    def _patched_convert_completion_params(params: Any, **kwargs: Any) -> dict[str, Any]:
+        converted = original_convert(params, **kwargs)
+        model_id = getattr(params, "model_id", None) or ""
+        if isinstance(model_id, str) and extract_provider_from_model(model_id) != "openai":
+            if "max_completion_tokens" in converted:
+                converted["max_tokens"] = converted.pop("max_completion_tokens")
+        return converted
+
+    BaseOpenAIProvider._convert_completion_params = _patched_convert_completion_params
+    _any_llm_openai_gateway_max_tokens_patch_applied = True
 
 
 def _patch_any_llm_openai_gateway_responses_model() -> None:
