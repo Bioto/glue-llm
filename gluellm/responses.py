@@ -108,6 +108,10 @@ async def responses(
     Wraps any_llm.aresponses for the OpenResponses specification, providing
     built-in tools support (web search, code interpreter, file search).
 
+    When ``OPENAI_BASE_URL`` points at an OpenAI-compatible gateway such as Otari
+    (built on any-llm), this function uses ``provider="openai"`` and sends the
+    model id unchanged (e.g. ``anthropic:claude-sonnet-4``).
+
     Args:
         prompt: User prompt or input text.
         model: Model identifier (e.g. "gpt-4.1-mini"). Defaults to settings.default_model.

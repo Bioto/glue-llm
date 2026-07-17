@@ -1,4 +1,13 @@
-"""Model identifier helpers for provider routing vs wire format."""
+"""Model identifier helpers for provider routing vs wire format.
+
+GlueLLM supports OpenAI-compatible gateways such as `Otari` — an OpenAI-compatible
+LLM gateway built on `any-llm` (including the any-llm server). When
+``OPENAI_BASE_URL`` points at a gateway host (anything other than
+``api.openai.com``), all requests use the ``openai`` any_llm client and model
+ids are sent on the wire unchanged (e.g. ``anthropic:claude-sonnet-4``). The
+gateway fans out to upstream providers using its own credentials; the app only
+needs ``OPENAI_API_KEY``.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +31,11 @@ def _normalize_api_base_host(api_base: str) -> str | None:
 
 def openai_api_base_is_gateway(api_base: str | None = None) -> bool:
     """Return True when the OpenAI provider points at a non-OpenAI gateway.
+
+    Gateways such as Otari (an OpenAI-compatible gateway built on any-llm server)
+    are detected when ``OPENAI_BASE_URL`` resolves to a host other than
+    ``api.openai.com``. In that mode GlueLLM routes every model through the
+    openai client and passes ``provider:model`` ids through unchanged.
 
     Reads ``OPENAI_BASE_URL`` when *api_base* is not provided. Unset or empty
     values are treated as the default OpenAI host (not a gateway).

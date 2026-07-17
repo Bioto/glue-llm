@@ -542,6 +542,8 @@ flowchart TD
 2. Add API key to settings/environment
 3. Use model format: `provider:model_name`
 
+For multi-provider access through a single OpenAI-compatible endpoint, use a gateway such as [Otari](https://github.com/mozilla-ai/otari) (built on any-llm). Set `OPENAI_BASE_URL` to the gateway and GlueLLM routes all models through the openai client with full `provider:model` ids on the wire. See [CONFIGURATION.md](CONFIGURATION.md#openai-compatible-gateways-otari).
+
 ## Performance Considerations
 
 - **Rate Limiting:** Five algorithms (sliding window, fixed window, leaking bucket, token bucket, GCRA) via `throttled-py`. Memory or Redis backend. Configurable globally via `gluellm.configure()` or per-call via `RateLimitConfig`.

@@ -452,6 +452,10 @@ class _ProviderCache:
     connection pool is shared across requests, which prevents the
     'RuntimeError: Event loop is closed' error that occurs when abandoned
     AsyncOpenAI clients are garbage-collected after the event loop exits.
+
+    When ``OPENAI_BASE_URL`` points at an OpenAI-compatible gateway (e.g. Otari,
+    an any-llm-server-based gateway), all models are routed through the openai
+    client regardless of the ``provider:`` prefix on the model id.
     """
 
     def __init__(self) -> None:
@@ -467,6 +471,11 @@ class _ProviderCache:
 
         Returns:
             Tuple of (provider_instance, model_id) ready for acompletion()/_aembedding()
+
+        Gateway mode (``OPENAI_BASE_URL`` host != ``api.openai.com``):
+            Always creates the openai any_llm client (Otari and similar gateways
+            built on any-llm). Returns the original *model* string on the wire — no native Anthropic/Gemini/xAI
+            SDKs and no provider-prefixed env keys required.
         """
         if openai_api_base_is_gateway():
             provider_name = "openai"

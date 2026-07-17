@@ -155,3 +155,24 @@ Use `provider:model_name` or `provider/model_name`:
 - `xai:grok-2`
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for full configuration details.
+
+## OpenAI-compatible gateways (Otari)
+
+[Otari](https://github.com/mozilla-ai/otari) is an OpenAI-compatible LLM gateway built on [any-llm](https://github.com/mozilla-ai/any-llm) (including the any-llm server/gateway). GlueLLM is tested against Otari for multi-provider routing.
+
+Point the openai client at Otari and use a virtual key:
+
+```bash
+OPENAI_BASE_URL=http://localhost:8000/v1
+OPENAI_API_KEY=your-otari-virtual-key
+```
+
+When `OPENAI_BASE_URL` resolves to a host other than `api.openai.com`, GlueLLM enters **gateway mode**:
+
+1. All requests use the **openai** any_llm client (no native Anthropic/Gemini/xAI SDKs).
+2. Model ids are sent on the wire **unchanged** — e.g. `anthropic:claude-sonnet-4`, `openai:gpt-4o-mini`.
+3. Only `OPENAI_API_KEY` is required in the app; Otari holds upstream provider credentials.
+
+Use the same `provider:model` format you would for direct provider access. Bare ids (no prefix) are passed through as-is; Otari accepts them according to its own routing rules.
+
+Without a gateway (`OPENAI_BASE_URL` unset or `https://api.openai.com/v1`), GlueLLM routes each prefix to the matching native provider and the corresponding env key (`ANTHROPIC_API_KEY`, etc.).
