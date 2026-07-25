@@ -613,9 +613,9 @@ class TestStructuredOutputEdgeCases:
 
     async def test_enum_fields_in_structured_output(self):
         """Test structured output with enum fields."""
-        from enum import Enum
+        from enum import StrEnum
 
-        class Status(str, Enum):
+        class Status(StrEnum):
             ACTIVE = "active"
             INACTIVE = "inactive"
             PENDING = "pending"
@@ -854,6 +854,106 @@ class TestStructuredResponse:
         assert text_param["format"]["strict"] is True
         assert "x" in text_param["format"]["schema"]["properties"]
 
+    def test_normalize_response_input_content_parts_adds_image_detail_default(self):
+        from gluellm.api import _normalize_response_input_content_parts
+
+        parts = _normalize_response_input_content_parts(
+            [{"type": "input_image", "image_url": "https://example.com/x.png"}]
+        )
+        assert parts[0]["detail"] == "auto"
+
+    @patch("gluellm.api._safe_responses_call")
+    async def test_structured_response_passes_multimodal_input_image_through_unchanged(
+        self, mock_safe_call
+    ):
+        """Multimodal input on structured_response() reaches the wire layer with detail=auto."""
+
+        class TestModel(BaseModel):
+            description: str
+
+        mock_safe_call.return_value = self._make_response(text='{"description": "a sunset"}')
+
+        image_url = "https://example.com/sunset.png"
+        client = GlueLLM(model="openai:gpt-5.4-2026-03-05")
+        await client.structured_response(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "What is in this image?"},
+                        {"type": "input_image", "image_url": image_url},
+                    ],
+                }
+            ],
+            TestModel,
+        )
+
+        forwarded_input = mock_safe_call.call_args.kwargs["input_data"]
+        user_items = [
+            it for it in forwarded_input if isinstance(it, dict) and it.get("role") == "user"
+        ]
+        image_parts = [
+            p
+            for item in user_items
+            for p in (item.get("content") if isinstance(item.get("content"), list) else [])
+            if isinstance(p, dict) and p.get("type") == "input_image"
+        ]
+        assert len(image_parts) == 1
+        assert image_parts[0]["image_url"] == image_url
+        assert image_parts[0]["detail"] == "auto"
+
+    @patch("gluellm.api._provider_supports_responses", return_value=False)
+    async def test_structured_response_falls_back_to_structured_complete_when_provider_lacks_responses(
+        self, _mock_supports
+    ):
+        class Answer(BaseModel):
+            value: int
+
+        client = GlueLLM(model="anthropic:claude-3-5-sonnet-20241022")
+        with patch.object(
+            client,
+            "structured_complete",
+            new_callable=AsyncMock,
+            return_value=ExecutionResult(
+                final_response='{"value": 1}',
+                structured_output=Answer(value=1),
+                tool_calls_made=0,
+                tool_execution_history=[],
+            ),
+        ) as mock_structured_complete:
+            result = await client.structured_response("hi", Answer)
+
+        mock_structured_complete.assert_awaited_once()
+        assert result.structured_output == Answer(value=1)
+
+    @patch("gluellm.api._provider_supports_responses", return_value=False)
+    async def test_response_falls_back_to_complete_when_provider_lacks_responses(self, _mock_supports):
+        client = GlueLLM(model="anthropic:claude-3-5-sonnet-20241022")
+        with patch.object(
+            client,
+            "complete",
+            new_callable=AsyncMock,
+            return_value=ExecutionResult(
+                final_response="hello",
+                tool_calls_made=0,
+                tool_execution_history=[],
+            ),
+        ) as mock_complete:
+            result = await client.response("hi")
+
+        mock_complete.assert_awaited_once()
+        assert result.final_response == "hello"
+
+    @patch("gluellm.api._provider_supports_responses", return_value=False)
+    async def test_response_raises_for_multimodal_list_when_provider_lacks_responses(self, _mock_supports):
+        from gluellm.api import InvalidRequestError
+
+        client = GlueLLM(model="anthropic:claude-3-5-sonnet-20241022")
+        with pytest.raises(InvalidRequestError, match="Responses-input lists"):
+            await client.response(
+                [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+            )
+
     @patch("gluellm.api._safe_responses_call")
     async def test_structured_response_executes_tools_in_loop(self, mock_safe_call):
         """Function-call output items trigger tool execution and feed back results."""
@@ -987,8 +1087,8 @@ class TestStructuredResponse:
 
         Regression: these would cause ``responses.create`` to error if forwarded.
         """
-        from gluellm.api import _safe_responses_call as real_safe
         from gluellm.api import _PROVIDER_ARESPONSES_SKIP_KEYS
+        from gluellm.api import _safe_responses_call as real_safe
 
         class TestModel(BaseModel):
             v: int
@@ -1647,6 +1747,8 @@ class TestStatusEmitterObservability:
         error_events = [e for e in events if e.kind == "llm_call_error"]
         assert len(error_events) == 1
         assert error_events[0].error_type == "RateLimitError"
+        assert error_events[0].message_count == 2
+        assert error_events[0].success is False
 
 
 class TestStreamCompleteWithTools:
@@ -2082,11 +2184,10 @@ class TestProviderCache:
 
     async def test_provider_cache_handles_slash_separator_for_embeddings(self):
         """Embedding models use 'provider/model' format — the cache must parse it correctly."""
+        import os
         from unittest.mock import MagicMock, patch
 
         from gluellm.api import _ProviderCache
-
-        import os
 
         cache = _ProviderCache()
         fake_provider = MagicMock()
@@ -2135,7 +2236,7 @@ class TestProviderCache:
 
         import httpx
 
-        from gluellm.api import _ProviderCache, _build_provider_http_client
+        from gluellm.api import _build_provider_http_client, _ProviderCache
         from gluellm.config import settings
 
         cache = _ProviderCache()
@@ -2592,13 +2693,16 @@ class TestWireModelForProvider:
 
     def test_convert_completion_params_keeps_max_tokens_for_anthropic_wire_model(self):
         """Gateway anthropic wire ids must not send max_completion_tokens to Otari."""
-        import gluellm.api as api_mod
         from any_llm.types.completion import CompletionParams
+
+        import gluellm.api as api_mod
         from gluellm.api import _patch_any_llm_openai_gateway_max_tokens
 
         openai_base = __import__("any_llm.providers.openai.base", fromlist=["BaseOpenAIProvider"])
         BaseOpenAIProvider = openai_base.BaseOpenAIProvider
-        original_convert = BaseOpenAIProvider._convert_completion_params
+        # Save the descriptor from __dict__ — attribute lookup unwraps staticmethod and
+        # restoring a bare function breaks later ``self._convert_completion_params(...)``.
+        original_convert = BaseOpenAIProvider.__dict__["_convert_completion_params"]
         original_flag = api_mod._any_llm_openai_gateway_max_tokens_patch_applied
 
         params = CompletionParams(
@@ -2620,13 +2724,14 @@ class TestWireModelForProvider:
 
     def test_convert_completion_params_keeps_max_tokens_for_xai_wire_model(self):
         """Non-OpenAI wire prefixes (xai, gemini, etc.) keep max_tokens after conversion."""
-        import gluellm.api as api_mod
         from any_llm.types.completion import CompletionParams
+
+        import gluellm.api as api_mod
         from gluellm.api import _patch_any_llm_openai_gateway_max_tokens
 
         openai_base = __import__("any_llm.providers.openai.base", fromlist=["BaseOpenAIProvider"])
         BaseOpenAIProvider = openai_base.BaseOpenAIProvider
-        original_convert = BaseOpenAIProvider._convert_completion_params
+        original_convert = BaseOpenAIProvider.__dict__["_convert_completion_params"]
         original_flag = api_mod._any_llm_openai_gateway_max_tokens_patch_applied
 
         params = CompletionParams(
@@ -2648,13 +2753,14 @@ class TestWireModelForProvider:
 
     def test_convert_completion_params_keeps_max_completion_tokens_for_openai_wire_model(self):
         """OpenAI wire ids (gpt-5 / o-series) still use max_completion_tokens through gateway."""
-        import gluellm.api as api_mod
         from any_llm.types.completion import CompletionParams
+
+        import gluellm.api as api_mod
         from gluellm.api import _patch_any_llm_openai_gateway_max_tokens
 
         openai_base = __import__("any_llm.providers.openai.base", fromlist=["BaseOpenAIProvider"])
         BaseOpenAIProvider = openai_base.BaseOpenAIProvider
-        original_convert = BaseOpenAIProvider._convert_completion_params
+        original_convert = BaseOpenAIProvider.__dict__["_convert_completion_params"]
         original_flag = api_mod._any_llm_openai_gateway_max_tokens_patch_applied
 
         params = CompletionParams(
@@ -2676,13 +2782,14 @@ class TestWireModelForProvider:
 
     def test_convert_completion_params_keeps_max_completion_tokens_for_bare_openai_model(self):
         """Bare model ids default to openai and keep max_completion_tokens after conversion."""
-        import gluellm.api as api_mod
         from any_llm.types.completion import CompletionParams
+
+        import gluellm.api as api_mod
         from gluellm.api import _patch_any_llm_openai_gateway_max_tokens
 
         openai_base = __import__("any_llm.providers.openai.base", fromlist=["BaseOpenAIProvider"])
         BaseOpenAIProvider = openai_base.BaseOpenAIProvider
-        original_convert = BaseOpenAIProvider._convert_completion_params
+        original_convert = BaseOpenAIProvider.__dict__["_convert_completion_params"]
         original_flag = api_mod._any_llm_openai_gateway_max_tokens_patch_applied
 
         params = CompletionParams(
@@ -2701,6 +2808,42 @@ class TestWireModelForProvider:
 
         assert converted.get("max_completion_tokens") == 512
         assert "max_tokens" not in converted
+
+    def test_convert_completion_params_patch_restore_keeps_instance_bound_callable(self):
+        """Patch teardown must not leave a bare function that breaks instance calls."""
+        from any_llm.types.completion import CompletionParams
+
+        import gluellm.api as api_mod
+        from gluellm.api import _patch_any_llm_openai_gateway_max_tokens
+
+        openai_base = __import__("any_llm.providers.openai.base", fromlist=["BaseOpenAIProvider"])
+        BaseOpenAIProvider = openai_base.BaseOpenAIProvider
+        original_convert = BaseOpenAIProvider.__dict__["_convert_completion_params"]
+        original_flag = api_mod._any_llm_openai_gateway_max_tokens_patch_applied
+
+        params = CompletionParams(
+            model_id="openai:gpt-4o-mini",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=16,
+        )
+
+        try:
+            api_mod._any_llm_openai_gateway_max_tokens_patch_applied = False
+            _patch_any_llm_openai_gateway_max_tokens()
+            _ = BaseOpenAIProvider._convert_completion_params(params)
+        finally:
+            BaseOpenAIProvider._convert_completion_params = original_convert
+            api_mod._any_llm_openai_gateway_max_tokens_patch_applied = original_flag
+
+        assert isinstance(BaseOpenAIProvider.__dict__["_convert_completion_params"], staticmethod)
+
+        class _Holder:
+            _convert_completion_params = BaseOpenAIProvider.__dict__["_convert_completion_params"]
+
+        # any_llm calls ``self._convert_completion_params(params, **kwargs)``; a bare
+        # function restored onto the class would raise TypeError here.
+        converted = _Holder()._convert_completion_params(params)
+        assert "max_completion_tokens" in converted or "max_tokens" in converted
 
 
 class TestCondenseToolRound:
@@ -3578,6 +3721,34 @@ class TestDualTimeoutParameters:
         assert timeout.write == 30.0
         assert timeout.pool == settings.default_pool_timeout
 
+    async def test_httpx_timeout_not_injected_for_grpc_providers(self):
+        """gRPC/SDK providers must not receive httpx.Timeout in model_kwargs."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        captured_model_kwargs = {}
+
+        async def capture_and_return(*args, **kwargs):
+            captured_model_kwargs.clear()
+            captured_model_kwargs.update(kwargs)
+            return self._make_fake_completion()
+
+        mock_provider = MagicMock()
+        mock_provider.acompletion = AsyncMock(side_effect=capture_and_return)
+
+        with patch("gluellm.api._provider_cache") as mock_cache:
+            mock_cache.get_provider = lambda model, api_key: (mock_provider, "grok-2-1212")
+
+            from gluellm.api import _safe_llm_call
+
+            await _safe_llm_call(
+                messages=[{"role": "user", "content": "hi"}],
+                model="xai:grok-2-1212",
+                request_timeout=30.0,
+                connect_timeout=5.0,
+            )
+
+        assert "timeout" not in captured_model_kwargs
+
     async def test_module_complete_passes_both_timeouts_to_client(self):
         """Module-level complete() passes request_timeout and connect_timeout to GlueLLM.complete."""
         captured_kwargs = {}
@@ -4205,24 +4376,26 @@ class TestNewParameters:
 
 
 class TestReasoningEffortOpenAIIntegration:
-    """Live OpenAI: unsupported models must surface provider errors for reasoning_effort."""
+    """Live OpenAI: unsupported reasoning_effort is omitted before the provider call."""
 
     @pytest.mark.integration
-    async def test_complete_raises_llm_error_when_openai_model_does_not_support_reasoning_effort(
+    async def test_complete_succeeds_when_openai_model_does_not_support_reasoning_effort(
         self,
     ):
+        """gpt-4o-mini rejects reasoning_effort at the API; GlueLLM drops it first."""
         import os
 
         key = os.environ.get("OPENAI_API_KEY", "").strip()
         if not key or key == "sk-test":
             pytest.skip("OPENAI_API_KEY not set or placeholder")
 
-        with pytest.raises(LLMError):
-            await complete(
-                user_message="Reply with the single word: hi",
-                model="openai:gpt-4o-mini",
-                reasoning_effort="high",
-            )
+        result = await complete(
+            user_message="Reply with the single word: hi",
+            model="openai:gpt-4o-mini",
+            reasoning_effort="high",
+        )
+        assert result.final_response
+        assert "hi" in result.final_response.lower()
 
 
 # ---------------------------------------------------------------------------

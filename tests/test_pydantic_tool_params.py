@@ -8,7 +8,7 @@ needed.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated, Literal
 
 import pytest
@@ -316,7 +316,7 @@ class TestScalarParameterBaseline:
 # ---------------------------------------------------------------------------
 
 
-class Priority(str, Enum):
+class Priority(StrEnum):
     """Task priority level."""
 
     LOW = "low"
@@ -768,7 +768,7 @@ class Company(BaseModel):
 # --- Order / e-commerce models ---
 
 
-class ProductCategory(str, Enum):
+class ProductCategory(StrEnum):
     ELECTRONICS = "electronics"
     CLOTHING = "clothing"
     FOOD = "food"
@@ -810,7 +810,7 @@ class OrderLine(BaseModel):
         return self.product.unit_price_usd * self.quantity * (1 - self.discount_pct / 100)
 
 
-class CustomerTier(str, Enum):
+class CustomerTier(StrEnum):
     STANDARD = "standard"
     SILVER = "silver"
     GOLD = "gold"

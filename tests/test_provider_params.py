@@ -1,5 +1,7 @@
 """Tests for provider-specific parameter normalization."""
 
+from unittest.mock import patch
+
 import pytest
 
 from gluellm.provider_params import (
@@ -135,10 +137,11 @@ class TestReasoningEffortNormalization:
         [
             ("o3-mini", "xhigh", "high"),
             ("o3-mini", "high", "high"),
-            ("o3-mini", "minimal", "low"),
+            ("o3-mini", "minimal", "minimal"),
             ("gpt-5-mini-2025-08-07", "xhigh", "high"),
             ("gpt-5.4-2026-03-05", "xhigh", "xhigh"),
-            ("gpt-5.1-2025-11-13", "xhigh", "xhigh"),
+            ("gpt-5.1-2025-11-13", "xhigh", "high"),
+            ("gpt-5.1-2025-11-13", "minimal", "none"),
         ],
     )
     async def test_openai_reasoning_effort_downgraded_to_supported(self, model, effort, expected):
@@ -203,3 +206,71 @@ class TestReasoningEffortNormalization:
             reasoning_summary="concise",
         )
         assert kwargs == {"reasoning": {"summary": "concise"}}
+
+
+class TestStructuredJsonParseRetry:
+    def test_should_retry_error_returns_true_for_structured_json_parse_failures(self):
+        from gluellm.api import InvalidRequestError, should_retry_error
+
+        error = InvalidRequestError(
+            "Invalid request: validation error: invalid json: trailing characters at line 1"
+        )
+        assert should_retry_error(error) is True
+
+
+class TestNormalizeModelParamsReasoningEffort:
+    async def test_supported_openai_reasoning_effort_passes_through(self):
+        """Supported OpenAI reasoning_effort values are preserved."""
+        _, kwargs = normalize_model_params("openai:gpt-5.4-2026-03-05", None, {"reasoning_effort": "xhigh"})
+
+        assert kwargs["reasoning_effort"] == "xhigh"
+
+    async def test_unsupported_openai_reasoning_effort_maps_to_lower_supported_value(self):
+        """Unsupported OpenAI reasoning_effort values fall back before provider calls."""
+        with patch("gluellm.provider_params.logger.warning") as mock_warning:
+            _, kwargs = normalize_model_params("openai:gpt-5.1-2025-11-13", None, {"reasoning_effort": "xhigh"})
+
+        assert kwargs["reasoning_effort"] == "high"
+        assert mock_warning.call_args.args == (
+            "OpenAI model %s does not support reasoning effort %s; using %s instead",
+            "gpt-5.1-2025-11-13",
+            "xhigh",
+            "high",
+        )
+
+    async def test_unsupported_openai_reasoning_effort_maps_minimal_to_none_when_supported(self):
+        """Unsupported minimal effort can fall back to none on models that support it."""
+        with patch("gluellm.provider_params.logger.warning") as mock_warning:
+            _, kwargs = normalize_model_params("openai:gpt-5.1-2025-11-13", None, {"reasoning_effort": "minimal"})
+
+        assert kwargs["reasoning_effort"] == "none"
+        assert mock_warning.call_args.args == (
+            "OpenAI model %s does not support reasoning effort %s; using %s instead",
+            "gpt-5.1-2025-11-13",
+            "minimal",
+            "none",
+        )
+
+    async def test_unsupported_openai_reasoning_effort_without_lower_supported_value_is_dropped(self):
+        """If no lower GlueLLM effort is supported by OpenAI, omit the effort."""
+        with patch("gluellm.provider_params.logger.warning") as mock_warning:
+            _, kwargs = normalize_model_params("openai:gpt-5-pro", None, {"reasoning_effort": "medium"})
+
+        assert "reasoning_effort" not in kwargs
+        assert mock_warning.call_args.args == (
+            "OpenAI model %s does not support reasoning effort %s and no lower supported GlueLLM effort exists; omitting it",
+            "gpt-5-pro",
+            "medium",
+        )
+
+    async def test_openai_model_without_reasoning_support_drops_reasoning_effort(self):
+        """OpenAI models without reasoning support do not receive reasoning_effort."""
+        with patch("gluellm.provider_params.logger.warning") as mock_warning:
+            _, kwargs = normalize_model_params("openai:gpt-4o-mini", None, {"reasoning_effort": "high"})
+
+        assert "reasoning_effort" not in kwargs
+        assert mock_warning.call_args.args == (
+            "OpenAI model %s does not support reasoning_effort; omitting unsupported effort %s",
+            "gpt-4o-mini",
+            "high",
+        )

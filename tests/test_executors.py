@@ -1,6 +1,6 @@
 """Tests for executor implementations — SimpleExecutor, AgentExecutor, AgentStructuredExecutor."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import BaseModel
@@ -158,13 +158,12 @@ class TestAgentStructuredExecutor:
     async def test_returns_execution_result_with_structured_output(self):
         agent = self._make_agent()
         resp = _fake_responses_response('{"value": 42}')
-        with patch("gluellm.api._responses_call_with_retry", return_value=resp):
-            with patch(
-                "gluellm.api._extract_response_parsed",
-                return_value={"value": 42},
-            ):
-                executor = AgentStructuredExecutor(agent, response_format=self.Answer)
-                result = await executor.execute("What is 6*7?")
+        with patch("gluellm.api._responses_call_with_retry", return_value=resp), patch(
+            "gluellm.api._extract_response_parsed",
+            return_value={"value": 42},
+        ):
+            executor = AgentStructuredExecutor(agent, response_format=self.Answer)
+            result = await executor.execute("What is 6*7?")
         assert isinstance(result, ExecutionResult)
         assert result.structured_output is not None
         assert result.structured_output.value == 42

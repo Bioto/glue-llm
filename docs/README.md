@@ -67,7 +67,10 @@ Documentation for the GlueLLM LLM orchestration framework.
 
 See the [examples/](../examples/) directory for runnable code:
 - `basic_usage.py` - Simple completion
-- `batch_processing.py` - Batch processing
+- `response_example.py` - Plain-text via `response()` (Responses API)
+- `structured_response_example.py` - Pydantic output via `structured_response()`
+- `multimodal_image_example.py` - Image input (`input_image`, `detail`, file_id)
+- `batch_processing.py` - Batch processing (incl. `reasoning_effort`, `on_status`)
 - `workflow_example.py` - Workflows
 - `hooks_example.py` - Hooks
 - And more.

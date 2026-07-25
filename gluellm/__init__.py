@@ -175,6 +175,7 @@ from gluellm.schema import (
     create_normalized_model,
     create_openai_response_format,
     normalize_schema_for_openai,
+    sanitize_schema_name,
 )
 from gluellm.resilience.fallback import ModelFallbackConfig
 from gluellm.tool_router import ToolMode, static_tool
@@ -326,6 +327,7 @@ __all__ = [
     "normalize_schema_for_openai",
     "create_normalized_model",
     "create_openai_response_format",
+    "sanitize_schema_name",
     # Hooks
     "HookStage",
     "HookConfig",

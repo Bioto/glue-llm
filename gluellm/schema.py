@@ -28,11 +28,50 @@ Usage:
 
 import copy
 import logging
+import re
 from typing import Any
 
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+# OpenAI structured-output schema names must match this pattern (and be <= 64 chars).
+_SCHEMA_NAME_ALLOWED = re.compile(r"^[a-zA-Z0-9_-]+$")
+_SCHEMA_NAME_ILLEGAL = re.compile(r"[^a-zA-Z0-9_-]+")
+_SCHEMA_NAME_MAX_LEN = 64
+_SCHEMA_NAME_FALLBACK = "Schema"
+
+
+def sanitize_schema_name(name: str | None) -> str:
+    """Coerce a model name into an OpenAI-compatible structured-output name.
+
+    OpenAI's Responses (``text.format.name``) and Chat Completions
+    (``json_schema.name``) APIs require the schema name to match
+    ``^[a-zA-Z0-9_-]+$`` and be at most 64 characters. Pydantic exposes names
+    that can violate this - most notably parametrized generics, whose
+    ``__name__`` embeds the type args in brackets (e.g. ``Box[int]``,
+    ``Box[list[int]]``, ``Wrapper[int, str]``). Any illegal run of characters
+    is collapsed to a single underscore.
+
+    Examples:
+        >>> sanitize_schema_name("MixedStructuredAnswer")
+        'MixedStructuredAnswer'
+        >>> sanitize_schema_name("Box[int]")
+        'Box_int'
+        >>> sanitize_schema_name("Wrapper[int, str]")
+        'Wrapper_int_str'
+    """
+    raw = (name or "").strip()
+    if _SCHEMA_NAME_ALLOWED.match(raw) and len(raw) <= _SCHEMA_NAME_MAX_LEN:
+        return raw
+
+    sanitized = _SCHEMA_NAME_ILLEGAL.sub("_", raw).strip("_")
+    sanitized = sanitized[:_SCHEMA_NAME_MAX_LEN].strip("_")
+    if not sanitized:
+        sanitized = _SCHEMA_NAME_FALLBACK
+    if sanitized != raw:
+        logger.debug("Sanitized structured-output schema name %r -> %r", raw, sanitized)
+    return sanitized
 
 
 def normalize_schema_for_openai(
@@ -335,7 +374,7 @@ def create_openai_response_format(
     return {
         "type": "json_schema",
         "json_schema": {
-            "name": model.__name__,
+            "name": sanitize_schema_name(model.__name__),
             "schema": schema,
             "strict": strict,
         },

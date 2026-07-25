@@ -327,6 +327,15 @@ print(result.reasoning_trace)
 - **`ExecutionResult.response_id`**: final Responses API id when using `response()` / `structured_response()`.
 - **`ExecutionResult.reasoning_trace`**: reasoning summary text when `reasoning_summary` is set.
 
+### Responses API fallback
+
+`response()` and `structured_response()` prefer the OpenAI Responses API when the
+configured provider supports it. On providers without Responses support (e.g.
+direct Anthropic), GlueLLM automatically falls back to `complete()` /
+`structured_complete()` for **string** inputs — same orchestration (tools,
+guardrails, hooks), different wire protocol. Multimodal `ResponseInputParam`
+lists require a Responses-capable provider; see `examples/multimodal_image_example.py`.
+
 ## See Also
 
 - [CONFIGURATION.md](CONFIGURATION.md) - Configuration system

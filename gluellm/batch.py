@@ -13,8 +13,9 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from gluellm.api import GlueLLM, OnStatusCallback, _build_cause_chain
-from gluellm.events import Sink, StatusEmitter
+from gluellm.events import ProcessEvent, Sink, StatusEmitter
 from gluellm.hooks.manager import HookManager, _get_global_registry
+from gluellm.models.agent import ReasoningEffort
 from gluellm.models.batch import (
     APIKeyConfig,
     BatchConfig,
@@ -57,6 +58,7 @@ class BatchProcessor:
         system_prompt: str | None = None,
         tools: list[Callable] | None = None,
         max_tool_iterations: int | None = None,
+        reasoning_effort: ReasoningEffort | None = None,
         config: BatchConfig | None = None,
         hook_registry: HookRegistry | None = None,
         on_status: OnStatusCallback = None,
@@ -70,19 +72,22 @@ class BatchProcessor:
             system_prompt: Default system prompt
             tools: Default tools
             max_tool_iterations: Default max tool iterations
+            reasoning_effort: Optional reasoning effort for reasoning models
             config: Batch processing configuration
             hook_registry: Optional instance-level hook registry
+            on_status: Optional process-event callback for every batch item
+            sinks: Optional process-event sinks for every batch item
+            status_emitter: Optional pre-built status emitter (overrides on_status/sinks)
         """
         self.model = model
         self.system_prompt = system_prompt
         self.tools = tools
         self.max_tool_iterations = max_tool_iterations
+        self.reasoning_effort = reasoning_effort
         self.config = config or BatchConfig()
         self._hook_registry = hook_registry or HookRegistry()
         self._hook_manager = HookManager()
-        self.on_status = on_status
-        self.sinks = sinks
-        self.status_emitter = status_emitter
+        self._status_emitter = status_emitter or StatusEmitter(on_status=on_status, sinks=sinks)
         # Initialize API key pool if keys are provided
         self.key_pool: APIKeyPool | None = None
         if self.config.api_keys:
@@ -197,9 +202,41 @@ class BatchProcessor:
         async with semaphore:
             start_time = time.time()
             request_id = request.id or f"batch-{uuid.uuid4()}"
+            llm_call_open = False
+            last_llm_call_start: ProcessEvent | None = None
             merged = self._get_merged_hook_registry()
             pre_batch_hooks = merged.get_hooks(HookStage.PRE_BATCH_ITEM)
             post_batch_hooks = merged.get_hooks(HookStage.POST_BATCH_ITEM)
+
+            async def forward_status(event: ProcessEvent) -> None:
+                nonlocal last_llm_call_start, llm_call_open
+                if event.kind == "llm_call_start":
+                    last_llm_call_start = event
+                    llm_call_open = True
+                elif event.kind in {"llm_call_end", "llm_call_error"}:
+                    llm_call_open = False
+                await self._status_emitter.emit(event)
+
+            async def emit_open_llm_call_error(exc: Exception) -> None:
+                nonlocal llm_call_open
+                if not self._status_emitter.has_observers or not llm_call_open or last_llm_call_start is None:
+                    return
+                llm_call_open = False
+                await self._status_emitter.emit(
+                    ProcessEvent(
+                        kind="llm_call_error",
+                        correlation_id=last_llm_call_start.correlation_id or request_id,
+                        timestamp=time.time(),
+                        iteration=last_llm_call_start.iteration,
+                        model=last_llm_call_start.model or self.model,
+                        message_count=last_llm_call_start.message_count,
+                        success=False,
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                )
+
+            on_status = forward_status if self._status_emitter.has_observers else None
 
             logger.debug(f"Processing request {request_id}: {request.user_message[:50]}...")
 
@@ -234,14 +271,10 @@ class BatchProcessor:
                         tools=request.tools if request.tools is not None else self.tools,
                         max_tool_iterations=request.max_tool_iterations or self.max_tool_iterations,
                         tool_execution_order=request.tool_execution_order,
+                        reasoning_effort=self.reasoning_effort,
                         hook_registry=self._hook_registry,
-                        status_emitter=self.status_emitter,
+                        status_emitter=self._status_emitter,
                     )
-
-                    status_kwargs = {
-                        "on_status": self.on_status,
-                        "sinks": self.sinks,
-                    }
 
                     # Execute the request — structured or plain
                     if request.response_format is not None:
@@ -253,7 +286,7 @@ class BatchProcessor:
                             request_timeout=request.timeout,
                             api_key=api_key,
                             tool_execution_order=request.tool_execution_order,
-                            **status_kwargs,
+                            on_status=on_status,
                         )
                     else:
                         result = await client.complete(
@@ -263,7 +296,7 @@ class BatchProcessor:
                             request_timeout=request.timeout,
                             api_key=api_key,
                             tool_execution_order=request.tool_execution_order,
-                            **status_kwargs,
+                            on_status=on_status,
                         )
 
                     elapsed_time = time.time() - start_time
@@ -300,6 +333,7 @@ class BatchProcessor:
                     return batch_result
 
                 except Exception as e:
+                    await emit_open_llm_call_error(e)
                     last_exception = e
                     elapsed_time = time.time() - start_time
                     error_type = type(e).__name__
@@ -366,6 +400,7 @@ async def batch_complete(
     system_prompt: str | None = None,
     tools: list[Callable] | None = None,
     max_tool_iterations: int | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
     config: BatchConfig | None = None,
     on_status: OnStatusCallback = None,
     sinks: list[Sink] | None = None,
@@ -405,6 +440,7 @@ async def batch_complete(
         system_prompt=system_prompt,
         tools=tools,
         max_tool_iterations=max_tool_iterations,
+        reasoning_effort=reasoning_effort,
         config=config,
         on_status=on_status,
         sinks=sinks,
@@ -466,6 +502,7 @@ async def batch_structured_complete(
     system_prompt: str | None = None,
     tools: list[Callable] | None = None,
     max_tool_iterations: int | None = None,
+    reasoning_effort: ReasoningEffort | None = None,
     config: BatchConfig | None = None,
 ) -> BatchResponse:
     """Process a batch of messages and return structured outputs.
@@ -516,6 +553,7 @@ async def batch_structured_complete(
         system_prompt=system_prompt,
         tools=tools,
         max_tool_iterations=max_tool_iterations,
+        reasoning_effort=reasoning_effort,
         config=config,
     )
     return await processor.process(requests)

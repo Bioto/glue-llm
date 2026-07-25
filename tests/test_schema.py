@@ -591,3 +591,72 @@ class TestSchemaCompatibility:
         # Should not crash and should have proper structure
         assert schema.get("strict") is True
         assert schema.get("additionalProperties") is False
+
+
+class TestSanitizeSchemaName:
+    """Tests for sanitize_schema_name (OpenAI structured-output name constraints)."""
+
+    PATTERN = r"^[a-zA-Z0-9_-]+$"
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("MixedStructuredAnswer", "MixedStructuredAnswer"),
+            ("Snake_case-Name", "Snake_case-Name"),
+            ("Box[int]", "Box_int"),
+            ("Box[str]", "Box_str"),
+            ("Box[list[int]]", "Box_list_int"),
+            ("Wrapper[int, str]", "Wrapper_int_str"),
+            ("node_type=key_issues node_id=key_issues", "node_type_key_issues_node_id_key_issues"),
+            ("key.issues", "key_issues"),
+            ("key/issues", "key_issues"),
+        ],
+    )
+    def test_sanitizes_to_expected(self, raw: str, expected: str):
+        from gluellm.schema import sanitize_schema_name
+
+        assert sanitize_schema_name(raw) == expected
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "Box[int]",
+            "Wrapper[int, str]",
+            "key.issues",
+            "!!!",
+            "",
+            None,
+            "x" * 200,
+        ],
+    )
+    def test_always_matches_openai_pattern(self, raw):
+        import re
+
+        from gluellm.schema import sanitize_schema_name
+
+        name = sanitize_schema_name(raw)
+        assert re.match(self.PATTERN, name), f"{name!r} does not match pattern"
+        assert 1 <= len(name) <= 64
+
+    def test_empty_and_all_illegal_use_fallback(self):
+        from gluellm.schema import sanitize_schema_name
+
+        assert sanitize_schema_name("") == "Schema"
+        assert sanitize_schema_name(None) == "Schema"
+        assert sanitize_schema_name("[]") == "Schema"
+
+    def test_generic_model_name_is_valid_in_responses_payload(self):
+        import re
+        from typing import Generic, TypeVar
+
+        from gluellm.api import _build_responses_text_format
+
+        t = TypeVar("t")
+
+        class Box(BaseModel, Generic[t]):
+            value: t
+
+        payload = _build_responses_text_format(Box[int])
+        assert payload is not None
+        name = payload["format"]["name"]
+        assert re.match(self.PATTERN, name), name

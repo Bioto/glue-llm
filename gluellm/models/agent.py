@@ -11,6 +11,7 @@ from gluellm.models.prompt import SystemPrompt
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 ReasoningSummary = Literal["auto", "concise", "detailed"]
+REASONING_EFFORTS: list[ReasoningEffort] = ["none", "minimal", "low", "medium", "high", "xhigh"]
 
 
 class Agent:

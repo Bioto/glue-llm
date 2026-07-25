@@ -122,6 +122,10 @@ class StatusEmitter:
         self.on_status = on_status
         self.sinks = list(sinks) if sinks else []
 
+    @property
+    def has_observers(self) -> bool:
+        return self.on_status is not None or bool(self.sinks)
+
     def bind(
         self,
         on_status: OnStatusCallback = None,

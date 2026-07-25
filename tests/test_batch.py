@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from gluellm.api import ExecutionResult
 from gluellm.batch import BatchProcessor, batch_complete, batch_complete_simple, batch_structured_complete
+from gluellm.events import ProcessEvent
 from gluellm.models.batch import (
     APIKeyConfig,
     BatchConfig,
@@ -327,6 +328,39 @@ class TestBatchProcessor:
 
             assert response.total_requests == 1
             assert response.successful_requests == 1
+
+    @pytest.mark.asyncio
+    async def test_batch_emits_llm_call_error_for_open_failed_call(self):
+        """If a batch item fails after llm_call_start, emit an llm_call_error event."""
+        events: list[ProcessEvent] = []
+        processor = BatchProcessor(config=BatchConfig(max_concurrent=1), on_status=events.append)
+        requests = [BatchRequest(id="req-fail", user_message="Test 1")]
+
+        async def fake_complete(*args, on_status=None, **kwargs):
+            assert on_status is not None
+            await on_status(
+                ProcessEvent(
+                    kind="llm_call_start",
+                    correlation_id="req-fail",
+                    iteration=1,
+                    model="openai:gpt-test",
+                    message_count=2,
+                )
+            )
+            raise RuntimeError("provider down")
+
+        with patch("gluellm.batch.GlueLLM") as mock_gluellm:
+            mock_client = AsyncMock()
+            mock_client.complete = fake_complete
+            mock_gluellm.return_value = mock_client
+
+            response = await processor.process(requests)
+
+        assert response.failed_requests == 1
+        assert [event.kind for event in events] == ["llm_call_start", "llm_call_error"]
+        assert events[1].correlation_id == "req-fail"
+        assert events[1].error_type == "RuntimeError"
+        assert events[1].error == "provider down"
 
     @pytest.mark.asyncio
     async def test_error_strategy_skip(self):

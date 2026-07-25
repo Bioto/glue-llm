@@ -58,7 +58,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from types import SimpleNamespace
@@ -104,7 +104,7 @@ from gluellm.rate_limiting.rate_limiter import acquire_rate_limit
 from gluellm.rate_limit_types import RateLimitAlgorithm
 from gluellm.runtime.context import clear_correlation_id, get_correlation_id, set_correlation_id
 from gluellm.runtime.shutdown import ShutdownContext, is_shutting_down, register_shutdown_callback
-from gluellm.schema import create_normalized_model
+from gluellm.schema import create_normalized_model, sanitize_schema_name
 from gluellm.telemetry import (
     is_tracing_enabled,
     log_llm_metrics,
@@ -453,8 +453,19 @@ PROVIDER_ENV_VAR_MAP: dict[str, str] = {
 }
 
 
-# Providers that use gRPC instead of httpx — must not receive a custom http_client.
-_GRPC_PROVIDERS = frozenset({"xai"})
+# Providers whose SDK clients are httpx-based and accept an ``http_client``
+# constructor argument and per-call ``httpx.Timeout``. gRPC/SDK providers (xAI,
+# Gemini, …) manage their own transport and must not receive either.
+HTTPX_TRANSPORT_PROVIDERS: frozenset[str] = frozenset({"openai", "anthropic"})
+
+# Providers whose structured-output path consumes the OpenAI-strict normalized JSON
+# schema (root ``strict`` flag, forced ``additionalProperties: false``). Other providers
+# (e.g. Gemini, whose ``google.genai.types.Schema`` forbids ``strict``) must receive the
+# raw Pydantic model and rely on any_llm's native schema conversion.
+_PROVIDERS_OPENAI_STRICT_SCHEMA = frozenset({"openai"})
+
+# Backward-compatible alias used in a few internal checks.
+_GRPC_PROVIDERS = frozenset({"xai", "gemini"})
 
 
 def _build_provider_http_client() -> httpx.AsyncClient:
@@ -547,7 +558,7 @@ class _ProviderCache:
         with self._lock:
             if cache_key not in self._providers:
                 create_kwargs: dict[str, Any] = {"api_key": resolved_key}
-                if provider_name not in _GRPC_PROVIDERS:
+                if provider_name in HTTPX_TRANSPORT_PROVIDERS:
                     create_kwargs["http_client"] = _build_provider_http_client()
                 self._providers[cache_key] = AnyLLM.create(
                     provider_name,
@@ -588,6 +599,46 @@ class _ProviderCache:
 
 
 _provider_cache = _ProviderCache()
+
+
+def _provider_supports_responses(model: str, api_key: str | None) -> bool:
+    """Return True if the resolved provider implements the OpenAI Responses API.
+
+    Read at the entry of :meth:`GlueLLM.response` and :meth:`GlueLLM.structured_response`
+    so non-OpenAI providers (Anthropic, xAI, Gemini, …) — whose any_llm classes set
+    ``SUPPORTS_RESPONSES = False`` — silently fall back to the chat-completions twin
+    instead of crashing with ``NotImplementedError("Provider doesn't support responses.")``.
+
+    Best-effort: if provider resolution itself fails we assume responses are supported
+    and let the original call surface its own, more specific error.
+    """
+    try:
+        provider, _ = _provider_cache.get_provider(model, api_key)
+    except Exception:
+        return True
+    return bool(getattr(provider, "SUPPORTS_RESPONSES", False))
+
+
+@contextmanager
+def _override_instance_tools(
+    client: "GlueLLM", tools: list[Callable] | None
+) -> Iterator[None]:
+    """Temporarily install per-call tools on a GlueLLM client for the responses→complete fallback.
+
+    :meth:`GlueLLM.complete` reads ``self.tools`` and has no per-call ``tools`` parameter,
+    so to preserve :meth:`GlueLLM.response`'s per-call override semantics we swap atomically
+    and restore on exit. This is intentionally not thread-safe across concurrent calls on
+    the same instance — matching how the rest of GlueLLM handles ephemeral per-call state.
+    """
+    if tools is None or tools is client.tools:
+        yield
+        return
+    saved = client.tools
+    client.tools = tools
+    try:
+        yield
+    finally:
+        client.tools = saved
 
 
 async def close_providers() -> None:
@@ -988,6 +1039,33 @@ def _extract_token_usage(response: ChatCompletion) -> dict[str, int] | None:
         "completion": int(completion_tokens) if isinstance(completion_tokens, (int, float)) else 0,
         "total": int(total_tokens) if isinstance(total_tokens, (int, float)) else 0,
     }
+
+
+async def _emit_llm_call_error_status(
+    *,
+    correlation_id: str | None,
+    model: str | None,
+    iteration: int | None,
+    message_count: int,
+    error: Exception,
+    on_status: OnStatusCallback,
+    sinks: list[Sink] | None,
+) -> None:
+    await emit_status(
+        ProcessEvent(
+            kind="llm_call_error",
+            correlation_id=correlation_id,
+            timestamp=time.time(),
+            iteration=iteration,
+            model=model,
+            message_count=message_count,
+            success=False,
+            error=str(error),
+            error_type=type(error).__name__,
+        ),
+        on_status,
+        sinks=sinks,
+    )
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -1651,19 +1729,37 @@ def classify_llm_error(error: Exception) -> Exception:
     return LLMError(f"LLM error ({error_type}): {error}")
 
 
+def _is_structured_json_parse_error(error: Exception) -> bool:
+    """Return True for provider-side structured output JSON parse failures."""
+    error_msg = str(error).lower()
+    return (
+        isinstance(error, InvalidRequestError)
+        and "validation error" in error_msg
+        and any(
+            marker in error_msg
+            for marker in [
+                "invalid json",
+                "json_invalid",
+                "trailing characters",
+            ]
+        )
+    )
+
+
 def should_retry_error(error: Exception) -> bool:
     """Determine if an error should trigger a retry.
 
     Retryable errors:
     - RateLimitError (wait and retry)
     - APIConnectionError (transient network issues)
+    - Provider-side structured JSON parse failures (transient model formatting glitches)
 
     Non-retryable errors:
     - TokenLimitError (need to reduce input)
     - AuthenticationError (bad credentials)
-    - InvalidRequestError (bad parameters)
+    - InvalidRequestError (bad parameters), except provider-side structured JSON parse failures
     """
-    return isinstance(error, (RateLimitError, APIConnectionError))
+    return isinstance(error, (RateLimitError, APIConnectionError)) or _is_structured_json_parse_error(error)
 
 
 # ============================================================================
@@ -1745,18 +1841,24 @@ async def _safe_llm_call(
     for _k in _PROVIDER_ACOMPLETION_SKIP_KEYS:
         model_kwargs.pop(_k, None)
 
-    # Inject httpx.Timeout into model_kwargs if caller hasn't set it (provider SDKs accept this)
-    if "timeout" not in model_kwargs:
-        model_kwargs["timeout"] = httpx.Timeout(
-            connect=connect_timeout,
-            read=request_timeout,
-            write=request_timeout,
-            pool=pool_timeout,
-        )
+    provider = extract_provider_from_model(model)
+
+    # Inject a per-call httpx.Timeout only for HTTP-based providers that accept it.
+    # gRPC/SDK providers (xAI, Gemini, …) reject ``timeout`` at ``chat.create()`` and
+    # instead rely on the outer ``asyncio.wait_for(request_timeout)`` below.
+    if provider in HTTPX_TRANSPORT_PROVIDERS:
+        if "timeout" not in model_kwargs:
+            model_kwargs["timeout"] = httpx.Timeout(
+                connect=connect_timeout,
+                read=request_timeout,
+                write=request_timeout,
+                pool=pool_timeout,
+            )
+    else:
+        model_kwargs.pop("timeout", None)
 
     # Normalize provider-specific params (e.g. Anthropic max_tokens, OpenAI o-series max_completion_tokens)
     max_tokens, model_kwargs = normalize_model_params(model, max_tokens, model_kwargs)
-    provider = extract_provider_from_model(model)
     reasoning_effort = model_kwargs.pop("reasoning_effort", None)
     if reasoning_effort is not None:
         model_kwargs = _update_kwargs_for_provider_reasoning_effort(
@@ -1780,7 +1882,7 @@ async def _safe_llm_call(
     # We create a subclass that overrides model_json_schema() so OpenAI's .parse()
     # method gets the normalized schema when it calls model_json_schema()
     normalized_response_format: type[BaseModel] | None = None
-    if response_format is not None:
+    if response_format is not None and provider in _PROVIDERS_OPENAI_STRICT_SCHEMA:
         try:
             normalized_response_format = create_normalized_model(response_format)
             # Verify the normalization worked by checking the schema
@@ -2050,6 +2152,17 @@ def _responses_tools_format(
     return out
 
 
+def _normalize_response_input_content_parts(content: list[Any]) -> list[Any]:
+    """Return Responses content parts with SDK-required defaults filled in."""
+    normalized: list[Any] = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "input_image" and "detail" not in part:
+            normalized.append({**part, "detail": "auto"})
+        else:
+            normalized.append(part)
+    return normalized
+
+
 def _messages_to_response_input(
     messages: list[dict[str, Any]],
 ) -> tuple[str | None, list[dict[str, Any]]]:
@@ -2111,7 +2224,7 @@ def _messages_to_response_input(
 
         if role == "user":
             if isinstance(content, list):
-                input_items.append({"role": "user", "content": content})
+                input_items.append({"role": "user", "content": _normalize_response_input_content_parts(content)})
             else:
                 input_items.append({"role": "user", "content": str(content or "")})
             continue
@@ -2572,7 +2685,7 @@ def _build_responses_text_format(response_format: type[BaseModel] | None) -> dic
     return {
         "format": {
             "type": "json_schema",
-            "name": response_format.__name__,
+            "name": sanitize_schema_name(response_format.__name__),
             "strict": True,
             "schema": schema,
         }
@@ -3765,6 +3878,8 @@ class GlueLLM:
                                 timestamp=time.time(),
                                 iteration=iteration + 1,
                                 model=model or self.model,
+                                message_count=len(messages),
+                                success=False,
                                 error_type=type(e).__name__,
                                 error=str(e),
                             )
@@ -4403,6 +4518,8 @@ class GlueLLM:
                                     timestamp=time.time(),
                                     iteration=iteration + 1,
                                     model=model or self.model,
+                                    message_count=len(messages),
+                                    success=False,
                                     error_type=type(e).__name__,
                                     error=str(e),
                                 )
@@ -4934,6 +5051,79 @@ class GlueLLM:
         if is_shutting_down():
             raise RuntimeError("Cannot process request: shutdown in progress")
 
+        if not _provider_supports_responses(model or self.model, api_key):
+            if not isinstance(user_input, str):
+                raise InvalidRequestError(
+                    "Responses-input lists (multimodal / prefilled tool history) require a "
+                    "provider that implements the OpenAI Responses API. Pass a string "
+                    "``user_input`` to fall back to completions, or use an OpenAI model."
+                )
+            if response_format is not None:
+                logger.info(
+                    f"Provider for model={model or self.model} does not support the Responses API; "
+                    f"delegating to GlueLLM.structured_complete()"
+                )
+                return await self.structured_complete(
+                    user_message=user_input,
+                    response_format=response_format,
+                    api_key=api_key,
+                    model=model,
+                    tools=tools,
+                    max_tokens=max_tokens,
+                    reasoning_effort=reasoning_effort,
+                    condense_tool_messages=condense_tool_messages,
+                    execute_tools=execute_tools,
+                    parallel_tool_calls=parallel_tool_calls,
+                    tool_execution_order=tool_execution_order,
+                    tool_mode=tool_mode,
+                    connect_timeout=connect_timeout,
+                    request_timeout=request_timeout,
+                    rate_limit_config=rate_limit_config,
+                    retry_config=retry_config,
+                    retry_enabled=retry_enabled,
+                    fallback_models=fallback_models,
+                    summarize_context=summarize_context,
+                    correlation_id=correlation_id,
+                    enable_eval_recording=enable_eval_recording,
+                    guardrails=guardrails,
+                    max_validation_retries=max_validation_retries,
+                    on_status=on_status,
+                    sinks=sinks,
+                    track_costs=track_costs,
+                    **model_kwargs,
+                )
+            logger.info(
+                f"Provider for model={model or self.model} does not support the Responses API; "
+                f"delegating to GlueLLM.complete()"
+            )
+            with _override_instance_tools(self, tools):
+                return await self.complete(
+                    user_message=user_input,
+                    api_key=api_key,
+                    model=model,
+                    max_tokens=max_tokens,
+                    reasoning_effort=reasoning_effort,
+                    condense_tool_messages=condense_tool_messages,
+                    execute_tools=execute_tools,
+                    parallel_tool_calls=parallel_tool_calls,
+                    tool_execution_order=tool_execution_order,
+                    tool_mode=tool_mode,
+                    connect_timeout=connect_timeout,
+                    request_timeout=request_timeout,
+                    rate_limit_config=rate_limit_config,
+                    retry_config=retry_config,
+                    retry_enabled=retry_enabled,
+                    fallback_models=fallback_models,
+                    summarize_context=summarize_context,
+                    correlation_id=correlation_id,
+                    enable_eval_recording=enable_eval_recording,
+                    guardrails=guardrails,
+                    on_status=on_status,
+                    sinks=sinks,
+                    track_costs=track_costs,
+                    **model_kwargs,
+                )
+
         effective_guardrails = guardrails if guardrails is not None else self.guardrails
         effective_max_tokens = max_tokens if max_tokens is not None else self.max_tokens
         effective_condense = (
@@ -5204,6 +5394,8 @@ class GlueLLM:
                                     timestamp=time.time(),
                                     iteration=iteration + 1,
                                     model=model or self.model,
+                                    message_count=len(messages),
+                                    success=False,
                                     error_type=type(e).__name__,
                                     error=str(e),
                                 )

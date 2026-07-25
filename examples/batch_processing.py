@@ -14,6 +14,7 @@ from gluellm import (
     batch_complete,
     batch_complete_simple,
 )
+from gluellm.events import ProcessEvent
 from gluellm.observability.logging_config import setup_logging
 
 
@@ -275,6 +276,51 @@ async def example_6_retry_failed():
         print(f"  Retried: {result.metadata.get('_retried', False)}")
 
 
+async def example_7_reasoning_and_status():
+    """Example 7: Reasoning effort and per-call status events in batch."""
+    print("\n" + "=" * 60)
+    print("Example 7: Reasoning Effort + Status Events")
+    print("=" * 60)
+
+    requests = [
+        BatchRequest(
+            id="logic-1",
+            user_message="If all bloops are razzies and some razzies are lazzies, can some bloops be lazzies?",
+        ),
+        BatchRequest(
+            id="logic-2",
+            user_message="A bat and ball cost $1.10 total. The bat costs $1 more than the ball. How much is the ball?",
+        ),
+    ]
+
+    events: list[ProcessEvent] = []
+
+    def on_status(event: ProcessEvent) -> None:
+        events.append(event)
+        if event.kind in {"llm_call_start", "llm_call_end", "llm_call_error"}:
+            print(f"  [{event.kind}] correlation_id={event.correlation_id} model={event.model}")
+
+    print(f"\nProcessing {len(requests)} reasoning prompts with on_status...")
+
+    response = await batch_complete(
+        requests,
+        model="openai:gpt-5.4-2026-03-05",
+        reasoning_effort="medium",
+        config=BatchConfig(max_concurrent=2),
+        on_status=on_status,
+    )
+
+    print(f"\n✓ Successful: {response.successful_requests}/{response.total_requests}")
+    print(f"📡 Status events captured: {len(events)}")
+
+    for result in response.results:
+        print(f"\n{result.id}:")
+        if result.success:
+            print(f"  Response: {result.response[:120]}...")
+        else:
+            print(f"  ERROR: {result.error}")
+
+
 async def main():
     """Run all examples."""
     # Setup logging with force=True to ensure filter is applied to all loggers
@@ -290,6 +336,7 @@ async def main():
     await example_4_tools_in_batch()
     await example_5_high_concurrency()
     await example_6_retry_failed()
+    await example_7_reasoning_and_status()
 
     print("\n" + "=" * 60)
     print("All examples completed!")
