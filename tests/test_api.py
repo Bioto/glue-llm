@@ -2538,6 +2538,262 @@ class TestProviderCache:
         assert mock_provider.acompletion.call_count == 2
 
 
+class TestProviderCacheEventLoopScope:
+    """Regression tests for per-event-loop httpx provider caching.
+
+    httpx AsyncClient connection pools are bound to the asyncio loop active at
+    creation. Reusing a cached provider across loops (e.g. Django's temporary
+  loop then Temporal's main loop) raises ``RuntimeError: Event loop is closed``.
+    """
+
+    @staticmethod
+    def _acquire_openai_provider_and_mock_request():
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from gluellm.api import _provider_cache
+
+        async def _run():
+            provider, model_id = _provider_cache.get_provider(
+                "openai:gpt-5.4-2026-03-05",
+                "sk-loop-scope-test",
+            )
+            client = provider.client
+            mock_ac = AsyncMock(return_value=MagicMock())
+            with patch.object(provider, "acompletion", mock_ac):
+                await provider.acompletion(
+                    model=model_id,
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+            mock_ac.assert_awaited_once()
+            return provider, client
+
+        return asyncio.run(_run())
+
+    def test_openai_provider_not_reused_across_event_loops(self):
+        """Loop A and loop B must each get their own openai provider/httpx client."""
+        provider_a, client_a = self._acquire_openai_provider_and_mock_request()
+        provider_b, client_b = self._acquire_openai_provider_and_mock_request()
+
+        assert provider_a is not provider_b
+        assert client_a is not client_b
+
+    def test_openai_provider_reused_within_same_event_loop(self):
+        """Repeated acquisition within one loop must reuse the cached provider."""
+        import asyncio
+
+        from gluellm.api import _provider_cache
+
+        async def _run_twice():
+            provider_a, _ = _provider_cache.get_provider(
+                "openai:gpt-5.4-2026-03-05",
+                "sk-loop-scope-test",
+            )
+            client_a = provider_a.client
+            provider_b, _ = _provider_cache.get_provider(
+                "openai:gpt-5.4-2026-03-05",
+                "sk-loop-scope-test",
+            )
+            client_b = provider_b.client
+            assert provider_a is provider_b
+            assert client_a is client_b
+
+        asyncio.run(_run_twice())
+
+    def test_anthropic_provider_not_reused_across_event_loops(self):
+        """Anthropic httpx providers must also be scoped to their owning loop."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from gluellm.api import _provider_cache
+
+        async def _run():
+            provider, model_id = _provider_cache.get_provider(
+                "anthropic:claude-sonnet-4",
+                "sk-anthropic-loop-scope",
+            )
+            client = provider.client
+            mock_ac = AsyncMock(return_value=MagicMock())
+            with patch.object(provider, "acompletion", mock_ac):
+                await provider.acompletion(
+                    model=model_id,
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+            return provider, client
+
+        provider_a, client_a = asyncio.run(_run())
+        provider_b, client_b = asyncio.run(_run())
+
+        assert provider_a is not provider_b
+        assert client_a is not client_b
+
+    def test_gateway_provider_not_reused_across_event_loops(self):
+        """Otari gateway mode must not reuse openai httpx clients across loops."""
+        import asyncio
+        import os
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from gluellm.api import _provider_cache
+
+        base_backup = os.environ.get("OPENAI_BASE_URL")
+        try:
+            os.environ["OPENAI_BASE_URL"] = "http://otari:8000/v1"
+
+            async def _run():
+                provider, model_id = _provider_cache.get_provider(
+                    "anthropic:claude-sonnet-4",
+                    "sk-gateway-loop-scope",
+                )
+                client = provider.client
+                mock_ac = AsyncMock(return_value=MagicMock())
+                with patch.object(provider, "acompletion", mock_ac):
+                    await provider.acompletion(
+                        model=model_id,
+                        messages=[{"role": "user", "content": "hi"}],
+                    )
+                return provider, client
+
+            provider_a, client_a = asyncio.run(_run())
+            provider_b, client_b = asyncio.run(_run())
+        finally:
+            if base_backup is None:
+                os.environ.pop("OPENAI_BASE_URL", None)
+            else:
+                os.environ["OPENAI_BASE_URL"] = base_backup
+
+        assert provider_a is not provider_b
+        assert client_a is not client_b
+
+    def test_grpc_provider_reused_across_event_loops(self):
+        """Non-httpx providers remain process-wide and are not loop-scoped."""
+        import asyncio
+        from unittest.mock import MagicMock, patch
+
+        from gluellm.api import _provider_cache
+
+        fake_provider = MagicMock()
+        create_calls = 0
+
+        def track_create(*args, **kwargs):
+            nonlocal create_calls
+            create_calls += 1
+            return fake_provider
+
+        with patch("gluellm.api.AnyLLM.create", side_effect=track_create):
+            async def _run():
+                return _provider_cache.get_provider("xai:grok-2-1212", "sk-grpc-loop-scope")[0]
+
+            asyncio.run(_run())
+            asyncio.run(_run())
+
+        assert create_calls == 1
+
+    async def test_close_all_empties_cache_with_per_loop_entries(self):
+        """close_all() must drain providers created on the current loop."""
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+        cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-close-loop-scope")
+
+        assert len(cache._providers) == 1
+        await cache.close_all()
+        assert len(cache._providers) == 0
+
+    def test_close_all_tolerates_providers_from_closed_event_loops(self):
+        """Providers whose owning loop already closed must not break close_all()."""
+        import asyncio
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+
+        async def _create():
+            cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-closed-loop-close")
+
+        asyncio.run(_create())
+
+        async def _close():
+            await cache.close_all()
+
+        asyncio.run(_close())
+
+    def test_close_all_from_closed_loop_creation_is_sync(self):
+        """Synchronous wrapper: closed-loop providers are cleaned up without raising."""
+        import asyncio
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+
+        async def _create():
+            cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-closed-loop-close-sync")
+
+        asyncio.run(_create())
+        asyncio.run(cache.close_all())
+
+    async def test_close_all_closes_provider_on_other_running_loop(self):
+        """close_all() must dispatch httpx client closure to the owning loop."""
+        import asyncio
+        import threading
+        from unittest.mock import AsyncMock
+
+        from gluellm.api import _provider_cache
+
+        other_loop = asyncio.new_event_loop()
+        started = threading.Event()
+
+        def _run_other_loop() -> None:
+            asyncio.set_event_loop(other_loop)
+            started.set()
+            other_loop.run_forever()
+
+        thread = threading.Thread(target=_run_other_loop, daemon=True)
+        thread.start()
+        started.wait(timeout=5)
+
+        async def _create_on_other_loop():
+            provider, _ = _provider_cache.get_provider(
+                "openai:gpt-5.4-2026-03-05",
+                "sk-other-loop-close",
+            )
+            return provider
+
+        create_future = asyncio.run_coroutine_threadsafe(_create_on_other_loop(), other_loop)
+        provider = create_future.result(timeout=5)
+        mock_aclose = AsyncMock()
+        provider.client.aclose = mock_aclose
+
+        await _provider_cache.close_all()
+
+        mock_aclose.assert_awaited_once()
+        closing_loop = asyncio.run_coroutine_threadsafe(
+            asyncio.sleep(0),
+            other_loop,
+        )
+        closing_loop.result(timeout=5)
+
+        other_loop.call_soon_threadsafe(other_loop.stop)
+        thread.join(timeout=5)
+
+    async def test_close_all_propagates_errors_from_active_owning_loop(self):
+        """Errors while closing on an active owning loop must not be swallowed."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from gluellm.api import _ProviderCache
+
+        cache = _ProviderCache()
+        fake_provider = MagicMock()
+        mock_client = MagicMock()
+        mock_client.aclose = AsyncMock(side_effect=ValueError("active-loop-close-failed"))
+        fake_provider.client = mock_client
+
+        with patch("gluellm.api.AnyLLM.create", return_value=fake_provider):
+            cache.get_provider("openai:gpt-5.4-2026-03-05", "sk-active-loop-error")
+
+        with pytest.raises(ValueError, match="active-loop-close-failed"):
+            await cache.close_all()
+
+
 class TestWireModelForProvider:
     """Regression tests for gateway-aware model id formatting."""
 

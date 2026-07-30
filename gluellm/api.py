@@ -50,17 +50,18 @@ Example:
 """
 
 import asyncio
-
-import httpx
 import importlib
+import inspect
 import json
 import logging
 import os
 import threading
 import time
+import httpx
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, TypeVar, Union, get_args, get_origin, get_type_hints, overload
 
@@ -488,15 +489,30 @@ def _build_provider_http_client() -> httpx.AsyncClient:
 # Provider Cache
 # ============================================================================
 
+# Cache keys for httpx providers include the owning event loop so connection pools
+# are never shared across loops. Non-httpx providers use ``None`` as the third element.
+type _ProviderCacheKey = tuple[str, str | None, asyncio.AbstractEventLoop | None]
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderCacheEntry:
+    """Cached AnyLLM provider and the event loop that owns its httpx transport."""
+
+    provider: AnyLLM
+    owning_loop: asyncio.AbstractEventLoop | None = None
+
 
 class _ProviderCache:
     """Module-level cache of AnyLLM provider instances.
 
-    Each unique (provider_name, api_key) pair maps to a single AnyLLM instance
-    that owns an httpx AsyncClient. Reusing instances means the underlying HTTP
-    connection pool is shared across requests, which prevents the
-    'RuntimeError: Event loop is closed' error that occurs when abandoned
-    AsyncOpenAI clients are garbage-collected after the event loop exits.
+    httpx-based providers (``openai``, ``anthropic``, and gateway-routed openai) are
+    keyed by ``(provider_name, api_key, owning_event_loop)`` because their HTTP
+    connection pools are bound to the asyncio loop active at creation time.
+    Reusing a provider across loops causes ``RuntimeError: Event loop is closed``
+    when httpx closes transports on the wrong loop.
+
+    Non-httpx providers (gRPC/SDK transports) remain keyed by
+    ``(provider_name, api_key, None)`` and may be shared across loops.
 
     When ``OPENAI_BASE_URL`` points at an OpenAI-compatible gateway (e.g. Otari,
     an any-llm-server-based gateway), all models are routed through the openai
@@ -504,11 +520,161 @@ class _ProviderCache:
     """
 
     def __init__(self) -> None:
-        self._providers: dict[tuple[str, str | None], AnyLLM] = {}
+        self._providers: dict[_ProviderCacheKey, _ProviderCacheEntry] = {}
         self._lock = threading.Lock()
+
+    def _resolve_api_key(self, provider_name: str, api_key: str | None) -> str | None:
+        resolved_key = api_key
+        if resolved_key is None:
+            env_var = PROVIDER_ENV_VAR_MAP.get(provider_name)
+            if env_var:
+                resolved_key = os.environ.get(env_var)
+        return resolved_key
+
+    def _cache_key(
+        self,
+        provider_name: str,
+        resolved_key: str | None,
+        *,
+        loop_bound: bool,
+    ) -> _ProviderCacheKey:
+        loop_identity: asyncio.AbstractEventLoop | None = (
+            asyncio.get_running_loop() if loop_bound else None
+        )
+        return (provider_name, resolved_key, loop_identity)
+
+    def _get_or_create_provider(
+        self,
+        provider_name: str,
+        resolved_key: str | None,
+        *,
+        loop_bound: bool,
+    ) -> AnyLLM:
+        cache_key = self._cache_key(provider_name, resolved_key, loop_bound=loop_bound)
+        with self._lock:
+            entry = self._providers.get(cache_key)
+            if entry is None:
+                create_kwargs: dict[str, Any] = {"api_key": resolved_key}
+                owning_loop: asyncio.AbstractEventLoop | None = None
+                if loop_bound:
+                    owning_loop = cache_key[2]
+                    create_kwargs["http_client"] = _build_provider_http_client()
+                entry = _ProviderCacheEntry(
+                    provider=AnyLLM.create(provider_name, **create_kwargs),
+                    owning_loop=owning_loop,
+                )
+                self._providers[cache_key] = entry
+            return entry.provider
+
+    @staticmethod
+    def _is_closed_loop_error(exc: BaseException) -> bool:
+        if not isinstance(exc, RuntimeError):
+            return False
+        message = str(exc).lower()
+        return "event loop is closed" in message or "loop is closed" in message
+
+    async def _await_client_close(self, client: Any) -> None:
+        aclose = getattr(client, "aclose", None)
+        if aclose is not None:
+            result = aclose()
+            if inspect.isawaitable(result):
+                await result
+            return
+        close = getattr(client, "close", None)
+        if close is not None:
+            if asyncio.iscoroutinefunction(close):
+                await close()
+            else:
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+
+    def _sync_close_client_best_effort(self, client: Any) -> None:
+        close = getattr(client, "close", None)
+        if close is not None and not asyncio.iscoroutinefunction(close):
+            close()
+
+    async def _close_entry(self, entry: _ProviderCacheEntry, closing_loop: asyncio.AbstractEventLoop) -> None:
+        client = getattr(entry.provider, "client", None)
+        if client is None:
+            return
+
+        owning_loop = entry.owning_loop
+        if owning_loop is None:
+            try:
+                await self._await_client_close(client)
+            except Exception:
+                logger.debug("Error closing non-httpx provider client during shutdown", exc_info=True)
+            return
+
+        if owning_loop.is_closed():
+            try:
+                self._sync_close_client_best_effort(client)
+            except Exception:
+                logger.debug(
+                    "Best-effort close failed for provider on closed event loop",
+                    exc_info=True,
+                )
+            return
+
+        if owning_loop is closing_loop:
+            try:
+                await self._await_client_close(client)
+            except RuntimeError as exc:
+                if self._is_closed_loop_error(exc):
+                    logger.debug(
+                        "Ignoring client close on closed event loop",
+                        exc_info=True,
+                    )
+                    return
+                raise
+            except Exception:
+                logger.debug("Error closing provider client during shutdown", exc_info=True)
+                raise
+            return
+
+        if owning_loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(
+                self._await_client_close(client),
+                owning_loop,
+            )
+            try:
+                await asyncio.wrap_future(future)
+            except RuntimeError as exc:
+                if self._is_closed_loop_error(exc):
+                    logger.debug(
+                        "Ignoring client close dispatched to closed event loop",
+                        exc_info=True,
+                    )
+                    return
+                raise
+            except Exception:
+                logger.debug(
+                    "Error closing provider client on owning event loop",
+                    exc_info=True,
+                )
+                raise
+            return
+
+        try:
+            owning_loop.run_until_complete(self._await_client_close(client))
+        except RuntimeError as exc:
+            if self._is_closed_loop_error(exc):
+                logger.debug(
+                    "Ignoring client close on stopped event loop",
+                    exc_info=True,
+                )
+                return
+            raise
+        except Exception:
+            logger.debug("Error closing provider client on stopped event loop", exc_info=True)
+            raise
 
     def get_provider(self, model: str, api_key: str | None) -> tuple[AnyLLM, str]:
         """Return a cached (provider, model_id) pair, creating one if needed.
+
+        Must be called from a running asyncio event loop when the resolved provider
+        uses httpx (``openai``, ``anthropic``, or gateway-routed openai).
 
         Args:
             model: Full model string in "provider:model_name" or "provider/model_name" format
@@ -524,18 +690,12 @@ class _ProviderCache:
         """
         if openai_api_base_is_gateway():
             provider_name = "openai"
-            resolved_key = api_key
-            if resolved_key is None:
-                resolved_key = os.environ.get(PROVIDER_ENV_VAR_MAP["openai"])
-            cache_key = (provider_name, resolved_key)
-            with self._lock:
-                if cache_key not in self._providers:
-                    self._providers[cache_key] = AnyLLM.create(
-                        provider_name,
-                        api_key=resolved_key,
-                        http_client=_build_provider_http_client(),
-                    )
-                provider = self._providers[cache_key]
+            resolved_key = self._resolve_api_key(provider_name, api_key)
+            provider = self._get_or_create_provider(
+                provider_name,
+                resolved_key,
+                loop_bound=True,
+            )
             return provider, model
 
         if ":" in model:
@@ -546,56 +706,30 @@ class _ProviderCache:
             provider_name, model_id = model, model
 
         provider_name = provider_name.lower()
-
-        # Resolve the key that will actually be used so the cache key is stable
-        resolved_key = api_key
-        if resolved_key is None:
-            env_var = PROVIDER_ENV_VAR_MAP.get(provider_name)
-            if env_var:
-                resolved_key = os.environ.get(env_var)
-
-        cache_key = (provider_name, resolved_key)
-        with self._lock:
-            if cache_key not in self._providers:
-                create_kwargs: dict[str, Any] = {"api_key": resolved_key}
-                if provider_name in HTTPX_TRANSPORT_PROVIDERS:
-                    create_kwargs["http_client"] = _build_provider_http_client()
-                self._providers[cache_key] = AnyLLM.create(
-                    provider_name,
-                    **create_kwargs,
-                )
-            provider = self._providers[cache_key]
+        resolved_key = self._resolve_api_key(provider_name, api_key)
+        loop_bound = provider_name in HTTPX_TRANSPORT_PROVIDERS
+        provider = self._get_or_create_provider(
+            provider_name,
+            resolved_key,
+            loop_bound=loop_bound,
+        )
 
         return provider, wire_model_for_provider(model, provider_name, model_id)
 
     async def close_all(self) -> None:
         """Close all cached provider HTTP clients gracefully.
 
-        Call this during application shutdown to ensure httpx connections are
-        cleanly closed before the event loop exits, preventing the
-        'RuntimeError: Event loop is closed' warning from the GC.
+        Closes httpx clients on their owning event loops when possible. Providers
+        whose loops are already closed are cleaned up best-effort without masking
+        errors from active loops.
         """
         with self._lock:
-            providers = list(self._providers.values())
+            entries = list(self._providers.values())
             self._providers.clear()
 
-        for provider in providers:
-            client = getattr(provider, "client", None)
-            if client is None:
-                continue
-            try:
-                aclose = getattr(client, "aclose", None)
-                if aclose is not None:
-                    await aclose()
-                else:
-                    close = getattr(client, "close", None)
-                    if close is not None:
-                        if asyncio.iscoroutinefunction(close):
-                            await close()
-                        else:
-                            close()
-            except Exception:
-                logger.debug("Error closing provider client during shutdown", exc_info=True)
+        closing_loop = asyncio.get_running_loop()
+        for entry in entries:
+            await self._close_entry(entry, closing_loop)
 
 
 _provider_cache = _ProviderCache()

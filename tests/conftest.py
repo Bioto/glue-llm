@@ -98,15 +98,20 @@ async def close_any_llm_created_clients(monkeypatch):
         if client is None:
             continue
 
-        aclose = getattr(client, "aclose", None)
-        if callable(aclose):
-            result = aclose()
-            if inspect.isawaitable(result):
-                await result
-            continue
+        try:
+            aclose = getattr(client, "aclose", None)
+            if callable(aclose):
+                result = aclose()
+                if inspect.isawaitable(result):
+                    await result
+                continue
 
-        close = getattr(client, "close", None)
-        if callable(close):
-            result = close()
-            if inspect.isawaitable(result):
-                await result
+            close = getattr(client, "close", None)
+            if callable(close):
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+        except RuntimeError as exc:
+            if "event loop is closed" in str(exc).lower():
+                continue
+            raise

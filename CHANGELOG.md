@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-07-30
+
 ### Fixed
+- **Cross-event-loop HTTP client reuse**: `_ProviderCache` now keys httpx-based providers (`openai`, `anthropic`, and gateway-routed OpenAI) by `(provider_name, api_key, owning_event_loop)` so httpx connection pools are never shared across asyncio loops. Fixes `RuntimeError: Event loop is closed` when a temporary loop (e.g. Django GraphQL) closes and a later call on the process main loop reuses the same cached provider.
+- **`close_providers()` loop-aware shutdown**: `close_all()` closes httpx clients on their owning event loops when possible and tolerates cleanup for providers whose loops are already closed.
+
 - **Responses streaming retries**: `_responses_call_with_retry` no longer skips application-level retry when `stream=True`. Transient `APIConnectionError` / `RateLimitError` on stream establish (e.g. dropped keepalive after idle tool rounds) now use the same retry/backoff as non-stream Responses calls. Mid-stream consume errors remain the caller's concern.
 
 ### Added
