@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from pydantic import BaseModel, Field, ValidationError
@@ -16,6 +16,7 @@ from gluellm.api import (
     RateLimitError,
     RetryConfig,
     TokenLimitError,
+    _responses_call_with_retry,
     complete,
     structured_complete,
 )
@@ -834,3 +835,81 @@ class TestCustomRetryIntegration:
         assert result.structured_output.value == 10
         assert len(attempts) == 2
         assert attempts[1].get("temperature") == 0.0
+
+
+# ---------------------------------------------------------------------------
+
+
+class TestResponsesStreamRetry:
+    """Regression: Responses stream=True must retry transient establish failures.
+
+    Pre-fix, ``_responses_call_with_retry`` returned immediately when
+    ``stream=True``, so keepalive/connection flakes after idle tool rounds
+    never got application-level retries (unlike non-stream Responses / chat).
+    """
+
+    @staticmethod
+    def _fake_stream():
+        async def _gen():
+            yield object()
+
+        return _gen()
+
+    @patch("gluellm.api._safe_responses_call", new_callable=AsyncMock)
+    async def test_stream_retries_api_connection_error_then_succeeds(self, mock):
+        """stream=True retries APIConnectionError on establish, then returns iterator."""
+        mock.side_effect = [
+            APIConnectionError("Connection error."),
+            self._fake_stream(),
+        ]
+        result = await _responses_call_with_retry(
+            "hi",
+            model="openai:gpt-5.4-2026-03-05",
+            stream=True,
+            retry_config=RetryConfig(min_wait=0, max_attempts=3),
+        )
+        assert mock.call_count == 2
+        assert mock.call_args_list[0].kwargs.get("stream") is True
+        assert mock.call_args_list[1].kwargs.get("stream") is True
+        # Caller still receives a usable async iterator
+        chunks = [chunk async for chunk in result]
+        assert len(chunks) == 1
+
+    @patch("gluellm.api._safe_responses_call", new_callable=AsyncMock)
+    async def test_stream_does_not_retry_non_transient_value_error(self, mock):
+        """Non-transient errors are not retried on the streaming Responses path."""
+        mock.side_effect = ValueError("bad request shape")
+        with pytest.raises(ValueError, match="bad request shape"):
+            await _responses_call_with_retry(
+                "hi",
+                model="openai:gpt-5.4-2026-03-05",
+                stream=True,
+                retry_config=RetryConfig(min_wait=0, max_attempts=3),
+            )
+        assert mock.call_count == 1
+
+    @patch("gluellm.api._safe_responses_call", new_callable=AsyncMock)
+    async def test_stream_exhausts_retries_on_persistent_connection_error(self, mock):
+        """Persistent APIConnectionError still raises after max_attempts."""
+        mock.side_effect = APIConnectionError("Connection error.")
+        with pytest.raises(APIConnectionError, match="Connection error"):
+            await _responses_call_with_retry(
+                "hi",
+                model="openai:gpt-5.4-2026-03-05",
+                stream=True,
+                retry_config=RetryConfig(min_wait=0, max_attempts=3),
+            )
+        assert mock.call_count == 3
+
+    @patch("gluellm.api._safe_responses_call", new_callable=AsyncMock)
+    async def test_stream_respects_retry_enabled_false(self, mock):
+        """retry_enabled=False still means a single stream establish attempt."""
+        mock.side_effect = APIConnectionError("Connection error.")
+        with pytest.raises(APIConnectionError):
+            await _responses_call_with_retry(
+                "hi",
+                model="openai:gpt-5.4-2026-03-05",
+                stream=True,
+                retry_config=RetryConfig(retry_enabled=False),
+            )
+        assert mock.call_count == 1

@@ -16,13 +16,19 @@ Retry configuration is supported on:
 |-----|----------------|-----------------|
 | `complete()` (module-level) | Yes | Yes |
 | `structured_complete()` (module-level) | Yes | Yes |
+| `response()` / `structured_response()` | Yes (via client / call) | Yes |
 | `GlueLLM.__init__()` | Yes (client default) | — |
 | `GlueLLM.complete()` | Yes (per-call override) | Yes |
 | `GlueLLM.structured_complete()` | Yes (per-call override) | Yes |
-| `GlueLLM.stream_complete()` | Not supported (streaming path uses direct LLM calls without retry) | No |
-| `stream_complete()` (module-level) | Not supported | No |
+| `GlueLLM.stream_complete()` | Yes (stream *establish* only) | Yes |
+| `GlueLLM.stream_response()` | Yes (stream *establish* only) | Yes |
+| `stream_complete()` (module-level) | Yes (stream *establish* only) | Yes |
 
-`stream_complete` does not use retry logic; its LLM calls are made without retry wrapping.
+### Streaming retry scope
+
+Chat (`_llm_call_with_retry`) and Responses (`_responses_call_with_retry`) both retry transient errors when `stream=True`, but only for failures raised while **establishing** the stream (before the async iterator is returned). That covers dropped keepalive / connection reset on a new Responses request after an idle tool round.
+
+Errors while **consuming** an already-returned stream (mid-chunk disconnect) are not retried at this layer — wrap consume in the application if you need that.
 
 ---
 

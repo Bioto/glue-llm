@@ -2923,23 +2923,13 @@ async def _responses_call_with_retry(
     rate_limit_config: RateLimitConfig | None = None,
     **model_kwargs: Any,
 ) -> Any:
-    """Make a Responses API call with retry semantics matching :func:`_llm_call_with_retry`."""
-    if stream:
-        return await _safe_responses_call(
-            input_data=input_data,
-            model=model,
-            instructions=instructions,
-            tools=tools,
-            response_format=response_format,
-            stream=True,
-            request_timeout=request_timeout,
-            connect_timeout=connect_timeout,
-            api_key=api_key,
-            max_tokens=max_tokens,
-            rate_limit_config=rate_limit_config,
-            **model_kwargs,
-        )
+    """Make a Responses API call with retry semantics matching :func:`_llm_call_with_retry`.
 
+    Retries apply to both ``stream=False`` and ``stream=True``. For streaming, only
+    failures raised while *establishing* the stream (before the async iterator is
+    returned) are retried — the same contract as chat ``_llm_call_with_retry``.
+    Errors while consuming an already-returned stream are the caller's concern.
+    """
     cfg = retry_config or RetryConfig(
         retry_enabled=True,
         max_attempts=settings.retry_max_attempts,
@@ -2959,6 +2949,7 @@ async def _responses_call_with_retry(
                 instructions=instructions,
                 tools=tools,
                 response_format=response_format,
+                stream=stream,
                 request_timeout=request_timeout,
                 connect_timeout=connect_timeout,
                 api_key=api_key,
@@ -2987,9 +2978,10 @@ async def _responses_call_with_retry(
                     raise
 
             wait_time = min(cfg.max_wait, cfg.min_wait * (cfg.multiplier ** attempt))
+            cause_chain = _build_cause_chain(e)
             logger.warning(
                 f"Responses API call failed (attempt {attempt + 1}/{effective_max}), "
-                f"retrying in {wait_time:.2f}s: {e}"
+                f"retrying in {wait_time:.2f}s: {e}, cause_chain={cause_chain}"
             )
             await asyncio.sleep(wait_time)
 

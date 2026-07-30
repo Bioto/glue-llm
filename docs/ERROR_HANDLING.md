@@ -62,6 +62,7 @@ Raw exceptions from the underlying API (any-llm) are classified via `classify_ll
 - **Retries**: Up to 3 attempts (configurable via `RetryConfig` or `GLUELLM_RETRY_MAX_ATTEMPTS`)
 - **Backoff**: Exponential with jitter between `min_wait` and `max_wait`
 - **Only on**: `RateLimitError` and `APIConnectionError`
+- **Streaming**: Same retry policy applies when establishing a chat or Responses stream (`stream=True`). Mid-stream consume errors are not retried here — see [RETRY.md](RETRY.md#streaming-retry-scope).
 
 ### RetryConfig
 

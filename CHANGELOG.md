@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Responses streaming retries**: `_responses_call_with_retry` no longer skips application-level retry when `stream=True`. Transient `APIConnectionError` / `RateLimitError` on stream establish (e.g. dropped keepalive after idle tool rounds) now use the same retry/backoff as non-stream Responses calls. Mid-stream consume errors remain the caller's concern.
+
 ### Added
 - Initial project structure
 - Core API with automatic tool execution
