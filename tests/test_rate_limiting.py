@@ -274,6 +274,56 @@ class TestRateLimiter:
             assert elapsed >= 0  # At minimum, should not error
 
     @pytest.mark.asyncio
+    async def test_acquire_rate_limit_sleeps_retry_after_in_seconds_not_milliseconds(self):
+        """Regression: throttled retry_after is seconds; dividing by 1000 caused busy-wait."""
+        from throttled.rate_limiter.base import RateLimitResult
+
+        clear_rate_limiter_cache()
+        mock_limiter = MagicMock()
+        limited_result = RateLimitResult(limited=True, state_values=(1, 0, 60.0, 1.0))
+        allowed_result = RateLimitResult(limited=False, state_values=(1, 1, 60.0, 0.0))
+        mock_limiter.limit.side_effect = [limited_result, allowed_result]
+
+        sleep_durations: list[float] = []
+
+        async def record_sleep(duration: float) -> None:
+            sleep_durations.append(duration)
+
+        with patch("gluellm.rate_limiting.rate_limiter.settings") as mock_settings:
+            mock_settings.rate_limit_enabled = True
+            with patch("asyncio.sleep", side_effect=record_sleep):
+                await acquire_rate_limit("test-key-retry-after", rate_limiter=mock_limiter)
+
+        assert sleep_durations == [1.0]
+
+    @pytest.mark.asyncio
+    async def test_acquire_rate_limit_sleeps_retry_after_from_limited_error_in_seconds(self):
+        """Regression: LimitedError path must also treat retry_after as seconds."""
+        from throttled.exceptions import LimitedError
+        from throttled.rate_limiter.base import RateLimitResult
+
+        clear_rate_limiter_cache()
+        mock_limiter = MagicMock()
+        limited_result = RateLimitResult(limited=True, state_values=(1, 0, 60.0, 2.5))
+        allowed_result = RateLimitResult(limited=False, state_values=(1, 1, 60.0, 0.0))
+        mock_limiter.limit.side_effect = [
+            LimitedError(limited_result),
+            allowed_result,
+        ]
+
+        sleep_durations: list[float] = []
+
+        async def record_sleep(duration: float) -> None:
+            sleep_durations.append(duration)
+
+        with patch("gluellm.rate_limiting.rate_limiter.settings") as mock_settings:
+            mock_settings.rate_limit_enabled = True
+            with patch("asyncio.sleep", side_effect=record_sleep):
+                await acquire_rate_limit("test-key-limited-error", rate_limiter=mock_limiter)
+
+        assert sleep_durations == [2.5]
+
+    @pytest.mark.asyncio
     async def test_acquire_rate_limit_with_leaking_bucket_algorithm(self):
         """Test that leaking_bucket algorithm can be configured and used."""
         clear_rate_limiter_cache()

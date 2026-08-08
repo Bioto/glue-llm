@@ -20,6 +20,16 @@ logger = get_logger(__name__)
 # Global rate limiter instances cache
 _rate_limiters: dict[str, Throttled] = {}
 
+# throttled reports retry_after in seconds; floor avoids zero-length sleeps if a backend reports 0
+_MIN_RETRY_AFTER_SECONDS = 0.01
+
+
+def _get_retry_after_seconds(state) -> float:
+    """Return seconds to wait before retrying from a throttled RateLimitState."""
+    if state and state.retry_after:
+        return max(state.retry_after, _MIN_RETRY_AFTER_SECONDS)
+    return 1.0
+
 
 def _get_store(backend: Literal["memory", "redis"] = "memory", redis_url: str | None = None):
     """Get the appropriate store backend for rate limiting.
@@ -146,22 +156,19 @@ async def acquire_rate_limit(
             # Use limit() method which returns RateLimitResult
             result = rate_limiter.limit(key=key)
             if result.limited:
-                # Extract retry_after from the result's state
-                retry_after = (
-                    result.state.retry_after / 1000.0 if result.state and result.state.retry_after else 1.0
-                )  # Convert ms to seconds
+                retry_after = _get_retry_after_seconds(result.state)
                 logger.debug(f"Rate limit hit for key={key}, waiting {retry_after:.2f}s")  # codeql[py/clear-text-logging-sensitive-data]
                 await asyncio.sleep(retry_after)
                 continue
             logger.debug(f"Rate limit permit acquired: key={key}")  # codeql[py/clear-text-logging-sensitive-data]
             return
         except LimitedError as e:
-            # Extract retry_after from the exception
-            retry_after = 1.0
-            if hasattr(e, "rate_limit_result") and e.rate_limit_result and e.rate_limit_result.state:
-                retry_after = (
-                    e.rate_limit_result.state.retry_after / 1000.0 if e.rate_limit_result.state.retry_after else 1.0
-                )
+            state = (
+                e.rate_limit_result.state
+                if hasattr(e, "rate_limit_result") and e.rate_limit_result
+                else None
+            )
+            retry_after = _get_retry_after_seconds(state)
             logger.debug(f"Rate limit hit for key={key}, waiting {retry_after:.2f}s")  # codeql[py/clear-text-logging-sensitive-data]
             await asyncio.sleep(retry_after)
 
