@@ -137,11 +137,22 @@ class TestReasoningEffortNormalization:
         [
             ("o3-mini", "xhigh", "high"),
             ("o3-mini", "high", "high"),
-            ("o3-mini", "minimal", "minimal"),
             ("gpt-5-mini-2025-08-07", "xhigh", "high"),
             ("gpt-5.4-2026-03-05", "xhigh", "xhigh"),
+            ("gpt-5.4-2026-03-05", "minimal", "none"),
+            ("gpt-5.4-2026-03-05", "max", "xhigh"),
             ("gpt-5.1-2025-11-13", "xhigh", "high"),
             ("gpt-5.1-2025-11-13", "minimal", "none"),
+            ("gpt-5.6", "max", "max"),
+            ("gpt-6-sol", "max", "max"),
+            ("gpt-6-sol", "high", "high"),
+            ("gpt-7-preview", "max", "max"),
+            ("gpt-7-preview", "high", "high"),
+            ("gpt-5.4-pro", "xhigh", "xhigh"),
+            ("gpt-5.2-codex", "xhigh", "xhigh"),
+            ("gpt-5.1-codex", "xhigh", "high"),
+            ("gpt-5.1-codex-max", "xhigh", "xhigh"),
+            ("gpt-oss-20b", "xhigh", "high"),
         ],
     )
     async def test_openai_reasoning_effort_downgraded_to_supported(self, model, effort, expected):
@@ -274,3 +285,33 @@ class TestNormalizeModelParamsReasoningEffort:
             "gpt-4o-mini",
             "high",
         )
+
+    @pytest.mark.parametrize(
+        "model,effort",
+        [
+            ("openai:o3-mini", "minimal"),
+            ("openai:gpt-6-astra", "none"),
+            ("openai:gpt-5.4-pro", "low"),
+            ("openai:gpt-5.5-pro", "low"),
+            ("openai:gpt-5-chat-latest", "high"),
+            ("openai:gpt-5-search-api", "high"),
+            ("openai:gpt-5.2-codex", "none"),
+        ],
+    )
+    async def test_known_narrow_openai_families_omit_unsupported_effort(self, model, effort):
+        """Efforts below the family's legal set are omitted rather than sent."""
+        _, kwargs = normalize_model_params(model, None, {"reasoning_effort": effort})
+
+        assert "reasoning_effort" not in kwargs
+
+    async def test_unrecognized_openai_model_keeps_reasoning_effort(self):
+        """Model ids with no local restriction pass the caller's effort through."""
+        _, kwargs = normalize_model_params("openai:gpt-7-preview", None, {"reasoning_effort": "max"})
+
+        assert kwargs["reasoning_effort"] == "max"
+
+    async def test_gpt6_sol_keeps_max_reasoning_effort(self):
+        """GPT-6 Sol accepts max, the top of the current effort scale."""
+        _, kwargs = normalize_model_params("openai:gpt-6-sol", None, {"reasoning_effort": "max"})
+
+        assert kwargs["reasoning_effort"] == "max"

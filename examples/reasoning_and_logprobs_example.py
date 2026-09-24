@@ -2,7 +2,7 @@
 Example: Reasoning Effort, Traces, and Logprobs
 
 Demonstrates:
-- reasoning_effort: Control thinking depth for o3, o4-mini, Claude 3.7+ models
+- reasoning_effort: Control thinking depth for o-series, GPT-5 and later, Claude thinking models
 - reasoning_summary / reasoning_trace: Readable reasoning on the Responses API path
 - stream_response + reasoning_chunk: Live reasoning deltas via on_status
 - logprobs: Token-level probabilities for eval and confidence scoring
@@ -16,13 +16,13 @@ from gluellm.events import ProcessEvent
 
 
 async def example_reasoning_effort():
-    """Use reasoning_effort with thinking/reasoning models (o3, o4-mini, Claude 3.7+)."""
+    """Use reasoning_effort with thinking/reasoning models (o-series, GPT-5 and later, Claude)."""
     print("=" * 70)
     print("Example 1: Reasoning Effort (Thinking Models)")
     print("=" * 70)
 
-    # reasoning_effort: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"
-    # Use a model that supports it (e.g. o4-mini); unsupported models error at the provider.
+    # reasoning_effort: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"
+    # New OpenAI model ids keep the requested effort. Known narrower families are clamped.
     result = await complete(
         user_message="What is the next number in: 2, 4, 8, 16, ?",
         model="openai:o4-mini",

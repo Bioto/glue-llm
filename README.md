@@ -295,13 +295,13 @@ gluellm.configure(default_tool_execution_order="parallel")
 
 ### Reasoning effort, traces, and logprobs
 
-For reasoning models (o3, o4-mini, Claude 3.7 thinking), use `reasoning_effort` to control thinking depth:
+For reasoning models (o-series, GPT-5 and later, Claude thinking models), use `reasoning_effort` to control thinking depth. New OpenAI model ids keep the requested effort; known families with a narrower set are clamped to a supported value.
 
 ```python
 result = await complete(
     "Solve this logic puzzle...",
     model="openai:o4-mini",
-    reasoning_effort="high",  # "none"|"minimal"|"low"|"medium"|"high"|"xhigh"
+    reasoning_effort="high",  # "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"
 )
 ```
 

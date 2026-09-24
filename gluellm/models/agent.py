@@ -9,9 +9,9 @@ from typing import Literal
 
 from gluellm.models.prompt import SystemPrompt
 
-ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 ReasoningSummary = Literal["auto", "concise", "detailed"]
-REASONING_EFFORTS: list[ReasoningEffort] = ["none", "minimal", "low", "medium", "high", "xhigh"]
+REASONING_EFFORTS: list[ReasoningEffort] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
 
 class Agent:
@@ -69,7 +69,9 @@ class Agent:
                 (defaults to 10)
             model: LLM model to use (defaults to settings.default_model)
             max_tokens: Maximum number of tokens to generate (defaults to settings.default_max_tokens).
-            reasoning_effort: Reasoning effort for o-series / gpt-5 models.
+            reasoning_effort: Reasoning effort for models that accept it.
+                New OpenAI model ids keep the requested value; known narrower
+                families are clamped. Includes "max".
         """
         from gluellm.config import settings
 

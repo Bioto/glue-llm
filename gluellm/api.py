@@ -3430,7 +3430,8 @@ class GlueLLM:
             rate_limit_config: Optional rate limit configuration. Set algorithm to override
                 the default (from GLUELLM_RATE_LIMIT_ALGORITHM). E.g. RateLimitConfig(algorithm="leaking_bucket").
             model_kwargs: Optional dict of extra params for acompletion (e.g. temperature, top_p).
-            reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh".
+            reasoning_effort: For reasoning models: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max".
+                New OpenAI model ids keep the requested value. Known families with a narrower set are clamped.
             logprobs: Include log probabilities in the response (eval/confidence scoring).
             top_logprobs: Number of top log probs to return when logprobs=True.
             session_label: Observability metadata for gateway/mzai traces.
@@ -3803,7 +3804,8 @@ class GlueLLM:
             rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
-            reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh".
+            reasoning_effort: For reasoning models: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max".
+                New OpenAI model ids keep the requested value. Known families with a narrower set are clamped.
             logprobs: Include log probabilities (eval/confidence scoring).
             top_logprobs: Number of top log probs when logprobs=True.
             session_label: Observability metadata for gateway traces.
@@ -4393,7 +4395,8 @@ class GlueLLM:
             rate_limit_config: Per-call rate limit configuration override (use ``algorithm=`` for algorithm).
             track_costs: If False, skip cost tracking for this call (defaults to settings.track_costs).
             enable_eval_recording: If False, skip eval recording for this call (defaults to using instance eval_store).
-            reasoning_effort: For o3/o4-mini/Claude: "none"|"minimal"|"low"|"medium"|"high"|"xhigh".
+            reasoning_effort: For reasoning models: "none"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max".
+                New OpenAI model ids keep the requested value. Known families with a narrower set are clamped.
             logprobs: Include log probabilities (eval/confidence scoring).
             top_logprobs: Number of top log probs when logprobs=True.
             session_label: Observability metadata for gateway traces.

@@ -21,10 +21,28 @@ _MAX_COMPLETION_TOKENS_MODELS_RE = re.compile(
     r"^(o\d|gpt-5|gpt-4\.1)",
     re.IGNORECASE,
 )
-_OPENAI_REASONING_MODEL_RE = re.compile(r"^(o\d|gpt-5)", re.IGNORECASE)
+# Families whose legal reasoning.effort values are narrower than REASONING_EFFORTS.
+# Unknown OpenAI ids are intentionally absent: GET /v1/models does not publish
+# capabilities, so a new model keeps the caller's effort instead of dropping it.
+_OPENAI_NON_REASONING_RE = re.compile(r"^(?:gpt-3|gpt-4)", re.IGNORECASE)
+_OPENAI_CHAT_RE = re.compile(r"^gpt-5(?:\.\d+)?-chat(?:-|$)", re.IGNORECASE)
+_OPENAI_SEARCH_RE = re.compile(r"-search-api(?:-|$)", re.IGNORECASE)
+_OPENAI_O_SERIES_RE = re.compile(r"^o\d", re.IGNORECASE)
+_OPENAI_GPT_OSS_RE = re.compile(r"^gpt-oss(?:-|$)", re.IGNORECASE)
+_OPENAI_GPT5_PRO_RE = re.compile(r"^gpt-5-pro(?:-|$)", re.IGNORECASE)
+_OPENAI_GPT5_LATER_PRO_RE = re.compile(r"^gpt-5\.[2-5]-pro(?:-|$)", re.IGNORECASE)
+_OPENAI_GPT6_ASTRA_RE = re.compile(r"^gpt-6-astra(?:-|$)", re.IGNORECASE)
+_OPENAI_GPT6_RE = re.compile(r"^gpt-6(?:-|$)", re.IGNORECASE)
 _OPENAI_GPT5_MINOR_RE = re.compile(r"^gpt-5(?:\.(\d+))?(?:-|$)", re.IGNORECASE)
-_OPENAI_GPT51_REASONING_EFFORTS = ["none", "low", "medium", "high"]
-_OPENAI_PRE_GPT51_REASONING_EFFORTS = ["minimal", "low", "medium", "high"]
+_OPENAI_CODEX_RE = re.compile(r"-codex(?:-|$)", re.IGNORECASE)
+_OPENAI_CODEX_MAX_RE = re.compile(r"-codex-max(?:-|$)", re.IGNORECASE)
+_OPENAI_LOW_MEDIUM_HIGH = ("low", "medium", "high")
+_OPENAI_GPT5_EFFORTS = ("minimal", "low", "medium", "high")
+_OPENAI_GPT51_EFFORTS = ("none", "low", "medium", "high")
+_OPENAI_GPT52_TO_55_EFFORTS = ("none", "low", "medium", "high", "xhigh")
+_OPENAI_GPT5_LATER_PRO_EFFORTS = ("medium", "high", "xhigh")
+_OPENAI_GPT56_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+_OPENAI_GPT6_ASTRA_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
 
 def _model_name(model: str) -> str:
@@ -35,24 +53,59 @@ def _model_name(model: str) -> str:
     return model
 
 
+def _apply_codex_effort_restriction(model_name: str, efforts: Sequence[str]) -> Sequence[str]:
+    """Codex snapshots omit none and minimal; codex-max also allows xhigh."""
+    if _OPENAI_CODEX_RE.search(model_name) is None:
+        return efforts
+
+    allowed = {effort for effort in efforts if effort not in {"none", "minimal"}}
+    if _OPENAI_CODEX_MAX_RE.search(model_name) is not None:
+        allowed.add("xhigh")
+    return [effort for effort in REASONING_EFFORTS if effort in allowed]
+
+
 def _openai_supported_reasoning_efforts(model_name: str) -> Sequence[str]:
+    """Return reasoning efforts this OpenAI model accepts.
+
+    An empty sequence means the model does not accept reasoning_effort.
+    Model ids with no known restriction return the full GlueLLM scale so a
+    future release keeps the caller's value. Dated snapshots inherit the
+    family rule (``gpt-5.4-2026-03-05`` follows ``gpt-5.4``).
+    """
     normalized_model = model_name.lower()
-    if normalized_model.startswith("gpt-5-pro"):
-        return ["high"]
+    if (
+        _OPENAI_NON_REASONING_RE.match(normalized_model)
+        or _OPENAI_CHAT_RE.match(normalized_model)
+        or _OPENAI_SEARCH_RE.search(normalized_model)
+    ):
+        return []
 
-    version_match = _OPENAI_GPT5_MINOR_RE.match(normalized_model)
-    if version_match:
-        minor = version_match.group(1)
-        if minor is not None and int(minor) == 1:
-            return _OPENAI_GPT51_REASONING_EFFORTS
-        if minor is not None and int(minor) > 1:
+    if _OPENAI_GPT5_PRO_RE.match(normalized_model):
+        efforts: Sequence[str] = ("high",)
+    elif _OPENAI_GPT5_LATER_PRO_RE.match(normalized_model):
+        efforts = _OPENAI_GPT5_LATER_PRO_EFFORTS
+    elif _OPENAI_O_SERIES_RE.match(normalized_model) or _OPENAI_GPT_OSS_RE.match(normalized_model):
+        efforts = _OPENAI_LOW_MEDIUM_HIGH
+    elif _OPENAI_GPT6_ASTRA_RE.match(normalized_model):
+        efforts = _OPENAI_GPT6_ASTRA_EFFORTS
+    elif _OPENAI_GPT6_RE.match(normalized_model):
+        efforts = _OPENAI_GPT56_EFFORTS
+    else:
+        version_match = _OPENAI_GPT5_MINOR_RE.match(normalized_model)
+        if version_match is None:
             return cast("Sequence[str]", REASONING_EFFORTS)
-        return _OPENAI_PRE_GPT51_REASONING_EFFORTS
 
-    if _OPENAI_REASONING_MODEL_RE.match(normalized_model):
-        return _OPENAI_PRE_GPT51_REASONING_EFFORTS
+        minor = version_match.group(1)
+        if minor is None:
+            efforts = _OPENAI_GPT5_EFFORTS
+        elif int(minor) == 1:
+            efforts = _OPENAI_GPT51_EFFORTS
+        elif int(minor) <= 5:
+            efforts = _OPENAI_GPT52_TO_55_EFFORTS
+        else:
+            efforts = _OPENAI_GPT56_EFFORTS
 
-    return []
+    return _apply_codex_effort_restriction(normalized_model, efforts)
 
 
 def _closest_lower_supported_effort(
